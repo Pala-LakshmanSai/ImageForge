@@ -1509,6 +1509,34 @@ textarea:disabled {
   scrollbar-width: thin;
 }
 
+.locked-manifest-placeholder {
+  display: grid;
+  min-height: 425px;
+  padding: 72px 38px;
+  place-content: center;
+  justify-items: center;
+  gap: 12px;
+  border: 1px dashed rgba(117, 148, 255, 0.2);
+  border-radius: 19px;
+  background:
+    radial-gradient(circle at 50% 30%, rgba(69, 88, 178, 0.13), transparent 14rem),
+    rgba(11, 14, 31, 0.3);
+  color: #9eb1ff;
+  text-align: center;
+}
+
+.locked-manifest-placeholder strong {
+  color: var(--text-soft);
+  font-size: 14px;
+}
+
+.locked-manifest-placeholder span {
+  max-width: 360px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.65;
+}
+
 .virtual-list__spacer {
   position: relative;
 }

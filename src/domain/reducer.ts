@@ -305,6 +305,17 @@ export function canStartBatch(state: AppState): boolean {
 
 export function batchCounts(batch: BatchState | null) {
   if (!batch) return { total: 0, completed: 0, failed: 0, pending: 0, progress: 0 };
+  if (batch.phase === 'locked' && batch.reportedProgress) {
+    const { total, completed, failed, cancelled } = batch.reportedProgress;
+    const settled = completed + failed + cancelled;
+    return {
+      total,
+      completed,
+      failed,
+      pending: Math.max(0, total - settled),
+      progress: total === 0 ? 0 : Math.round((settled / total) * 100),
+    };
+  }
   const completed = batch.prompts.filter((prompt) => prompt.status === 'downloaded').length;
   const failed = batch.prompts.filter((prompt) => prompt.status === 'failed').length;
   const pending = batch.prompts.length - completed - failed;
@@ -625,9 +636,13 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         };
       }
       const suffix = state.settings.editorialSuffixEnabled ? state.settings.editorialSuffix.trim() : '';
-      const prompts: BatchPrompt[] = state.draft.prompts.map((prompt) => ({
+      const baseSeed = state.draft.prompts[0]?.seed ?? 100_000;
+      const prompts: BatchPrompt[] = state.draft.prompts.map((prompt, index) => ({
         ...prompt,
         text: suffix ? `${prompt.text} ${suffix}` : prompt.text,
+        // The worker accepts one base seed and assigns contiguous ordered
+        // seeds. Keep the renderer manifest byte-for-byte consistent.
+        seed: baseSeed + index,
         status: 'pending',
         attempts: 0,
       }));

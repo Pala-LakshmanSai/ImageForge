@@ -31,7 +31,8 @@ export type PromptStatus =
   | 'ready'
   | 'downloading'
   | 'downloaded'
-  | 'failed';
+  | 'failed'
+  | 'cancelled';
 
 export type OperationalScenario =
   | 'offline'
@@ -123,6 +124,13 @@ export interface BatchState {
   estimatedCost: number;
   lockMessage: string | null;
   statusMessage: string;
+  reportedProgress?: {
+    total: number;
+    completed: number;
+    failed: number;
+    cancelled: number;
+    currentIndex: number | null;
+  };
 }
 
 export interface LibraryAsset {

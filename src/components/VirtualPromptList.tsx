@@ -18,6 +18,8 @@ function statusLabel(prompt: BatchPrompt) {
       return 'Downloading';
     case 'failed':
       return 'Needs retry';
+    case 'cancelled':
+      return 'Cancelled';
     default:
       return 'Waiting';
   }
@@ -28,7 +30,7 @@ function RowStatus({ prompt }: { prompt: BatchPrompt }) {
   if (prompt.status === 'generating') return <LoaderCircle className="spin" size={15} aria-hidden="true" />;
   if (prompt.status === 'retrying') return <RotateCw className="spin" size={15} aria-hidden="true" />;
   if (prompt.status === 'downloading' || prompt.status === 'ready') return <Download size={15} aria-hidden="true" />;
-  if (prompt.status === 'failed') return <AlertTriangle size={15} aria-hidden="true" />;
+  if (prompt.status === 'failed' || prompt.status === 'cancelled') return <AlertTriangle size={15} aria-hidden="true" />;
   return <span className="prompt-row__pending-dot" aria-hidden="true" />;
 }
 

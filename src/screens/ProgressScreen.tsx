@@ -142,7 +142,7 @@ export function ProgressScreen({ state, dispatch }: ScreenProps) {
             <PhaseBadge tone={phaseTone(batch.phase)}>{batch.phase.replace('_', ' ')}</PhaseBadge>
           </div>
           <h1>{batch.name}</h1>
-          <p>{batch.owner} · {batch.prompts.length} ordered frames · {state.pod.gpu ?? 'GPU disconnected'} · {batch.destination}</p>
+          <p>{batch.owner} · {counts.total} ordered frames · {state.pod.gpu ?? 'GPU disconnected'} · {batch.destination}</p>
         </div>
         <div className="page-heading__actions progress-actions">
           {isControllable ? (
@@ -223,7 +223,15 @@ export function ProgressScreen({ state, dispatch }: ScreenProps) {
             <span><i className="legend-dot legend-dot--live" /> {batch.phase === 'running' ? `1 ${selectedPrompt?.status ?? 'active'}` : '0 active'}</span>
             <span><i className="legend-dot legend-dot--wait" /> {counts.pending} waiting</span>
           </div>
-          <VirtualPromptList prompts={batch.prompts} selectedId={selectedPrompt?.id} onSelect={(prompt) => setSelectedId(prompt.id)} />
+          {isLocked ? (
+            <div className="locked-manifest-placeholder">
+              <LockKeyhole size={29} />
+              <strong>Prompt text stays private to {batch.owner}</strong>
+              <span>You can see overall progress only. No images or prompts will download to this computer.</span>
+            </div>
+          ) : (
+            <VirtualPromptList prompts={batch.prompts} selectedId={selectedPrompt?.id} onSelect={(prompt) => setSelectedId(prompt.id)} />
+          )}
         </section>
 
         <aside className="panel preview-panel">
