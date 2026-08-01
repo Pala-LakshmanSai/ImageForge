@@ -21,9 +21,9 @@ task through opportunistic refactors.
 - Start or stop RunPod only after an explicit user click. Never add idle or
   automatic termination.
 - Discover live GPU inventory on every start. Prefer the lowest measured
-  cost-per-image among the approved NVIDIA 16-32 GB pool, with RTX 4090 as the
-  cold default. Professional 48 GB GPUs are an explicit emergency tier, never
-  a silent high-cost fallback.
+  cost-per-image among the fixed EU-RO-1 Secure pool, with RTX 4090 as the cold
+  default. RTX 2000 Ada is the only slow, explicit emergency option; never add
+  an unapproved high-cost GPU silently.
 - Stream/pull completed images to the requesting device while generation
   continues. Persist manifests so downloads and interrupted jobs can resume.
 - Store secrets in the OS credential store or runtime secrets, never source,
@@ -49,7 +49,8 @@ task through opportunistic refactors.
 - Desktop: Tauri 2. Keep privileged filesystem, credential, and RunPod calls in
   Rust commands where practical; expose narrow typed interfaces to React.
 - Worker: Python 3.11, FastAPI, Pydantic, PyTorch/Diffusers, JSON manifests with
-  atomic replacement, and one process-level generation controller.
+  atomic replacement, one process-level generation controller, and a
+  shared-volume lease that excludes duplicate worker processes/Pods.
 - Share API types through checked-in schemas. Validate every external response.
 - Use deterministic fake adapters for client and worker tests; real paid GPU
   tests are a separate explicit test stage.

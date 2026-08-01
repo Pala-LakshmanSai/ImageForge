@@ -31,17 +31,12 @@ Approved IDs:
 
 - `NVIDIA GeForce RTX 4090`
 - `NVIDIA GeForce RTX 5090`
-- `NVIDIA GeForce RTX 5080`
-- `NVIDIA GeForce RTX 4080 SUPER`
-- `NVIDIA GeForce RTX 4080`
-- `NVIDIA GeForce RTX 3090 Ti`
-- `NVIDIA GeForce RTX 3090`
 - `NVIDIA L4`
-- `NVIDIA RTX A5000`
 - `NVIDIA RTX A4500`
 - `NVIDIA RTX 4000 Ada Generation`
 - RTX PRO 4500 Blackwell (use the exact catalog ID)
 - RTX PRO 4000 Blackwell (use the exact catalog ID)
+- `NVIDIA RTX 2000 Ada Generation` (slow emergency opt-in only)
 
 The current studio profile targets `EU-RO-1`. Its observed cold-start priority
 is RTX 4090, RTX PRO 4500 Blackwell, RTX 5090, RTX PRO 4000 Blackwell, L4, RTX
@@ -54,11 +49,15 @@ hourly price alone.
 The 16 GB candidates remain eligible because the pinned 4B BF16 checkpoint is
 documented at roughly 13 GB, but each must pass the real 1280x720 smoke gate.
 
-Emergency opt-in IDs are `NVIDIA A40`, `NVIDIA RTX A6000`, `NVIDIA L40`, and
-`NVIDIA L40S`; RTX 2000 Ada is also emergency-only because its throughput may
-be impractical for 300-450 images. They are compatible but may be poor value.
-Never include them in an ordinary create request unless the user explicitly
-enables the emergency tier after seeing the current hourly estimate.
+RTX 2000 Ada is the only emergency opt-in because its throughput may be
+impractical for 300-450 images. Never include it in an ordinary create request.
+B200, RTX PRO 6000 variants, A40/A6000, L40/L40S, and every GPU not listed above
+remain excluded even if the catalog reports stock.
+
+The worker image and catalog/create constraints require CUDA 13.0 or newer so
+the same immutable image covers both Ada/Ampere fallbacks and RTX 50/RTX PRO
+Blackwell. A host that cannot satisfy that runtime is unavailable, not a reason
+to install or change software during Pod boot.
 
 ## Selection formula
 
