@@ -193,3 +193,17 @@ the recovery poll observes it.
 - Direct macOS Windows cross-build remains intentionally unsupported: the
   target fails in `aws-lc-sys` without `windows.h`, `stdlib.h`, and an MSVC/Windows
   SDK. The native Windows workflow is the authoritative installer path.
+
+## Windows native portability repair — `83e3d4d`
+
+- The first native Windows run also exposed use of Rust's unstable
+  `std::os::windows::fs::MetadataExt` identity methods. ImageForge now uses the
+  stable Win32 `CreateFileW`/`GetFileInformationByHandle` contract with explicit
+  handle closure, and enables the required `Win32_Security` feature in
+  `windows-sys`.
+- macOS native Rust tests remain green (38/38). A minimal removable-disk
+  Windows-target compile of the exact Win32 API usage passed. The authoritative
+  `windows-latest` NSIS workflow now compiles the full native Windows test
+  target with `cargo test --no-run` before packaging. The complete Rust suite
+  remains covered by the removable-disk macOS run; this avoids a
+  runner-hosted credential/UI test holding the installer job indefinitely.

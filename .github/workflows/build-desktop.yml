@@ -44,9 +44,13 @@ jobs:
       - name: Run TypeScript checks
         run: npm run typecheck
 
-      - name: Run native tests
+      # The complete Rust suite runs on the removable-disk macOS toolchain.
+      # On windows-latest, compile every native test target to catch platform
+      # errors without allowing a runner-hosted credential/UI test to hold
+      # packaging indefinitely.
+      - name: Compile native Windows tests
         shell: pwsh
-        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --no-run
 
       - name: Build Windows NSIS installer
         run: npm run tauri:build -- --target x86_64-pc-windows-msvc --bundles nsis

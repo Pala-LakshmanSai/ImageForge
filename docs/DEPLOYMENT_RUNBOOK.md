@@ -47,8 +47,9 @@ digest:
 - Network volume: `imageforge-prod-50gb` (`ukh207b26r`)
 - Data center: `EU-RO-1`
 
-The template still requires the paid smoke gate and model-cache preparation
-below before production batches are declared ready.
+The pinned template has passed the paid smoke and EU-RO-1 shared-volume gates
+documented below. Keep the model-cache preparation and release checks in the
+runbook for any future worker-image or volume change.
 
 ## 2. Worker authentication
 
@@ -108,8 +109,8 @@ even if a hand-edited profile asks for one.
 There is deliberately no idle timer or automatic termination. If both editors
 press Start simultaneously, every matching Pod is shown as a duplicate-cost
 warning and neither is silently deleted. The shared-volume worker lease is a
-defense-in-depth control, not a deployment guarantee, until the exact
-EU-RO-1 two-Pod gate below has passed for the selected volume and image.
+defense-in-depth control, and the selected EU-RO-1 volume/image combination has
+passed the two-Pod qualification below.
 
 ## 6. Release-only paid checks
 
