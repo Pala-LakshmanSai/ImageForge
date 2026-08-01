@@ -381,7 +381,7 @@ fn navigation_allowed(url: &url::Url) -> bool {
         && url.username().is_empty()
         && url.password().is_none()
         && url.query().is_none()
-        && matches!(url.path(), "/" | "/index.html")
+        && !url.path().contains('\\')
 }
 
 #[tauri::command]
@@ -547,6 +547,9 @@ mod tests {
     fn top_level_navigation_is_restricted_to_the_app_origin() {
         assert!(navigation_allowed(
             &url::Url::parse("tauri://localhost/index.html").unwrap()
+        ));
+        assert!(navigation_allowed(
+            &url::Url::parse("tauri://localhost/assets/index.js").unwrap()
         ));
         assert!(navigation_allowed(
             &url::Url::parse("http://tauri.localhost/").unwrap()
