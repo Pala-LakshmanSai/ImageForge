@@ -54,7 +54,11 @@ covered by tests.
   keyboard pass is still pending.
 - Native Tauri command checks are green: 36 Rust tests pass, including bounded
   authenticated WebP preview validation and macOS canonical-path coverage.
-  A final bundled-app launch check remains pending.
+- The rebuilt macOS debug bundle was launched from the external build volume;
+  its bundled `tauri://localhost` page rendered the first-run assistant and
+  advancing step 1 placed focus in the step-2 RunPod key field. The packaged
+  navigation/CSP boundary now allows same-origin asset paths while retaining
+  external-origin rejection.
 - Run the integrated 450-item restart/download endurance scenario.
 - Run Windows CI and installer smoke test on a Windows runner.
 - Run explicitly authorized real-GPU smoke benchmarks before enabling measured
