@@ -15,7 +15,7 @@ import {
   type FetchTransport,
   validateRunPodBaseUrl,
 } from "./http.js";
-import { deriveRunPodProxyUrl } from "./proxy.js";
+import { deriveRunPodProxyUrl, validateRunPodPodId } from "./proxy.js";
 import {
   type ApprovedGpuId,
   type AvailabilityLevel,
@@ -378,6 +378,10 @@ export class RunPodRestProvider implements RunPodProvider {
   readonly #baseUrl: string;
   readonly #inventorySource: GpuInventorySource;
   #catalogApprovedGpuPolicies = new Map<ApprovedGpuId, string>();
+  #verifiedManagedGpuPolicies = new Map<
+    string,
+    { readonly gpuId: ApprovedGpuId; readonly policyKey: string }
+  >();
 
   constructor(options: RunPodRestProviderOptions) {
     this.#client = new AuthorizedRestClient(options.apiKeyProvider, options.fetchTransport);
@@ -653,6 +657,7 @@ export class RunPodRestProvider implements RunPodProvider {
     criteria: PodDiscoveryCriteria,
     signal?: AbortSignal,
   ): Promise<ManagedPod | null> {
+    validateRunPodPodId(podId);
     const response = await this.#client.request(
       `${this.#baseUrl}/pods/${encodeURIComponent(podId)}?includeMachine=true&includeNetworkVolume=true`,
       {
@@ -689,6 +694,7 @@ export class RunPodRestProvider implements RunPodProvider {
   }
 
   async terminatePod(podId: string, signal?: AbortSignal): Promise<void> {
+    validateRunPodPodId(podId);
     await this.#client.request(`${this.#baseUrl}/pods/${encodeURIComponent(podId)}`, {
       method: "DELETE",
       operation: "terminate_pod",
@@ -769,10 +775,15 @@ export class RunPodRestProvider implements RunPodProvider {
         `${field}.gpu.displayName`,
       );
       const count = asNumber(gpu.count, operation, `${field}.gpu.count`);
+      const podApprovedPolicies = new Map(this.#catalogApprovedGpuPolicies);
+      const verified = this.#verifiedManagedGpuPolicies.get(id);
+      if (verified !== undefined && verified.gpuId === value) {
+        podApprovedPolicies.set(value, verified.policyKey);
+      }
       const approved = approveManagedPodGpu(
         value,
         displayName,
-        this.#catalogApprovedGpuPolicies,
+        podApprovedPolicies,
         createResponse ? criteria.includeEmergencyGpuTier : true,
       );
       if (approved === null && isDynamicGpuDisplayName(displayName)) {
@@ -834,7 +845,7 @@ export class RunPodRestProvider implements RunPodProvider {
       `${field}.createdAt`,
     );
 
-    return Object.freeze({
+    const parsed = Object.freeze({
       id,
       name,
       status: parsePodStatus(desiredStatus, createResponse),
@@ -852,5 +863,15 @@ export class RunPodRestProvider implements RunPodProvider {
       startRequestId: extractStartRequestId(name, criteria.podNamePrefix),
       proxyUrl: deriveRunPodProxyUrl(id, criteria.workerPort),
     });
+    const approvedPolicy = gpuId === null
+      ? undefined
+      : approveManagedPodGpu(gpuId, gpuDisplayName ?? "", this.#catalogApprovedGpuPolicies, true);
+    if (approvedPolicy !== null && approvedPolicy !== undefined) {
+      this.#verifiedManagedGpuPolicies.set(id, Object.freeze({
+        gpuId: approvedPolicy.gpuId,
+        policyKey: approvedPolicy.policyKey,
+      }));
+    }
+    return parsed;
   }
 }

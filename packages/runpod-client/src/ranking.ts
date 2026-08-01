@@ -82,12 +82,6 @@ export function rankGpuOffers(input: RankGpuOffersInput): readonly RankedGpuOffe
     });
   }
 
-  const profiles = latestComparableProfiles(input.benchmarkProfiles, input.benchmarkContract);
-  const comparableProfileCount = new Set(
-    input.offers
-      .map((offer) => offer.gpuId)
-      .filter((gpuId) => profiles.has(gpuId)),
-  ).size;
   const available = input.offers.filter(
     (offer) =>
       offer.volumeCompatible &&
@@ -95,6 +89,10 @@ export function rankGpuOffers(input: RankGpuOffersInput): readonly RankedGpuOffe
       (offer.hourlyPriceUsd === null ||
         (Number.isFinite(offer.hourlyPriceUsd) && offer.hourlyPriceUsd > 0)),
   );
+  const profiles = latestComparableProfiles(input.benchmarkProfiles, input.benchmarkContract);
+  const comparableProfileCount = new Set(
+    available.map((offer) => offer.gpuId).filter((gpuId) => profiles.has(gpuId)),
+  ).size;
 
   const estimated = available.map((offer) => {
     const profile = comparableProfileCount >= 2 ? profiles.get(offer.gpuId) : undefined;

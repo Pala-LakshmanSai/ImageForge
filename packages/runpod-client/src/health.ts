@@ -1,9 +1,14 @@
 import { RunPodClientError, asRunPodClientError } from "./errors.js";
 import type { FetchTransport } from "./http.js";
 import { WORKER_PHASES, type WorkerHealth, type WorkerHealthProbe } from "./types.js";
-import { asNumber, asRecord, asString } from "./validation.js";
+import { asBoolean, asNonEmptyString, asNumber, asRecord, asString } from "./validation.js";
 
 const RUNPOD_PROXY_HOST = /^[A-Za-z0-9][A-Za-z0-9-]{0,57}-8000\.proxy\.runpod\.net$/;
+const WORKER_SERVICE = "imageforge-worker";
+const WORKER_VERSION = "0.1.0";
+const MODEL_ID = "black-forest-labs/FLUX.2-klein-4B";
+const MODEL_REVISION = "e7b7dc27f91deacad38e78976d1f2b499d76a294";
+const MODEL_PRECISION = "bfloat16";
 
 export interface HttpWorkerHealthProbeOptions {
   readonly fetchTransport?: FetchTransport;
@@ -46,12 +51,34 @@ export class HttpWorkerHealthProbe implements WorkerHealthProbe {
 
     endpoint.pathname = "/v1/health";
     try {
-      const response = await this.#fetch(endpoint.toString(), {
+      const fetchPromise = this.#fetch(endpoint.toString(), {
         method: "GET",
         headers: { Accept: "application/json" },
         redirect: "error",
         ...(signal === undefined ? {} : { signal }),
       });
+      const response = signal === undefined
+        ? await fetchPromise
+        : await new Promise<Response>((resolve, reject) => {
+            if (signal.aborted) {
+              reject(new RunPodClientError({
+                code: "operation_aborted",
+                message: "The worker health request was cancelled.",
+                operation: "worker_health",
+              }));
+              return;
+            }
+            const onAbort = (): void => reject(new RunPodClientError({
+              code: "operation_aborted",
+              message: "The worker health request was cancelled.",
+              operation: "worker_health",
+            }));
+            signal.addEventListener("abort", onAbort, { once: true });
+            fetchPromise.then(
+              (value) => { signal.removeEventListener("abort", onAbort); resolve(value); },
+              (error: unknown) => { signal.removeEventListener("abort", onAbort); reject(error); },
+            );
+          });
       if (!response.ok) {
         throw new RunPodClientError({
           code: "api_request_failed",
@@ -80,27 +107,58 @@ export class HttpWorkerHealthProbe implements WorkerHealthProbe {
         "response.schema_version",
       );
       const phase = asString(health.phase, "worker_health", "response.phase");
-      if (schemaVersion !== 1 || !(WORKER_PHASES as readonly string[]).includes(phase)) {
+      const service = asNonEmptyString(health.service, "worker_health", "response.service");
+      const version = asNonEmptyString(health.version, "worker_health", "response.version");
+      const process = asRecord(health.process, "worker_health", "response.process");
+      const model = asRecord(health.model, "worker_health", "response.model");
+      const gpu = asRecord(health.gpu, "worker_health", "response.gpu");
+      if (
+        schemaVersion !== 1 ||
+        service !== WORKER_SERVICE ||
+        version !== WORKER_VERSION ||
+        !(WORKER_PHASES as readonly string[]).includes(phase) ||
+        asString(process.status, "worker_health", "response.process.status") !== "ok" ||
+        asNumber(process.uptime_ms, "worker_health", "response.process.uptime_ms") < 0 ||
+        asString(model.id, "worker_health", "response.model.id") !== MODEL_ID ||
+        asString(model.revision, "worker_health", "response.model.revision") !== MODEL_REVISION ||
+        asString(model.precision, "worker_health", "response.model.precision") !== MODEL_PRECISION
+      ) {
         throw new RunPodClientError({
           code: "api_response_invalid",
           message: "The ImageForge worker returned an unsupported health contract.",
           operation: "worker_health",
         });
       }
-      let phaseProgress: number | null = null;
-      if (health.phase_progress !== null && health.phase_progress !== undefined) {
-        phaseProgress = asNumber(
-          health.phase_progress,
-          "worker_health",
-          "response.phase_progress",
-        );
-        if (phaseProgress < 0 || phaseProgress > 1) {
-          throw new RunPodClientError({
-            code: "api_response_invalid",
-            message: "The ImageForge worker returned invalid phase progress.",
-            operation: "worker_health",
-          });
-        }
+      const phaseProgress = asNumber(
+        health.phase_progress,
+        "worker_health",
+        "response.phase_progress",
+      );
+      const modelStatus = asString(model.status, "worker_health", "response.model.status");
+      const gpuState = asString(gpu.state, "worker_health", "response.gpu.state");
+      const gpuAvailable = asBoolean(gpu.available, "worker_health", "response.gpu.available");
+      const gpuApproved = asBoolean(gpu.approved, "worker_health", "response.gpu.approved");
+      const deviceCount = asNumber(gpu.device_count, "worker_health", "response.gpu.device_count");
+      const expectedModelStatus = phase === "ready" ? "ready" : phase === "error" ? "error" : "loading";
+      const gpuReady = gpuState === "ready";
+      const phaseRequiresGpu = phase === "warmup" || phase === "ready";
+      if (
+        phaseProgress < 0 ||
+        phaseProgress > 1 ||
+        modelStatus !== expectedModelStatus ||
+        !Number.isInteger(deviceCount) ||
+        (deviceCount !== 0 && deviceCount !== 1) ||
+        (gpuState !== "loading" && gpuState !== "ready") ||
+        (gpuReady && (!gpuAvailable || !gpuApproved || deviceCount !== 1)) ||
+        (!gpuReady && (gpuAvailable || gpuApproved || deviceCount !== 0)) ||
+        (phaseRequiresGpu && !gpuReady) ||
+        (phase === "ready" && phaseProgress !== 1)
+      ) {
+        throw new RunPodClientError({
+          code: "api_response_invalid",
+          message: "The ImageForge worker returned inconsistent readiness data.",
+          operation: "worker_health",
+        });
       }
       return Object.freeze({
         schemaVersion: 1,

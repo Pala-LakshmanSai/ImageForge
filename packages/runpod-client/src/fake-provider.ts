@@ -4,7 +4,7 @@ import {
   approveManagedPodGpu,
   isDynamicGpuDisplayName,
 } from "./gpu-policy.js";
-import { deriveRunPodProxyUrl } from "./proxy.js";
+import { deriveRunPodProxyUrl, validateRunPodPodId } from "./proxy.js";
 import type {
   ApprovedGpuId,
   CreatePodFromTemplateRequest,
@@ -61,6 +61,7 @@ export class FakeRunPodProvider implements RunPodProvider {
   #terminateHook: TerminateHook | null = null;
   #nextActualGpuId: ApprovedGpuId | null = null;
   #catalogApprovedGpuPolicies = new Map<ApprovedGpuId, string>();
+  #verifiedManagedGpuPolicies = new Map<string, { readonly gpuId: ApprovedGpuId; readonly policyKey: string }>();
 
   constructor(options: FakeRunPodProviderOptions = {}) {
     this.#inventory = [...(options.inventory ?? [])];
@@ -219,6 +220,7 @@ export class FakeRunPodProvider implements RunPodProvider {
     criteria: PodDiscoveryCriteria,
     _signal?: AbortSignal,
   ): Promise<ManagedPod | null> {
+    validateRunPodPodId(podId);
     this.calls.get.push(Object.freeze({ podId, criteria: Object.freeze({ ...criteria }) }));
     this.#throwFailure("get");
     const pod = this.#pods.find(
@@ -228,6 +230,7 @@ export class FakeRunPodProvider implements RunPodProvider {
   }
 
   async terminatePod(podId: string, _signal?: AbortSignal): Promise<void> {
+    validateRunPodPodId(podId);
     this.calls.terminate.push(podId);
     this.#throwFailure("terminate");
     await this.#terminateHook?.(podId, this);
@@ -266,10 +269,15 @@ export class FakeRunPodProvider implements RunPodProvider {
     if (!identityMatches || pod.gpuId === null || pod.gpuDisplayName === null) {
       return false;
     }
+    const podApprovedPolicies = new Map(this.#catalogApprovedGpuPolicies);
+    const verified = this.#verifiedManagedGpuPolicies.get(pod.id);
+    if (verified !== undefined && verified.gpuId === pod.gpuId) {
+      podApprovedPolicies.set(pod.gpuId, verified.policyKey);
+    }
     const approved = approveManagedPodGpu(
       pod.gpuId,
       pod.gpuDisplayName,
-      this.#catalogApprovedGpuPolicies,
+      podApprovedPolicies,
       true,
     );
     if (approved === null && isDynamicGpuDisplayName(pod.gpuDisplayName)) {
@@ -281,6 +289,12 @@ export class FakeRunPodProvider implements RunPodProvider {
         retryable: true,
         details: { field: "pod.gpu.id" },
       });
+    }
+    if (approved !== null) {
+      this.#verifiedManagedGpuPolicies.set(pod.id, Object.freeze({
+        gpuId: approved.gpuId,
+        policyKey: approved.policyKey,
+      }));
     }
     return approved !== null;
   }

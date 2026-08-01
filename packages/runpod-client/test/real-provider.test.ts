@@ -686,6 +686,89 @@ describe("RunPodRestProvider", () => {
     assert.equal(capturedUrl, "https://rest.runpod.io/v1/pods/podtodelete1");
   });
 
+  it("rejects every unsafe Pod ID before GET or DELETE URL construction", async () => {
+    let fetchCalls = 0;
+    const provider = new RunPodRestProvider({
+      apiKeyProvider: () => "test-key",
+      fetchTransport: (async () => {
+        fetchCalls += 1;
+        return new Response(null, { status: 204 });
+      }) as FetchTransport,
+      inventorySource: unusedInventory,
+    });
+
+    for (const podId of ["", ".", "..", "/", "%2e", "%2e%2e", "pod/child", "pod%2fchild"]) {
+      await assert.rejects(
+        () => provider.getPod(podId, discoveryCriteria),
+        (error: unknown) => error instanceof RunPodClientError && error.code === "api_response_invalid",
+      );
+      await assert.rejects(
+        () => provider.terminatePod(podId),
+        (error: unknown) => error instanceof RunPodClientError && error.code === "api_response_invalid",
+      );
+    }
+    assert.equal(fetchCalls, 0);
+  });
+
+  it("revalidates and deletes only a previously bound dynamic-GPU Pod after catalog omission", async () => {
+    const dynamicGpuId = "catalog-pro-stop-bound-v1";
+    let catalogOffers = [makeOffer({
+      gpuId: dynamicGpuId,
+      displayName: "RTX PRO 4500 Blackwell",
+      memoryGb: 32,
+      policyKey: "rtx_pro_4500_blackwell",
+      coldPriority: 1,
+    })];
+    const deleted: string[] = [];
+    const dynamicPod = validPodResponse({
+      id: "dynamicstop1",
+      gpu: { id: dynamicGpuId, displayName: "RTX PRO 4500 Blackwell", count: 1 },
+    });
+    const provider = new RunPodRestProvider({
+      apiKeyProvider: () => "test-key",
+      inventorySource: { async listGpuInventory() { return catalogOffers; } },
+      fetchTransport: (async (input, init) => {
+        const url = String(input);
+        if (init?.method === "DELETE") {
+          deleted.push(url);
+          return new Response(null, { status: 204 });
+        }
+        if (url.includes("/pods/dynamicstop1?")) return jsonResponse(dynamicPod);
+        if (url.includes("/pods/unbounddynamic1?")) {
+          return jsonResponse({ ...dynamicPod, id: "unbounddynamic1" });
+        }
+        return jsonResponse([dynamicPod]);
+      }) as FetchTransport,
+    });
+    const controller = new RunPodLifecycleController({
+      provider,
+      config: makeConfig(),
+      workerHealthProbe: new FakeWorkerHealthProbe(),
+      tokenFactory: () => "dynamic-stop-token",
+    });
+    assert.deepEqual((await controller.refresh()).pods.map((pod) => pod.id), ["dynamicstop1"]);
+    catalogOffers = [];
+    assert.deepEqual((await controller.refresh()).pods.map((pod) => pod.id), ["dynamicstop1"]);
+
+    assert.equal((await provider.getPod("dynamicstop1", discoveryCriteria))?.id, "dynamicstop1");
+    await assert.rejects(
+      () => provider.getPod("unbounddynamic1", discoveryCriteria),
+      (error: unknown) => error instanceof RunPodClientError && error.code === "api_response_invalid",
+    );
+    const confirmation = controller.requestStopConfirmation({
+      intent: "stop_gpu",
+      source: "foreground_user",
+      podId: "dynamicstop1",
+    });
+    await controller.stopGpu({
+      intent: "confirm_stop_gpu",
+      source: "foreground_user",
+      podId: "dynamicstop1",
+      confirmationToken: confirmation.token,
+    });
+    assert.deepEqual(deleted, ["https://rest.runpod.io/v1/pods/dynamicstop1"]);
+  });
+
   it("never includes the API key or upstream response body in errors", async () => {
     const apiKey = "super-secret-key-value";
     let capturedUrl = "";

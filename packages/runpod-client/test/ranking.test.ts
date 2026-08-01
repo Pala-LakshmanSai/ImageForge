@@ -119,6 +119,45 @@ describe("rankGpuOffers", () => {
     assert.ok(ranked.every((offer) => offer.estimatedJobCostUsd === null));
   });
 
+  it("counts benchmark quorum only among currently eligible offers", () => {
+    const ranked = rankGpuOffers({
+      offers: [
+        makeOffer({ hourlyPriceUsd: 0.4 }),
+        makeOffer({
+          gpuId: "NVIDIA GeForce RTX 5090",
+          policyKey: "rtx_5090",
+          coldPriority: 2,
+          hourlyPriceUsd: 0.1,
+          availability: "none",
+        }),
+      ],
+      benchmarkProfiles: [
+        {
+          gpuId: "NVIDIA GeForce RTX 4090",
+          measuredAt: "2026-07-01T00:00:00.000Z",
+          promptSampleSize: 30,
+          bootSeconds: 600,
+          secondsPerImage: 10,
+          contract: benchmarkContract,
+        },
+        {
+          gpuId: "NVIDIA GeForce RTX 5090",
+          measuredAt: "2026-07-01T00:00:00.000Z",
+          promptSampleSize: 30,
+          bootSeconds: 1,
+          secondsPerImage: 1,
+          contract: benchmarkContract,
+        },
+      ],
+      benchmarkContract,
+      expectedImageCount: 450,
+    });
+
+    assert.equal(ranked.length, 1);
+    assert.equal(ranked[0]?.rankingMode, "safe_4090_default");
+    assert.equal(ranked[0]?.estimatedJobCostUsd, null);
+  });
+
   it("keeps the explicitly enabled emergency GPU behind every normal candidate", () => {
     const ranked = rankGpuOffers({
       offers: [

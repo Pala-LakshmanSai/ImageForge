@@ -471,6 +471,147 @@ describe("RunPodLifecycleController refresh and start", () => {
     );
   });
 
+  it("retains an omitted created Pod across a second explicit Start and never creates a duplicate", async () => {
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()] });
+    provider.onCreate((request) => makePod({
+      id: "eventualcreated1",
+      name: request.name,
+      startRequestId: request.startRequestId,
+      status: "provisioning",
+    }));
+    const controller = makeController(provider);
+
+    const first = await controller.startGpu({
+      intent: "start_gpu",
+      source: "foreground_user",
+      requestId: "eventualrequest1",
+    });
+    const second = await controller.startGpu({
+      intent: "start_gpu",
+      source: "foreground_user",
+      requestId: "mustnotcreate2",
+    });
+
+    assert.equal(first.pod.id, "eventualcreated1");
+    assert.equal(second.outcome, "connected_existing");
+    assert.equal(second.pod.id, "eventualcreated1");
+    assert.equal(provider.calls.create.length, 1);
+    assert.ok(second.snapshot.warnings.some(
+      (warning) => warning.code === "post_create_discovery_failed" &&
+        warning.podIds.includes("eventualcreated1"),
+    ));
+  });
+
+  it("enforces a wall-clock wait bound and releases the mutation queue when inventory ignores abort", async () => {
+    const provider = new FakeRunPodProvider({
+      inventory: [makeOffer()],
+      pods: [makePod({ id: "timeoutpod1", status: "provisioning" })],
+    });
+    const originalInventory = provider.listGpuInventory.bind(provider);
+    provider.listGpuInventory = (() => new Promise(() => undefined)) as typeof provider.listGpuInventory;
+    const controller = makeController(provider);
+    const startedAt = Date.now();
+
+    await assert.rejects(
+      () => controller.waitUntilReady({ timeoutMs: 30, pollIntervalMs: 10 }),
+      (error: unknown) => error instanceof RunPodClientError && error.code === "provisioning_timeout",
+    );
+    assert.ok(Date.now() - startedAt < 500);
+
+    provider.listGpuInventory = originalInventory;
+    const refreshed = await controller.refresh();
+    assert.equal(refreshed.selectedPodId, "timeoutpod1");
+  });
+
+  it("bounds a never-resolving worker probe and propagates explicit health aborts", async () => {
+    const pod = makePod({ id: "hunghealth1", status: "running" });
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()], pods: [pod] });
+    const health = new FakeWorkerHealthProbe();
+    health.getHealth = (() => new Promise(() => undefined)) as typeof health.getHealth;
+    const controller = makeController(provider, { health });
+
+    await assert.rejects(
+      () => controller.waitUntilReady({ timeoutMs: 30, pollIntervalMs: 10 }),
+      (error: unknown) => error instanceof RunPodClientError && error.code === "provisioning_timeout",
+    );
+
+    health.getHealth = (async () => {
+      throw new RunPodClientError({
+        code: "operation_aborted",
+        message: "cancelled",
+        operation: "worker_health",
+      });
+    }) as typeof health.getHealth;
+    await assert.rejects(
+      () => controller.refresh(),
+      (error: unknown) => error instanceof RunPodClientError && error.code === "operation_aborted",
+    );
+    assert.equal(
+      controller.getSnapshot().warnings.some((warning) => warning.code === "worker_health_unreachable"),
+      false,
+    );
+  });
+
+  it("bounds Pod list and retained-Pod get calls that ignore abort", async (test) => {
+    await test.test("list discovery", async () => {
+      const provider = new FakeRunPodProvider({
+        inventory: [makeOffer()],
+        pods: [makePod({ id: "hunglist1", status: "provisioning" })],
+      });
+      provider.listImageForgePods = (() => new Promise(() => undefined)) as typeof provider.listImageForgePods;
+      const controller = makeController(provider);
+      await assert.rejects(
+        () => controller.waitUntilReady({ timeoutMs: 30, pollIntervalMs: 10 }),
+        (error: unknown) => error instanceof RunPodClientError && error.code === "provisioning_timeout",
+      );
+    });
+
+    await test.test("retained exact-ID get", async () => {
+      const provider = new FakeRunPodProvider({ inventory: [makeOffer()] });
+      provider.onCreate((request) => makePod({
+        id: "hungknownget1",
+        name: request.name,
+        startRequestId: request.startRequestId,
+        status: "provisioning",
+      }));
+      const controller = makeController(provider);
+      await controller.startGpu({
+        intent: "start_gpu",
+        source: "foreground_user",
+        requestId: "hungknownrequest1",
+      });
+      provider.getPod = (() => new Promise(() => undefined)) as typeof provider.getPod;
+      await assert.rejects(
+        () => controller.waitUntilReady({ timeoutMs: 30, pollIntervalMs: 10 }),
+        (error: unknown) => error instanceof RunPodClientError && error.code === "provisioning_timeout",
+      );
+    });
+  });
+
+  it("bounds a create call that ignores abort and permits later queue progress", async () => {
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()] });
+    provider.onCreate(() => new Promise(() => undefined));
+    const controller = makeController(provider, {
+      configOverrides: { provisioningTimeoutMs: 1_000 },
+    });
+
+    await assert.rejects(
+      () => controller.startGpu({
+        intent: "start_gpu",
+        source: "foreground_user",
+        requestId: "hungcreate1",
+      }),
+      (error: unknown) =>
+        error instanceof RunPodClientError &&
+        error.code === "provisioning_timeout" &&
+        error.mayHaveSucceeded,
+    );
+
+    const refreshed = await controller.refresh();
+    assert.equal(refreshed.phase, "offline");
+    assert.equal(provider.calls.create.length, 1);
+  });
+
   it("preserves the created Pod's actual status when immediate discovery misses it", async (test) => {
     const variants = [
       ["error", "error"],
@@ -852,5 +993,40 @@ describe("RunPodLifecycleController explicit Stop GPU", () => {
     assert.equal(controller.getSnapshot().phase, "offline");
     assert.equal(provider.calls.inventory.length, 2);
     assert.equal(provider.calls.list.length, 2);
+  });
+
+  it("settles an aborted termination whose provider never resolves and releases the queue", async () => {
+    const pod = makePod({ id: "abortstop1" });
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()], pods: [pod] });
+    const terminateEntered = deferred();
+    provider.onTerminate(() => {
+      terminateEntered.resolve();
+      return new Promise(() => undefined);
+    });
+    const controller = makeController(provider, { token: () => "abort-stop-token" });
+    await controller.refresh();
+    const confirmation = controller.requestStopConfirmation({
+      intent: "stop_gpu",
+      source: "foreground_user",
+      podId: pod.id,
+    });
+    const abort = new AbortController();
+    const pending = controller.stopGpu({
+      intent: "confirm_stop_gpu",
+      source: "foreground_user",
+      podId: pod.id,
+      confirmationToken: confirmation.token,
+    }, abort.signal);
+    await terminateEntered.promise;
+    abort.abort();
+
+    await assert.rejects(
+      () => pending,
+      (error: unknown) =>
+        error instanceof RunPodClientError &&
+        error.code === "operation_aborted" &&
+        error.mayHaveSucceeded,
+    );
+    assert.equal((await controller.refresh()).selectedPodId, pod.id);
   });
 });

@@ -11,6 +11,33 @@ export interface AuthorizedRequestOptions {
   readonly signal?: AbortSignal;
 }
 
+function awaitAuthorizedAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+  operation: RunPodOperation,
+): Promise<T> {
+  if (signal === undefined) return promise;
+  if (signal.aborted) {
+    return Promise.reject(new RunPodClientError({
+      code: "operation_aborted",
+      message: "The RunPod operation was cancelled.",
+      operation,
+    }));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(new RunPodClientError({
+      code: "operation_aborted",
+      message: "The RunPod operation was cancelled.",
+      operation,
+    }));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => { signal.removeEventListener("abort", onAbort); resolve(value); },
+      (error: unknown) => { signal.removeEventListener("abort", onAbort); reject(error); },
+    );
+  });
+}
+
 export function validateBaseUrl(value: string, field: string): string {
   let url: URL;
   try {
@@ -157,8 +184,15 @@ export class AuthorizedRestClient {
   async request(url: string, options: AuthorizedRequestOptions): Promise<Response> {
     let apiKey: string;
     try {
-      apiKey = await this.#apiKeyProvider();
-    } catch {
+      apiKey = await awaitAuthorizedAbort(
+        Promise.resolve(this.#apiKeyProvider()),
+        options.signal,
+        options.operation,
+      );
+    } catch (error) {
+      if (error instanceof RunPodClientError && error.code === "operation_aborted") {
+        throw error;
+      }
       throw new RunPodClientError({
         code: "credential_unavailable",
         message: "The RunPod credential could not be loaded from secure storage.",
@@ -183,13 +217,13 @@ export class AuthorizedRestClient {
 
     let response: Response;
     try {
-      response = await this.#fetch(url, {
+      response = await awaitAuthorizedAbort(this.#fetch(url, {
         method: options.method,
         headers,
         redirect: "error",
         ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
         ...(options.signal === undefined ? {} : { signal: options.signal }),
-      });
+      }), options.signal, options.operation);
     } catch (error) {
       if (options.signal?.aborted === true) {
         throw new RunPodClientError({

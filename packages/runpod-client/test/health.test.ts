@@ -18,7 +18,7 @@ describe("HttpWorkerHealthProbe", () => {
         capturedMethod = String(init?.method);
         capturedRedirect = String(init?.redirect);
         return new Response(
-          JSON.stringify({ schema_version: 1, phase: "gpu_load", phase_progress: 0.75 }),
+          JSON.stringify(healthPayload("gpu_load", 0.75)),
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }) as FetchTransport,
@@ -86,11 +86,72 @@ describe("HttpWorkerHealthProbe", () => {
     }
     assert.equal(fetchCalls, 0);
   });
+
+  it("rejects lookalike services, wrong model contracts, multi-GPU readiness, and inconsistent status", async () => {
+    const ready = healthPayload("ready", 1);
+    const variants = [
+      { ...ready, service: "not-imageforge" },
+      { ...ready, model: { ...(ready.model as Record<string, unknown>), revision: "latest" } },
+      { ...ready, gpu: { ...(ready.gpu as Record<string, unknown>), device_count: 2 } },
+      { ...ready, model: { ...(ready.model as Record<string, unknown>), status: "loading" } },
+    ];
+    for (const payload of variants) {
+      const probe = new HttpWorkerHealthProbe({
+        fetchTransport: (async () => jsonResponse(payload)) as FetchTransport,
+      });
+      await assert.rejects(
+        () => probe.getHealth(deriveRunPodProxyUrl("stricthealth1", 8000)),
+        (error: unknown) => error instanceof RunPodClientError && error.code === "api_response_invalid",
+      );
+    }
+  });
+
+  it("settles an abort even when the fetch transport never resolves", async () => {
+    const probe = new HttpWorkerHealthProbe({
+      fetchTransport: (() => new Promise<Response>(() => undefined)) as FetchTransport,
+    });
+    const controller = new AbortController();
+    const pending = probe.getHealth(deriveRunPodProxyUrl("aborthealth1", 8000), controller.signal);
+    controller.abort();
+    await assert.rejects(
+      () => pending,
+      (error: unknown) => error instanceof RunPodClientError && error.code === "operation_aborted",
+    );
+  });
 });
 
 function jsonHealthResponse(phase: string): Response {
-  return new Response(
-    JSON.stringify({ schema_version: 1, phase, phase_progress: 0.5 }),
-    { status: 200, headers: { "content-type": "application/json" } },
-  );
+  return jsonResponse(healthPayload(phase, phase === "ready" ? 1 : 0.5));
+}
+
+function jsonResponse(value: unknown): Response {
+  return new Response(JSON.stringify(value), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function healthPayload(phase: string, progress: number): Record<string, unknown> {
+  const ready = phase === "warmup" || phase === "ready";
+  return {
+    schema_version: 1,
+    service: "imageforge-worker",
+    version: "0.1.0",
+    process: { status: "ok", uptime_ms: 100 },
+    model: {
+      id: "black-forest-labs/FLUX.2-klein-4B",
+      revision: "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+      precision: "bfloat16",
+      status: phase === "ready" ? "ready" : phase === "error" ? "error" : "loading",
+    },
+    gpu: {
+      state: ready ? "ready" : "loading",
+      available: ready,
+      approved: ready,
+      name: ready ? "NVIDIA GeForce RTX 4090" : null,
+      device_count: ready ? 1 : 0,
+    },
+    phase,
+    phase_progress: progress,
+  };
 }

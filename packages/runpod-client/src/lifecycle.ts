@@ -1,5 +1,5 @@
 import { createRunPodClientConfig, type RunPodClientConfigInput } from "./config.js";
-import { RunPodClientError, asRunPodClientError } from "./errors.js";
+import { RunPodClientError, asRunPodClientError, type RunPodOperation } from "./errors.js";
 import { approveCatalogGpu, isEmergencyGpuId, staticGpuPolicy } from "./gpu-policy.js";
 import { buildManagedPodName } from "./real-provider.js";
 import { rankGpuOffers } from "./ranking.js";
@@ -96,6 +96,41 @@ function defaultSleep(milliseconds: number, signal?: AbortSignal): Promise<void>
   });
 }
 
+function operationAborted(operation: RunPodOperation): RunPodClientError {
+  return new RunPodClientError({
+    code: "operation_aborted",
+    message: "The RunPod operation was cancelled.",
+    operation,
+  });
+}
+
+function isSignalAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
+}
+
+function awaitWithAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+  operation: RunPodOperation,
+): Promise<T> {
+  if (signal === undefined) return promise;
+  if (signal.aborted) return Promise.reject(operationAborted(operation));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(operationAborted(operation));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 function safeErrorSummary(error: RunPodClientError): SafeErrorSummary {
   return Object.freeze({
     code: error.code,
@@ -150,6 +185,7 @@ export class RunPodLifecycleController {
   readonly #tokenFactory: TokenFactory;
   readonly #listeners = new Set<SnapshotListener>();
   readonly #confirmations = new Map<string, PendingConfirmation>();
+  readonly #knownCreatedPods = new Map<string, ManagedPod>();
   #snapshot: RunPodSnapshot;
   #startPromise: Promise<StartGpuResult> | null = null;
   #mutationTail: Promise<void> = Promise.resolve();
@@ -203,6 +239,7 @@ export class RunPodLifecycleController {
   }
 
   async #refresh(options: RefreshOptions = {}): Promise<RunPodSnapshot> {
+    if (isSignalAborted(options.signal)) throw operationAborted("list_pods");
     const expectedImageCount = validateExpectedImageCount(
       options.expectedImageCount ?? this.#snapshot.expectedImageCount,
     );
@@ -221,10 +258,19 @@ export class RunPodLifecycleController {
       dataCenterId: this.#config.networkVolumeDataCenterId,
     };
     const [inventoryResult] = await Promise.allSettled([
-      this.#provider.listGpuInventory(inventoryRequest, options.signal),
+      awaitWithAbort(
+        this.#provider.listGpuInventory(inventoryRequest, options.signal),
+        options.signal,
+        "list_pods",
+      ),
     ]);
+    if (isSignalAborted(options.signal)) throw operationAborted("list_pods");
     const [podsResult] = await Promise.allSettled([
-      this.#provider.listImageForgePods(this.#discoveryCriteria(), options.signal),
+      awaitWithAbort(
+        this.#provider.listImageForgePods(this.#discoveryCriteria(), options.signal),
+        options.signal,
+        "list_pods",
+      ),
     ]);
 
     try {
@@ -268,7 +314,9 @@ export class RunPodLifecycleController {
         benchmarkContract: this.#config.benchmarkContract,
         expectedImageCount,
       });
-      const enriched = await this.#enrichPods(podsResult.value, options.signal);
+      const retained = await this.#mergeKnownCreatedPods(podsResult.value, options.signal);
+      warnings.push(...retained.warnings);
+      const enriched = await this.#enrichPods(retained.pods, options.signal);
       warnings.push(...enriched.warnings);
       const snapshot = this.#snapshotForViews(
         inventory,
@@ -310,7 +358,27 @@ export class RunPodLifecycleController {
       return this.#startPromise;
     }
 
-    const promise = this.#enqueueMutation(() => this.#startGpu(intent)).finally(() => {
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, this.#config.provisioningTimeoutMs);
+    const queued = this.#enqueueMutation(() => this.#startGpu(intent, controller.signal));
+    const promise = awaitWithAbort(queued, controller.signal, "create_pod").catch((error: unknown) => {
+      if (!timedOut) throw error;
+      const timeoutError = new RunPodClientError({
+        code: "provisioning_timeout",
+        message: "The GPU start operation exceeded the provisioning timeout.",
+        operation: "create_pod",
+        retryable: true,
+        mayHaveSucceeded: true,
+        details: { timeoutMs: this.#config.provisioningTimeoutMs },
+      });
+      this.#publish({ ...this.#snapshot, phase: "error", error: safeErrorSummary(timeoutError) });
+      throw timeoutError;
+    }).finally(() => {
+      clearTimeout(timer);
       if (this.#startPromise === promise) {
         this.#startPromise = null;
       }
@@ -339,40 +407,81 @@ export class RunPodLifecycleController {
       });
     }
 
-    const deadline = this.#clock.now() + timeoutMs;
-    while (true) {
-      const snapshot = await this.refresh(options);
-      options.onSnapshot?.(snapshot);
-      if (snapshot.phase === "ready") {
-        return snapshot;
+    const controller = new AbortController();
+    let timedOut = false;
+    const onExternalAbort = (): void => controller.abort();
+    options.signal?.addEventListener("abort", onExternalAbort, { once: true });
+    if (options.signal?.aborted === true) controller.abort();
+    const deadline = Date.now() + timeoutMs;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+    try {
+      while (true) {
+        const snapshot = await awaitWithAbort(
+          this.refresh({
+            ...(options.expectedImageCount === undefined
+              ? {}
+              : { expectedImageCount: options.expectedImageCount }),
+            signal: controller.signal,
+          }),
+          controller.signal,
+          "wait_for_ready",
+        );
+        options.onSnapshot?.(snapshot);
+        if (snapshot.phase === "ready") {
+          return snapshot;
+        }
+        if (snapshot.selectedPodId === null) {
+          throw new RunPodClientError({
+            code: "pod_not_found",
+            message: "No active ImageForge Pod was found while waiting for readiness.",
+            operation: "wait_for_ready",
+            retryable: true,
+          });
+        }
+        if (snapshot.phase === "error") {
+          throw new RunPodClientError({
+            code: "provisioning_failed",
+            message: "The ImageForge Pod entered an error state while provisioning.",
+            operation: "wait_for_ready",
+            details: { podId: snapshot.selectedPodId },
+          });
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) {
+          throw new RunPodClientError({
+            code: "provisioning_timeout",
+            message: "The GPU did not become ready before the provisioning timeout.",
+            operation: "wait_for_ready",
+            retryable: true,
+            details: { podId: snapshot.selectedPodId, timeoutMs },
+          });
+        }
+        await awaitWithAbort(
+          this.#sleep(Math.min(pollIntervalMs, remaining), controller.signal),
+          controller.signal,
+          "wait_for_ready",
+        );
       }
-      if (snapshot.selectedPodId === null) {
-        throw new RunPodClientError({
-          code: "pod_not_found",
-          message: "No active ImageForge Pod was found while waiting for readiness.",
-          operation: "wait_for_ready",
-          retryable: true,
-        });
-      }
-      if (snapshot.phase === "error") {
-        throw new RunPodClientError({
-          code: "provisioning_failed",
-          message: "The ImageForge Pod entered an error state while provisioning.",
-          operation: "wait_for_ready",
-          details: { podId: snapshot.selectedPodId },
-        });
-      }
-      const remaining = deadline - this.#clock.now();
-      if (remaining <= 0) {
-        throw new RunPodClientError({
-          code: "provisioning_timeout",
-          message: "The GPU did not become ready before the provisioning timeout.",
-          operation: "wait_for_ready",
-          retryable: true,
-          details: { podId: snapshot.selectedPodId, timeoutMs },
-        });
-      }
-      await this.#sleep(Math.min(pollIntervalMs, remaining), options.signal);
+    } catch (error) {
+      if (!timedOut) throw error;
+      const timeoutError = new RunPodClientError({
+        code: "provisioning_timeout",
+        message: "The GPU did not become ready before the provisioning timeout.",
+        operation: "wait_for_ready",
+        retryable: true,
+        details: {
+          timeoutMs,
+          ...(this.#snapshot.selectedPodId === null ? {} : { podId: this.#snapshot.selectedPodId }),
+        },
+      });
+      this.#publish({ ...this.#snapshot, phase: "error", error: safeErrorSummary(timeoutError) });
+      throw timeoutError;
+    } finally {
+      clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onExternalAbort);
     }
   }
 
@@ -464,10 +573,10 @@ export class RunPodLifecycleController {
 
     let currentPod: ManagedPod | null;
     try {
-      currentPod = await this.#provider.getPod(
-        intent.podId,
-        this.#discoveryCriteria(),
+      currentPod = await awaitWithAbort(
+        this.#provider.getPod(intent.podId, this.#discoveryCriteria(), signal),
         signal,
+        "get_pod",
       );
     } catch (error) {
       const discoveryError = asRunPodClientError(error, {
@@ -501,7 +610,11 @@ export class RunPodLifecycleController {
       error: null,
     });
     try {
-      await this.#provider.terminatePod(intent.podId, signal);
+      await awaitWithAbort(
+        this.#provider.terminatePod(intent.podId, signal),
+        signal,
+        "terminate_pod",
+      );
     } catch (error) {
       const sourceError = asRunPodClientError(error, {
         code: "pod_termination_failed",
@@ -509,6 +622,18 @@ export class RunPodLifecycleController {
         operation: "terminate_pod",
         retryable: true,
       });
+      if (sourceError.code === "operation_aborted") {
+        const aborted = new RunPodClientError({
+          code: "operation_aborted",
+          message: "The Pod termination request was cancelled; refresh to verify its outcome.",
+          operation: "terminate_pod",
+          retryable: true,
+          mayHaveSucceeded: true,
+          details: { podId: intent.podId },
+        });
+        this.#publish({ ...this.#snapshot, phase: "error", error: safeErrorSummary(aborted) });
+        throw aborted;
+      }
       const terminationError = new RunPodClientError({
         code: "pod_termination_failed",
         message:
@@ -533,6 +658,7 @@ export class RunPodLifecycleController {
         this.#confirmations.delete(token);
       }
     }
+    this.#knownCreatedPods.delete(intent.podId);
     const remainingPods = this.#snapshot.pods.filter((pod) => pod.id !== intent.podId);
     const snapshot = this.#snapshotForViews(
       this.#snapshot.inventory,
@@ -546,7 +672,7 @@ export class RunPodLifecycleController {
     return Object.freeze({ terminatedPodId: intent.podId, snapshot: this.#snapshot });
   }
 
-  async #startGpu(intent: ForegroundStartIntent): Promise<StartGpuResult> {
+  async #startGpu(intent: ForegroundStartIntent, signal: AbortSignal): Promise<StartGpuResult> {
     const expectedImageCount = validateExpectedImageCount(
       intent.expectedImageCount ?? this.#config.defaultImageCount,
     );
@@ -556,6 +682,7 @@ export class RunPodLifecycleController {
     try {
       const refreshed = await this.#refresh({
         expectedImageCount,
+        signal,
       });
       const existing = this.#selectedReusablePod(refreshed.pods);
       if (existing !== null) {
@@ -606,11 +733,16 @@ export class RunPodLifecycleController {
       });
 
       try {
-        const created = await this.#provider.createPodFromTemplate(request);
+        const created = await awaitWithAbort(
+          this.#provider.createPodFromTemplate(request, signal),
+          signal,
+          "create_pod",
+        );
         return await this.#finishSuccessfulCreate(
           created,
           expectedImageCount,
           "created",
+          signal,
         );
       } catch (error) {
         const createError = asRunPodClientError(error, {
@@ -624,6 +756,7 @@ export class RunPodLifecycleController {
           const reconciled = await this.#reconcileAmbiguousCreate(
             startRequestId,
             expectedImageCount,
+            signal,
           );
           if (reconciled !== null) {
             return reconciled;
@@ -668,10 +801,16 @@ export class RunPodLifecycleController {
     created: ManagedPod,
     expectedImageCount: number,
     outcome: StartGpuResult["outcome"],
+    signal?: AbortSignal,
   ): Promise<StartGpuResult> {
+    this.#knownCreatedPods.set(created.id, created);
     try {
-      const pods = await this.#provider.listImageForgePods(this.#discoveryCriteria());
-      const enriched = await this.#enrichPods(pods);
+      const pods = await awaitWithAbort(
+        this.#provider.listImageForgePods(this.#discoveryCriteria(), signal),
+        signal,
+        "list_pods",
+      );
+      const enriched = await this.#enrichPods(pods, signal);
       const discoveredCreated = enriched.views.find((pod) => pod.id === created.id);
       const createdView = this.#podView(created, null, null);
       const discoveryWarnings = discoveredCreated === undefined
@@ -704,7 +843,14 @@ export class RunPodLifecycleController {
         this.#snapshot.pods.find((pod) => pod.id === created.id) ??
         createdView;
       return Object.freeze({ outcome, pod: current, snapshot: this.#snapshot });
-    } catch {
+    } catch (error) {
+      const discoveryError = asRunPodClientError(error, {
+        code: "pod_discovery_failed",
+        message: "Post-create Pod discovery failed.",
+        operation: "list_pods",
+        retryable: true,
+      });
+      if (discoveryError.code === "operation_aborted") throw discoveryError;
       const createdView = this.#podView(created, null, null);
       const existingViews = this.#snapshot.pods.filter((pod) => pod.id !== created.id);
       const warning: SnapshotWarning = Object.freeze({
@@ -729,9 +875,14 @@ export class RunPodLifecycleController {
   async #reconcileAmbiguousCreate(
     startRequestId: string,
     expectedImageCount: number,
+    signal?: AbortSignal,
   ): Promise<StartGpuResult | null> {
     try {
-      const pods = await this.#provider.listImageForgePods(this.#discoveryCriteria());
+      const pods = await awaitWithAbort(
+        this.#provider.listImageForgePods(this.#discoveryCriteria(), signal),
+        signal,
+        "list_pods",
+      );
       const matching = pods.filter(
         (pod) => pod.startRequestId === startRequestId && isActivePod(pod),
       );
@@ -742,8 +893,16 @@ export class RunPodLifecycleController {
         matching[0],
         expectedImageCount,
         "reconciled_ambiguous_create",
+        signal,
       );
-    } catch {
+    } catch (error) {
+      const discoveryError = asRunPodClientError(error, {
+        code: "pod_discovery_failed",
+        message: "Ambiguous create reconciliation failed.",
+        operation: "list_pods",
+        retryable: true,
+      });
+      if (discoveryError.code === "operation_aborted") throw discoveryError;
       return null;
     }
   }
@@ -759,9 +918,20 @@ export class RunPodLifecycleController {
           return this.#podView(pod, null, null);
         }
         try {
-          const health = await this.#workerHealthProbe.getHealth(pod.proxyUrl, signal);
+          const health = await awaitWithAbort(
+            this.#workerHealthProbe.getHealth(pod.proxyUrl, signal),
+            signal,
+            "worker_health",
+          );
           return this.#podView(pod, health, null);
-        } catch {
+        } catch (error) {
+          const healthErrorValue = asRunPodClientError(error, {
+            code: "api_network_error",
+            message: "Worker health is not reachable yet.",
+            operation: "worker_health",
+            retryable: true,
+          });
+          if (healthErrorValue.code === "operation_aborted") throw healthErrorValue;
           const healthError = "Worker health is not reachable yet.";
           warnings.push(
             Object.freeze({
@@ -776,6 +946,48 @@ export class RunPodLifecycleController {
     );
     return Object.freeze({
       views: Object.freeze(views),
+      warnings: Object.freeze(warnings),
+    });
+  }
+
+  async #mergeKnownCreatedPods(
+    discovered: readonly ManagedPod[],
+    signal?: AbortSignal,
+  ): Promise<{ readonly pods: readonly ManagedPod[]; readonly warnings: readonly SnapshotWarning[] }> {
+    const merged = new Map(discovered.map((pod) => [pod.id, pod] as const));
+    for (const pod of discovered) {
+      if (this.#knownCreatedPods.has(pod.id)) this.#knownCreatedPods.set(pod.id, pod);
+    }
+    const warnings: SnapshotWarning[] = [];
+    for (const [podId, retained] of this.#knownCreatedPods) {
+      if (merged.has(podId)) continue;
+      let verified: ManagedPod | null = null;
+      try {
+        verified = await awaitWithAbort(
+          this.#provider.getPod(podId, this.#discoveryCriteria(), signal),
+          signal,
+          "list_pods",
+        );
+      } catch (error) {
+        const knownError = asRunPodClientError(error, {
+          code: "pod_discovery_failed",
+          message: "The created Pod could not be revalidated.",
+          operation: "get_pod",
+          retryable: true,
+        });
+        if (knownError.code === "operation_aborted") throw knownError;
+      }
+      const surfaced = verified ?? retained;
+      if (verified !== null) this.#knownCreatedPods.set(podId, verified);
+      merged.set(podId, surfaced);
+      warnings.push(Object.freeze({
+        code: "post_create_discovery_failed",
+        message: "A previously created Pod is not present in list discovery and remains bound by its exact ID.",
+        podIds: Object.freeze([podId]),
+      }));
+    }
+    return Object.freeze({
+      pods: Object.freeze([...merged.values()]),
       warnings: Object.freeze(warnings),
     });
   }
