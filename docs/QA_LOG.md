@@ -145,6 +145,37 @@ warmup/generation smoke before the template is considered production-ready.
 The cross-Pod shared-volume lease gate, Windows installer smoke, and final
 packaged-app keyboard/folder-reveal checks remain separate release gates.
 
+## EU-RO-1 shared-volume qualification — `d611d99`
+
+The paid two-Pod qualification was exercised against network volume
+`ukh207b26r` in `EU-RO-1`, with both Pods using the immutable worker image
+`ghcr.io/pala-lakshmansai/imageforge-worker@sha256:084f8494c901a21e52c0c2c1025ae0c972efe87f458cfdb339743341d6ef99e0` and the
+isolated root `/workspace/imageforge-gates/9961ca9f8a8e`.
+
+- Contention pass (120 prompts): Pod `x4wut3ge1kkd7l` returned HTTP 201;
+  Pod `p6fau3p6qfw7kq` returned HTTP 423 with `batch_busy`. The observer's
+  status read returned HTTP 200 for the same batch, and its pause mutation
+  returned HTTP 423.
+- Owner-stop recovery: Pod `x4wut3ge1kkd7l` was explicitly terminated with
+  DELETE HTTP 204. Pod `p6fau3p6qfw7kq` recovered the shared manifest as
+  `interrupted` at 17/120.
+- Reversed contention pass: the roles were reversed with replacement Pod
+  `xg8bysj479efjy`; the winner returned HTTP 201, the observer returned HTTP
+  423 `batch_busy`, observer status returned HTTP 200, and observer mutation
+  returned HTTP 423. After an explicit DELETE HTTP 204 of the winner, the
+  survivor completed the 120-item manifest (`completed`, 120/120).
+- Presence/maintenance checks: an idle worker observed
+  `worker_presence_acquired=true` and `maintenance_presence_acquired=false`;
+  after all workers were absent, an explicit maintenance probe acquired the
+  maintenance lock (`true`).
+- Every paid test Pod was explicitly terminated; the final RunPod Pod list
+  contained zero active Pods.
+
+The gate harness now persists the exact HTTP statuses and accepts a bounded
+operator-selected prompt count only for keeping the owner alive through the
+recovery handoff. It also handles a survivor that finishes the manifest before
+the recovery poll observes it.
+
 ## Removable-disk release evidence — `81d0faa`
 
 - Fresh macOS Apple-silicon DMG built from the production worktree:
