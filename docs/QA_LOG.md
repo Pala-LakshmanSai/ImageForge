@@ -124,3 +124,23 @@ find a C compiler after all model weights and pipeline components loaded. The
 worker image now installs `gcc` at build time (`647c1e6`); normal Pod boot still
 performs no package installation. A fresh immutable image must pass the paid
 warmup/generation smoke before the template is considered production-ready.
+
+## Paid EU-RO-1 smoke — worker `860badb`
+
+- The first repaired image exposed a second missing build dependency: Triton's
+  CUDA helper could find `gcc` but not the standard C header `stdlib.h`.
+- The worker image now installs `libc6-dev` at build time. The published
+  immutable image is
+  `ghcr.io/pala-lakshmansai/imageforge-worker@sha256:084f8494c901a21e52c0c2c1025ae0c972efe87f458cfdb339743341d6ef99e0`.
+- The configured `imageforge-flux-worker-v1` template (`q8sfgixfy2`) points to
+  that exact digest in EU-RO-1, with the public GHCR package using no registry
+  credentials.
+- Paid smoke Pod `0ps6ojvgqcmg79` rented an RTX 4090 at `$0.69/hr`, reached
+  `phase=ready` with FLUX.2 Klein 4B BF16 revision `e7b7dc27f91deacad38e78976d1f2b499d76a294`, generated one authenticated prompt,
+  and returned a valid 1280x720 JPEG. Artifact SHA-256 was
+  `30303ebacafc94ffa6d1ff0dafe610e945a59b67d4e3146328e4bdff2cef0978`.
+- The smoke Pod was explicitly terminated and the live Pod list returned zero
+  active Pods.
+
+The cross-Pod shared-volume lease gate, Windows installer smoke, and final
+packaged-app keyboard/folder-reveal checks remain separate release gates.

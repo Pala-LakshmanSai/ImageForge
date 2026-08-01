@@ -35,8 +35,8 @@ GitHub token in the repository, desktop profile, or this runbook.
 Current immutable worker release evidence (published 2026-08-01):
 
 - Repository: `Pala-LakshmanSai/imageforge-worker`
-- Source commit: `4ee11c09f3c18610920454b70b472695714afe15`
-- Image: `ghcr.io/pala-lakshmansai/imageforge-worker@sha256:78af99a918c9baafdb9a7246e73c054cd89448edce0f3b6fd7496074128800b6`
+- Source commit: `860badbf5359085494da09234e77cf1cd9349ecd`
+- Image: `ghcr.io/pala-lakshmansai/imageforge-worker@sha256:084f8494c901a21e52c0c2c1025ae0c972efe87f458cfdb339743341d6ef99e0`
 - Architecture: `linux/amd64`
 
 The GHCR package is public, so the template uses **No credentials** for image
@@ -44,7 +44,7 @@ pulls. The ImageForge RunPod template has now been updated to this exact
 digest:
 
 - Template: `imageforge-flux-worker-v1` (`q8sfgixfy2`)
-- Network volume: `imageforge-prod-50gb` (`ukh207b26`)
+- Network volume: `imageforge-prod-50gb` (`ukh207b26r`)
 - Data center: `EU-RO-1`
 
 The template still requires the paid smoke gate and model-cache preparation
