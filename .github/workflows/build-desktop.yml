@@ -32,6 +32,12 @@ jobs:
       - name: Install JavaScript dependencies
         run: npm ci
 
+      # TypeScript 7 ships its native compiler as an optional platform package.
+      # The lockfile is authored on macOS, so install the Windows companion
+      # explicitly on this native runner without mutating the lockfile.
+      - name: Install Windows TypeScript compiler companion
+        run: npm install --no-save --package-lock=false --ignore-scripts @typescript/typescript-win32-x64@7.0.2
+
       - name: Run frontend tests
         run: npm test
 
@@ -51,4 +57,3 @@ jobs:
           name: imageforge-windows-x64-nsis
           path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
           if-no-files-found: error
-
