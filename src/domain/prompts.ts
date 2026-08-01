@@ -18,7 +18,7 @@ function stableHash(value: string): number {
   return hash >>> 0;
 }
 
-function parseCsvRows(input: string): string[][] {
+function parseCsvRows(input: string): { rows: string[][]; invalidQuote: boolean } {
   const rows: string[][] = [];
   let row: string[] = [];
   let field = '';
@@ -52,18 +52,25 @@ function parseCsvRows(input: string): string[][] {
     rows.push(row);
   }
 
-  return rows;
+  return { rows, invalidQuote: quoted };
 }
 
-function rowsFromInput(input: string, sourceName?: string | null): Array<{ text: string; line: number }> {
+function rowsFromInput(
+  input: string,
+  sourceName?: string | null,
+): { rows: Array<{ text: string; line: number }>; invalidCsv: boolean } {
   const normalized = input.replace(/^\uFEFF/, '');
   const isCsv = sourceName?.toLowerCase().endsWith('.csv') ?? false;
   if (!isCsv) {
-    return normalized.split(/\r?\n/).map((text, index) => ({ text, line: index + 1 }));
+    return {
+      rows: normalized.split(/\r?\n/).map((text, index) => ({ text, line: index + 1 })),
+      invalidCsv: false,
+    };
   }
 
-  const rows = parseCsvRows(normalized);
-  if (rows.length === 0) return [];
+  const parsed = parseCsvRows(normalized);
+  const rows = parsed.rows;
+  if (rows.length === 0) return { rows: [], invalidCsv: parsed.invalidQuote };
   const headers = rows[0].map((cell) => cell.trim().toLowerCase());
   const promptColumn = headers.findIndex((header) =>
     ['prompt', 'description', 'image prompt', 'scene'].includes(header),
@@ -71,12 +78,31 @@ function rowsFromInput(input: string, sourceName?: string | null): Array<{ text:
   const start = promptColumn >= 0 ? 1 : 0;
   const column = promptColumn >= 0 ? promptColumn : 0;
 
-  return rows.slice(start).map((row, index) => ({ text: row[column] ?? '', line: index + start + 1 }));
+  return {
+    rows: rows.slice(start).map((row, index) => ({ text: row[column] ?? '', line: index + start + 1 })),
+    invalidCsv: parsed.invalidQuote,
+  };
 }
 
 export function parsePromptText(input: string, sourceName?: string | null): ParsedPromptResult {
-  const rows = rowsFromInput(input, sourceName);
-  const nonEmptyRows = rows
+  const parsedRows = rowsFromInput(input, sourceName);
+  let lastContentIndex = -1;
+  for (let index = parsedRows.rows.length - 1; index >= 0; index -= 1) {
+    if (parsedRows.rows[index].text.trim().length > 0) {
+      lastContentIndex = index;
+      break;
+    }
+  }
+  const relevantRows = lastContentIndex >= 0 ? parsedRows.rows.slice(0, lastContentIndex + 1) : [];
+  const blankIssues: ValidationIssue[] = relevantRows
+    .filter((row) => row.text.trim().length === 0)
+    .map((row) => ({
+      code: 'empty',
+      level: 'warning',
+      line: row.line,
+      message: `Line ${row.line} is blank and will be skipped.`,
+    }));
+  const nonEmptyRows = relevantRows
     .map((row) => ({ ...row, text: row.text.trim().replace(/\s+/g, ' ') }))
     .filter((row) => row.text.length > 0);
   const counts = new Map<string, number>();
@@ -86,7 +112,16 @@ export function parsePromptText(input: string, sourceName?: string | null): Pars
     counts.set(key, (counts.get(key) ?? 0) + 1);
   });
 
-  const issues: ValidationIssue[] = [];
+  const issues: ValidationIssue[] = [
+    ...(parsedRows.invalidCsv
+      ? [{
+          code: 'invalid_csv' as const,
+          level: 'error' as const,
+          message: 'The CSV contains an unterminated quoted field. Close the quote and import it again.',
+        }]
+      : []),
+    ...blankIssues,
+  ];
   if (nonEmptyRows.length > MAX_PROMPTS) {
     issues.push({
       code: 'too_many',
@@ -134,7 +169,7 @@ export function parsePromptText(input: string, sourceName?: string | null): Pars
     };
   });
 
-  return { prompts, issues, sourceRows: rows.length };
+  return { prompts, issues, sourceRows: parsedRows.rows.length };
 }
 
 export const SAMPLE_PROMPTS = [

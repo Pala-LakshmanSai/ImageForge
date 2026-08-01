@@ -2,8 +2,10 @@ import { AlertTriangle, CheckCircle2, Info, X, XCircle } from 'lucide-react';
 import { useEffect, useMemo, useReducer } from 'react';
 import { createFakeImageForgeAdapter, type ImageForgeAdapter } from './adapters/imageForgeAdapter';
 import { BottomNav, TopBar } from './components/AppChrome';
+import { DialogPortal } from './components/DialogPortal';
+import { SetupAssistant } from './components/SetupAssistant';
 import { Button, IconButton } from './components/primitives';
-import { createDemoState, appReducer } from './domain/reducer';
+import { createInitialState, appReducer } from './domain/reducer';
 import type { AppState } from './domain/types';
 import { CreateScreen } from './screens/CreateScreen';
 import { LibraryScreen } from './screens/LibraryScreen';
@@ -18,8 +20,19 @@ export interface AppProps {
 }
 
 export default function App({ initialState, adapter: injectedAdapter }: AppProps) {
-  const [state, dispatch] = useReducer(appReducer, initialState ?? createDemoState());
-  const adapter = useMemo(() => injectedAdapter ?? createFakeImageForgeAdapter(), [injectedAdapter]);
+  const [state, dispatch] = useReducer(appReducer, initialState, (provided) => provided ?? createInitialState());
+  const adapter = useMemo(
+    () => injectedAdapter ?? createFakeImageForgeAdapter(initialState?.setup.credentials),
+    [injectedAdapter, initialState?.setup.credentials],
+  );
+
+  useEffect(() => {
+    let active = true;
+    void adapter.credentialMetadata().then((credentials) => {
+      if (active) dispatch({ type: 'SET_CREDENTIAL_METADATA', credentials });
+    });
+    return () => { active = false; };
+  }, [adapter]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = state.settings.theme;
@@ -27,9 +40,17 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
   }, [state.settings.density, state.settings.theme]);
 
   useEffect(() => {
-    if (state.pod.phase !== 'selecting') return;
-    return adapter.runPodLifecycle((update) => dispatch({ type: 'SET_POD_PHASE', ...update }));
-  }, [adapter, state.pod.phase]);
+    if (state.pod.lifecycleSequence === 0 || state.pod.phase !== 'selecting') return;
+    return adapter.runPodLifecycle(
+      {
+        preference: state.settings.gpuPreference,
+        allowSlowEmergency: state.settings.slowEmergencyGpuEnabled,
+      },
+      (update) => dispatch({ type: 'SET_POD_PHASE', ...update }),
+    );
+    // A lifecycle is tied to the explicit start sequence, not each intermediate phase.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adapter, state.pod.lifecycleSequence]);
 
   useEffect(() => {
     if (state.pod.phase !== 'stopping') return;
@@ -83,8 +104,13 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
       <BottomNav state={state} dispatch={dispatch} />
 
       {state.dialog ? (
-        <div className="modal-backdrop" role="presentation" onMouseDown={() => dispatch({ type: 'DISMISS_DIALOG' })}>
-          <section className="modal" role="alertdialog" aria-modal="true" aria-labelledby="modal-title" onMouseDown={(event) => event.stopPropagation()}>
+        <DialogPortal
+          backdropClassName="modal-backdrop"
+          surfaceClassName="modal"
+          role="alertdialog"
+          labelledBy="modal-title"
+          onRequestClose={() => dispatch({ type: 'DISMISS_DIALOG' })}
+        >
             <IconButton label="Close confirmation" icon={X} className="modal__close" onClick={() => dispatch({ type: 'DISMISS_DIALOG' })} />
             <span className="modal__symbol"><AlertTriangle size={23} /></span>
             {state.dialog.type === 'stop-pod' ? (
@@ -98,7 +124,7 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
                   ImageForge has no idle timer and never stops compute on completion, app exit, or connection loss.
                 </div>
                 <div className="modal__actions">
-                  <Button onClick={() => dispatch({ type: 'DISMISS_DIALOG' })}>Keep GPU running</Button>
+                  <Button data-autofocus onClick={() => dispatch({ type: 'DISMISS_DIALOG' })}>Keep GPU running</Button>
                   <Button tone="danger" onClick={() => dispatch({ type: 'CONFIRM_STOP_POD' })}>Terminate compute</Button>
                 </div>
               </>
@@ -108,7 +134,7 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
                 <h2 id="modal-title">Stop generating remaining images?</h2>
                 <p>Downloaded and verified files stay in the selected folder. Pending prompts are removed from this run and the shared batch lock is released.</p>
                 <div className="modal__actions">
-                  <Button onClick={() => dispatch({ type: 'DISMISS_DIALOG' })}>Continue batch</Button>
+                  <Button data-autofocus onClick={() => dispatch({ type: 'DISMISS_DIALOG' })}>Continue batch</Button>
                   <Button tone="danger" onClick={() => dispatch({ type: 'CONFIRM_CANCEL_BATCH' })}>Cancel remaining</Button>
                 </div>
               </>
@@ -118,13 +144,12 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
                 <h2 id="modal-title">Clear library history?</h2>
                 <p>This clears the in-app index only. ImageForge will not delete source JPEGs from your destination folder.</p>
                 <div className="modal__actions">
-                  <Button onClick={() => dispatch({ type: 'DISMISS_DIALOG' })}>Keep history</Button>
+                  <Button data-autofocus onClick={() => dispatch({ type: 'DISMISS_DIALOG' })}>Keep history</Button>
                   <Button tone="danger" onClick={() => dispatch({ type: 'CLEAR_LIBRARY' })}>Clear index</Button>
                 </div>
               </>
             )}
-          </section>
-        </div>
+        </DialogPortal>
       ) : null}
 
       {state.toast ? (
@@ -133,6 +158,10 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
           <div><strong>{state.toast.title}</strong><span>{state.toast.message}</span></div>
           <IconButton label="Dismiss notification" icon={X} onClick={() => dispatch({ type: 'DISMISS_TOAST' })} />
         </div>
+      ) : null}
+
+      {!state.setup.completed ? (
+        <SetupAssistant state={state} dispatch={dispatch} adapter={adapter} canClose={false} />
       ) : null}
     </div>
   );

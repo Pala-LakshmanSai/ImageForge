@@ -13,6 +13,7 @@ import {
 import { useEffect, useMemo, useState } from 'react';
 import type { LibraryAsset } from '../domain/types';
 import { SimulatedImage } from '../components/SimulatedImage';
+import { DialogPortal } from '../components/DialogPortal';
 import { Button, EmptyState, Eyebrow, IconButton, PhaseBadge } from '../components/primitives';
 import type { ScreenProps } from './types';
 
@@ -98,9 +99,8 @@ export function LibraryScreen({ state, dispatch }: ScreenProps) {
       </section>
 
       {selected ? (
-        <div className="asset-inspector-backdrop" role="presentation" onMouseDown={() => setSelected(null)}>
-          <section className="asset-inspector" role="dialog" aria-modal="true" aria-labelledby="asset-title" onMouseDown={(event) => event.stopPropagation()}>
-            <IconButton className="asset-inspector__close" label="Close image details" icon={X} onClick={() => setSelected(null)} />
+        <DialogPortal backdropClassName="asset-inspector-backdrop" surfaceClassName="asset-inspector" labelledBy="asset-title" onRequestClose={() => setSelected(null)}>
+            <IconButton data-autofocus className="asset-inspector__close" label="Close image details" icon={X} onClick={() => setSelected(null)} />
             <div className="asset-inspector__preview"><SimulatedImage seed={selected.seed} prompt={selected.prompt} /></div>
             <div className="asset-inspector__content">
               <div><Eyebrow>{selected.batchName} · frame {String(selected.index).padStart(3, '0')}</Eyebrow><h2 id="asset-title">{selected.filename}</h2></div>
@@ -118,8 +118,7 @@ export function LibraryScreen({ state, dispatch }: ScreenProps) {
                 <Button tone="primary" icon={Download} onClick={() => dispatch({ type: 'SHOW_TOAST', tone: 'success', title: 'Already downloaded', message: `${selected.filename} is verified on this device.` })}>Download receipt</Button>
               </div>
             </div>
-          </section>
-        </div>
+        </DialogPortal>
       ) : null}
     </div>
   );

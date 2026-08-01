@@ -1,9 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { appReducer, batchCounts, canStartBatch, createInitialState } from './reducer';
+import {
+  appReducer,
+  batchCounts,
+  canStartBatch,
+  createConfiguredInitialState,
+  createInitialState,
+  defaultDestinationForPlatform,
+} from './reducer';
 import type { AppState } from './types';
 
 function readyDraft(promptCount: number): AppState {
-  let state = createInitialState();
+  let state = createConfiguredInitialState();
   const text = Array.from({ length: promptCount }, (_, index) =>
     `Editorial documentary frame ${String(index + 1).padStart(3, '0')} with natural light and honest texture`,
   ).join('\n');
@@ -36,6 +43,7 @@ describe('appReducer', () => {
     expect(canStartBatch(state)).toBe(false);
     state = readyDraft(3);
     expect(canStartBatch(state)).toBe(true);
+    expect(canStartBatch({ ...state, setup: { ...state.setup, completed: false } })).toBe(false);
     state = appReducer(state, { type: 'START_BATCH', startedAt: '2026-08-01T10:00:00.000Z' });
     expect(state.batch?.phase).toBe('validating');
     expect(canStartBatch(state)).toBe(false);
@@ -50,7 +58,7 @@ describe('appReducer', () => {
     state = appReducer(state, { type: 'BATCH_TICK' });
     expect(state.batch?.prompts).toEqual(paused.batch?.prompts);
     state = appReducer(state, { type: 'TOGGLE_BATCH_PAUSE' });
-    state = appReducer(state, { type: 'BATCH_TICK' });
+    for (let tick = 0; tick < 3; tick += 1) state = appReducer(state, { type: 'BATCH_TICK' });
     expect(batchCounts(state.batch).completed).toBe(1);
     state = appReducer(state, { type: 'REQUEST_CANCEL_BATCH' });
     state = appReducer(state, { type: 'CONFIRM_CANCEL_BATCH' });
@@ -63,7 +71,7 @@ describe('appReducer', () => {
     state = appReducer(state, { type: 'START_BATCH', startedAt: '2026-08-01T10:00:00.000Z' });
     state = appReducer(state, { type: 'BATCH_VALIDATED' });
 
-    for (let tick = 0; tick < 460 && state.batch?.phase === 'running'; tick += 1) {
+    for (let tick = 0; tick < 1_600 && state.batch?.phase === 'running'; tick += 1) {
       state = appReducer(state, { type: 'BATCH_TICK' });
     }
 
@@ -71,10 +79,14 @@ describe('appReducer', () => {
     const firstPass = batchCounts(state.batch);
     expect(firstPass.completed + firstPass.failed).toBe(450);
     expect(firstPass.failed).toBeGreaterThan(0);
-    const alreadyDownloaded = state.batch!.prompts.filter((prompt) => prompt.status === 'downloaded').map((prompt) => prompt.checksum);
+    const alreadyDownloaded = new Map(
+      state.batch!.prompts
+        .filter((prompt) => prompt.status === 'downloaded')
+        .map((prompt) => [prompt.id, prompt.checksum]),
+    );
 
     state = appReducer(state, { type: 'RETRY_FAILED' });
-    for (let tick = 0; tick < 40 && state.batch?.phase === 'running'; tick += 1) {
+    for (let tick = 0; tick < 150 && state.batch?.phase === 'running'; tick += 1) {
       state = appReducer(state, { type: 'BATCH_TICK' });
     }
 
@@ -83,9 +95,60 @@ describe('appReducer', () => {
     expect(state.batch!.prompts.map((prompt) => prompt.filename)).toEqual(
       Array.from({ length: 450 }, (_, index) => `${String(index + 1).padStart(4, '0')}.jpg`),
     );
-    expect(state.batch!.prompts.filter((prompt) => prompt.attempts === 0).map((prompt) => prompt.checksum))
-      .toEqual(alreadyDownloaded);
+    for (const prompt of state.batch!.prompts) {
+      if (alreadyDownloaded.has(prompt.id)) expect(prompt.checksum).toBe(alreadyDownloaded.get(prompt.id));
+      expect(prompt.checksum).toMatch(/^[a-f0-9]{64}$/);
+    }
     expect(state.library.map((asset) => asset.index)).toEqual(Array.from({ length: 450 }, (_, index) => index + 1));
+  });
+
+  it('authors ready and downloading receipts before download and automatically retries twice', () => {
+    let state = readyDraft(19);
+    state = appReducer(state, { type: 'START_BATCH', startedAt: '2026-08-01T10:00:00.000Z' });
+    state = appReducer(state, { type: 'BATCH_VALIDATED' });
+
+    state = appReducer(state, { type: 'BATCH_TICK' });
+    expect(state.batch?.prompts[0]).toMatchObject({ status: 'ready', attempts: 1 });
+    state = appReducer(state, { type: 'BATCH_TICK' });
+    expect(state.batch?.prompts[0].status).toBe('downloading');
+    state = appReducer(state, { type: 'BATCH_TICK' });
+    expect(state.batch?.prompts[0].status).toBe('downloaded');
+    expect(state.library[0].checksum).toMatch(/^[a-f0-9]{64}$/);
+
+    for (let tick = 0; tick < 51; tick += 1) state = appReducer(state, { type: 'BATCH_TICK' });
+    expect(state.batch?.prompts[18]).toMatchObject({ status: 'generating', attempts: 1 });
+    state = appReducer(state, { type: 'BATCH_TICK' });
+    expect(state.batch?.prompts[18]).toMatchObject({ status: 'retrying', attempts: 2 });
+    state = appReducer(state, { type: 'BATCH_TICK' });
+    expect(state.batch?.prompts[18]).toMatchObject({ status: 'retrying', attempts: 3 });
+    state = appReducer(state, { type: 'BATCH_TICK' });
+    expect(state.batch?.prompts[18]).toMatchObject({ status: 'failed', attempts: 3 });
+  });
+
+  it('resolves an interrupted owner batch only after a GPU restart', () => {
+    let state = readyDraft(3);
+    state = { ...state, settings: { ...state.settings, userName: 'Lakshman' } };
+    state = appReducer(state, { type: 'START_BATCH', startedAt: '2026-08-01T10:00:00.000Z' });
+    state = appReducer(state, { type: 'BATCH_VALIDATED' });
+    state = appReducer(state, { type: 'CONFIRM_STOP_POD' });
+    state = appReducer(state, { type: 'POD_STOPPED' });
+    expect(state.batch).toMatchObject({ phase: 'interrupted', owner: 'Lakshman' });
+    expect(state.batch?.prompts[0].status).toBe('pending');
+
+    const offlineResume = appReducer(state, { type: 'RESUME_INTERRUPTED_BATCH' });
+    expect(offlineResume.batch?.phase).toBe('interrupted');
+    state = appReducer(state, { type: 'SET_POD_PHASE', phase: 'ready', progress: 100, detail: 'Ready', podId: 'pod-next' });
+    state = appReducer(state, { type: 'RESUME_INTERRUPTED_BATCH' });
+    expect(state.batch?.phase).toBe('running');
+    expect(state.batch?.prompts[0].status).toBe('generating');
+  });
+
+  it('applies the visible editorial suffix and provides platform-correct defaults', () => {
+    let state = readyDraft(1);
+    state = appReducer(state, { type: 'START_BATCH', startedAt: '2026-08-01T10:00:00.000Z' });
+    expect(state.batch?.prompts[0].text).toContain(state.settings.editorialSuffix);
+    expect(defaultDestinationForPlatform('Mozilla/5.0 (Windows NT 10.0)')).toBe('C:\\Users\\Editor\\Pictures\\ImageForge');
+    expect(defaultDestinationForPlatform('Mozilla/5.0 (Macintosh; Intel Mac OS X)')).toBe('/Users/Shared/Pictures/ImageForge');
   });
 
   it('authors other-user lock, duplicate Pod, recovery, failure, and complete scenarios', () => {

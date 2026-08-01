@@ -39,7 +39,7 @@ function formatDuration(seconds: number) {
 function phaseTone(phase: string): 'success' | 'warning' | 'danger' | 'info' | 'neutral' {
   if (phase === 'complete') return 'success';
   if (phase === 'running' || phase === 'validating') return 'info';
-  if (phase === 'paused' || phase === 'partial_failure' || phase === 'reconnecting') return 'warning';
+  if (phase === 'paused' || phase === 'partial_failure' || phase === 'reconnecting' || phase === 'interrupted') return 'warning';
   if (phase === 'error' || phase === 'cancelled') return 'danger';
   return 'neutral';
 }
@@ -110,7 +110,7 @@ export function ProgressScreen({ state, dispatch }: ScreenProps) {
   const currentPrompt = useMemo(() => {
     if (!batch) return undefined;
     return (
-      batch.prompts.find((prompt) => prompt.status === 'generating' || prompt.status === 'retrying') ??
+      batch.prompts.find((prompt) => ['generating', 'retrying', 'ready', 'downloading'].includes(prompt.status)) ??
       [...batch.prompts].reverse().find((prompt) => prompt.status === 'downloaded') ??
       batch.prompts[0]
     );
@@ -129,6 +129,8 @@ export function ProgressScreen({ state, dispatch }: ScreenProps) {
   const isLocked = batch.phase === 'locked';
   const isReconnecting = state.pod.phase === 'reconnecting';
   const isError = batch.phase === 'error' || state.pod.phase === 'error';
+  const isInterrupted = batch.phase === 'interrupted';
+  const canResolveInterrupted = isInterrupted && batch.owner === state.settings.userName;
   const settled = ['complete', 'partial_failure', 'cancelled'].includes(batch.phase);
 
   return (
@@ -149,9 +151,12 @@ export function ProgressScreen({ state, dispatch }: ScreenProps) {
             </Button>
           ) : null}
           {batch.phase === 'partial_failure' ? <Button tone="primary" icon={RotateCw} onClick={() => dispatch({ type: 'RETRY_FAILED' })}>Retry {counts.failed} failed</Button> : null}
-          {settled ? <Button icon={FileDown} onClick={() => exportManifest(batch.prompts, batch.name)}>Manifest CSV</Button> : null}
+          {canResolveInterrupted && state.pod.phase === 'ready' ? <Button tone="primary" icon={Play} onClick={() => dispatch({ type: 'RESUME_INTERRUPTED_BATCH' })}>Resume interrupted batch</Button> : null}
+          {canResolveInterrupted && ['offline', 'error'].includes(state.pod.phase) ? <Button tone="primary" icon={Zap} onClick={() => dispatch({ type: 'START_POD' })}>Restart GPU to resume</Button> : null}
+          {settled || isInterrupted ? <Button icon={FileDown} onClick={() => exportManifest(batch.prompts, batch.name)}>Manifest CSV</Button> : null}
           <Button icon={FolderOpen} onClick={() => dispatch({ type: 'SHOW_TOAST', tone: 'info', title: 'Destination revealed', message: batch.destination })}>Reveal folder</Button>
           {isControllable ? <Button tone="danger" icon={X} onClick={() => dispatch({ type: 'REQUEST_CANCEL_BATCH' })}>Cancel</Button> : null}
+          {canResolveInterrupted ? <Button tone="danger" icon={X} onClick={() => dispatch({ type: 'REQUEST_CANCEL_BATCH' })}>Cancel interrupted batch</Button> : null}
           {settled ? <Button tone="primary" icon={Sparkles} onClick={() => dispatch({ type: 'NEW_BATCH' })}>New brief</Button> : null}
         </div>
       </section>
@@ -167,6 +172,12 @@ export function ProgressScreen({ state, dispatch }: ScreenProps) {
           <RefreshCcw className="spin-slow" size={21} />
           <div><strong>Reconnecting to worker</strong><span>Generation state comes from the durable manifest. ImageForge will request only missing downloads when the connection returns.</span></div>
           <Button compact onClick={() => dispatch({ type: 'REFRESH_STATUS', checkedAt: new Date().toISOString() })}>Check now</Button>
+        </aside>
+      ) : null}
+      {isInterrupted ? (
+        <aside className="state-banner state-banner--warning" role="status">
+          <WifiOff size={21} />
+          <div><strong>Generation was interrupted safely</strong><span>Verified downloads remain complete. {canResolveInterrupted ? (state.pod.phase === 'ready' ? 'Resume from the first incomplete prompt or cancel the manifest.' : 'Restart a GPU, then resume from the first incomplete prompt—or cancel the manifest now.') : `${batch.owner} must resume or cancel this manifest.`}</span></div>
         </aside>
       ) : null}
       {isError ? (
@@ -209,7 +220,7 @@ export function ProgressScreen({ state, dispatch }: ScreenProps) {
           </header>
           <div className="pipeline-legend">
             <span><i className="legend-dot legend-dot--done" /> {counts.completed} downloaded</span>
-            <span><i className="legend-dot legend-dot--live" /> {batch.phase === 'running' ? '1 generating' : '0 generating'}</span>
+            <span><i className="legend-dot legend-dot--live" /> {batch.phase === 'running' ? `1 ${selectedPrompt?.status ?? 'active'}` : '0 active'}</span>
             <span><i className="legend-dot legend-dot--wait" /> {counts.pending} waiting</span>
           </div>
           <VirtualPromptList prompts={batch.prompts} selectedId={selectedPrompt?.id} onSelect={(prompt) => setSelectedId(prompt.id)} />
@@ -230,7 +241,9 @@ export function ProgressScreen({ state, dispatch }: ScreenProps) {
                 ) : (
                   <SimulatedImage seed={selectedPrompt.seed} prompt={selectedPrompt.text} />
                 )}
-                {selectedPrompt.status === 'generating' ? <span className="preview-frame__live"><LoaderCircle className="spin" size={13} /> Rendering 4 diffusion steps</span> : null}
+                {selectedPrompt.status === 'generating' || selectedPrompt.status === 'retrying' ? <span className="preview-frame__live"><LoaderCircle className="spin" size={13} /> {selectedPrompt.status === 'retrying' ? selectedPrompt.failureReason : 'Rendering 4 diffusion steps'}</span> : null}
+                {selectedPrompt.status === 'ready' ? <span className="preview-frame__live"><ShieldCheck size={13} /> Verifying full JPEG</span> : null}
+                {selectedPrompt.status === 'downloading' ? <span className="preview-frame__live"><Download size={13} /> Downloading to .part</span> : null}
               </div>
               <blockquote className="preview-prompt">“{selectedPrompt.text}”</blockquote>
               <dl className="preview-details">

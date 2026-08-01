@@ -1,4 +1,5 @@
 import { parsePromptText, SAMPLE_PROMPTS } from './prompts';
+import { DEFAULT_STUDIO_PROFILE, emptyCredentialMetadata } from '../adapters/imageForgeAdapter';
 import type {
   AppAction,
   AppState,
@@ -13,20 +14,24 @@ import type {
   UsageRun,
 } from './types';
 
-const DEFAULT_DESTINATION = '/Users/lakshman/Pictures/ImageForge';
 const DEMO_STARTED_AT = '2026-08-01T08:30:00.000Z';
 
+export function defaultDestinationForPlatform(userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent): string {
+  if (/windows/i.test(userAgent)) return 'C:\\Users\\Editor\\Pictures\\ImageForge';
+  if (/(macintosh|mac os)/i.test(userAgent)) return '/Users/Shared/Pictures/ImageForge';
+  return '/home/editor/Pictures/ImageForge';
+}
+
 export const DEFAULT_SETTINGS: SettingsState = {
-  userName: 'Lakshman',
-  defaultDestination: DEFAULT_DESTINATION,
+  userName: '',
+  defaultDestination: defaultDestinationForPlatform(),
   editorialSuffixEnabled: true,
   editorialSuffix: 'Editorial realism, natural light, honest texture, restrained color, no text or logos.',
   theme: 'midnight',
   density: 'comfortable',
   simulationSpeed: 1,
-  soundsEnabled: false,
   gpuPreference: 'best_value',
-  emergencyGpuTierEnabled: false,
+  slowEmergencyGpuEnabled: false,
 };
 
 function emptyPod(): PodState {
@@ -42,6 +47,7 @@ function emptyPod(): PodState {
     matchingPodIds: [],
     lastCheckedAt: null,
     errorMessage: null,
+    lifecycleSequence: 0,
   };
 }
 
@@ -58,6 +64,7 @@ function readyPod(): PodState {
     matchingPodIds: ['pod-if-7K2M'],
     lastCheckedAt: '2026-08-01T08:34:12.000Z',
     errorMessage: null,
+    lifecycleSequence: 0,
   };
 }
 
@@ -81,10 +88,34 @@ export function createInitialState(): AppState {
     library: [],
     usage: [],
     settings: DEFAULT_SETTINGS,
+    setup: {
+      completed: false,
+      studioProfile: DEFAULT_STUDIO_PROFILE,
+      destinationValidated: false,
+      credentials: emptyCredentialMetadata(),
+    },
     dialog: null,
     toast: null,
     toastSequence: 0,
     refreshedAt: null,
+  };
+}
+
+export function createConfiguredInitialState(): AppState {
+  const state = createInitialState();
+  const provider = state.setup.credentials.runpodApiKey.provider;
+  return {
+    ...state,
+    settings: { ...state.settings, userName: 'Lakshman' },
+    setup: {
+      ...state.setup,
+      completed: true,
+      destinationValidated: true,
+      credentials: {
+        runpodApiKey: { configured: true, suffix: 'K7P9', provider },
+        workerToken: { configured: true, suffix: 'F2M4', provider },
+      },
+    },
   };
 }
 
@@ -98,21 +129,27 @@ function createPromptSet(count = 24): BatchPrompt[] {
 }
 
 function checksumFor(index: number, seed: number): string {
-  return `${(seed * 2654435761 + index).toString(16).padStart(8, '0').slice(-8)}…${(seed + index * 97)
-    .toString(16)
-    .padStart(6, '0')
-    .slice(-6)}`;
+  let value = (seed ^ Math.imul(index, 0x9e3779b1)) >>> 0;
+  return Array.from({ length: 8 }, (_, block) => {
+    value = Math.imul(value ^ (block + 1) * 0x45d9f3b, 0x27d4eb2d) >>> 0;
+    value = (value ^ (value >>> 15)) >>> 0;
+    return value.toString(16).padStart(8, '0');
+  }).join('');
 }
 
-function completedPrompt(prompt: BatchPrompt): BatchPrompt {
+function readyPrompt(prompt: BatchPrompt): BatchPrompt {
   const durationSeconds = 7.2 + ((prompt.index * 13) % 18) / 10;
   return {
     ...prompt,
-    status: 'downloaded',
+    status: 'ready',
     filename: `${String(prompt.index).padStart(4, '0')}.jpg`,
     checksum: checksumFor(prompt.index, prompt.seed),
     durationSeconds,
   };
+}
+
+function completedPrompt(prompt: BatchPrompt): BatchPrompt {
+  return { ...readyPrompt(prompt), status: 'downloaded' };
 }
 
 function assetFromPrompt(batch: BatchState, prompt: BatchPrompt): LibraryAsset {
@@ -152,7 +189,7 @@ function buildDemoBatch(phase: BatchState['phase'] = 'running'): BatchState {
     owner: 'Lakshman',
     phase,
     prompts,
-    destination: DEFAULT_DESTINATION,
+    destination: defaultDestinationForPlatform(),
     startedAt: DEMO_STARTED_AT,
     elapsedSeconds: 78,
     estimatedSecondsPerImage: 8.4,
@@ -164,6 +201,7 @@ function buildDemoBatch(phase: BatchState['phase'] = 'running'): BatchState {
 
 export function createDemoState(): AppState {
   const batch = buildDemoBatch();
+  const provider = emptyCredentialMetadata().runpodApiKey.provider;
   return {
     ...createInitialState(),
     activeView: 'progress',
@@ -174,7 +212,17 @@ export function createDemoState(): AppState {
       sourceName: 'atlas-prompts.txt',
       prompts: batch.prompts,
       issues: [],
-      destination: DEFAULT_DESTINATION,
+      destination: defaultDestinationForPlatform(),
+    },
+    settings: { ...DEFAULT_SETTINGS, userName: 'Lakshman' },
+    setup: {
+      completed: true,
+      studioProfile: DEFAULT_STUDIO_PROFILE,
+      destinationValidated: true,
+      credentials: {
+        runpodApiKey: { configured: true, suffix: 'K7P9', provider },
+        workerToken: { configured: true, suffix: 'F2M4', provider },
+      },
     },
     batch,
     library: batch.prompts
@@ -215,7 +263,13 @@ function toast(
   return { toastSequence: id, toast: { id, tone, title, message } };
 }
 
-function podDetails(phase: PodPhase, progress: number, detail: string, current: PodState): PodState {
+function podDetails(
+  phase: PodPhase,
+  progress: number,
+  detail: string,
+  current: PodState,
+  hardware?: { gpu?: string; vram?: string; hourlyRate?: number },
+): PodState {
   const isReady = phase === 'ready';
   const isOffline = phase === 'offline';
   const isError = phase === 'error';
@@ -224,9 +278,9 @@ function podDetails(phase: PodPhase, progress: number, detail: string, current: 
     phase,
     phaseProgress: progress,
     statusDetail: detail,
-    gpu: isReady || (!isOffline && current.gpu) ? current.gpu ?? 'RTX 4090' : null,
-    vram: isReady || (!isOffline && current.vram) ? current.vram ?? '24 GB' : null,
-    hourlyRate: isReady || (!isOffline && current.hourlyRate) ? current.hourlyRate ?? 0.54 : null,
+    gpu: isOffline ? null : hardware?.gpu ?? current.gpu ?? (isReady ? 'RTX 4090' : null),
+    vram: isOffline ? null : hardware?.vram ?? current.vram ?? (isReady ? '24 GB' : null),
+    hourlyRate: isOffline ? null : hardware?.hourlyRate ?? current.hourlyRate ?? (isReady ? 0.54 : null),
     health: isReady ? 'healthy' : isOffline ? 'offline' : isError ? 'degraded' : 'checking',
     podId: isReady ? current.podId ?? 'pod-if-7K2M' : isOffline ? null : current.podId,
     matchingPodIds: isOffline ? [] : current.matchingPodIds,
@@ -240,6 +294,7 @@ function hasDraftErrors(state: AppState): boolean {
 
 export function canStartBatch(state: AppState): boolean {
   return (
+    state.setup.completed &&
     state.pod.phase === 'ready' &&
     state.batch === null &&
     state.draft.prompts.length > 0 &&
@@ -282,45 +337,72 @@ function reduceBatchTick(state: AppState): AppState {
   if (!batch || batch.phase !== 'running') return state;
 
   const prompts = batch.prompts.map((prompt) => ({ ...prompt }));
-  const activeIndex = prompts.findIndex((prompt) => prompt.status === 'generating' || prompt.status === 'retrying');
+  const activeIndex = prompts.findIndex((prompt) =>
+    ['generating', 'retrying', 'ready', 'downloading'].includes(prompt.status),
+  );
+  const activeStatus = activeIndex >= 0 ? prompts[activeIndex].status : null;
   let newAsset: LibraryAsset | null = null;
 
   if (activeIndex >= 0) {
     const active = prompts[activeIndex];
-    const deterministicFailure = active.index % 19 === 0 && active.attempts === 0;
-    if (deterministicFailure) {
-      prompts[activeIndex] = {
-        ...active,
-        status: 'failed',
-        failureReason: 'Preview checksum did not match after two transfer attempts.',
-        durationSeconds: 9.8,
-      };
-    } else {
-      prompts[activeIndex] = completedPrompt(active);
+    if (active.status === 'generating' || active.status === 'retrying') {
+      const deterministicFailure = active.index % 19 === 0 && active.attempts <= 3;
+      if (deterministicFailure && active.attempts < 3) {
+        prompts[activeIndex] = {
+          ...active,
+          status: 'retrying',
+          attempts: active.attempts + 1,
+          failureReason: `Automatic generation retry ${active.attempts + 1} of 3`,
+        };
+      } else if (deterministicFailure) {
+        prompts[activeIndex] = {
+          ...active,
+          status: 'failed',
+          failureReason: 'Generation failed after the initial attempt and two automatic retries.',
+          durationSeconds: 9.8,
+        };
+      } else {
+        prompts[activeIndex] = readyPrompt(active);
+      }
+    } else if (active.status === 'ready') {
+      prompts[activeIndex] = { ...active, status: 'downloading' };
+    } else if (active.status === 'downloading') {
+      prompts[activeIndex] = { ...active, status: 'downloaded' };
+      newAsset = assetFromPrompt(batch, prompts[activeIndex]);
     }
   }
 
-  const nextIndex = prompts.findIndex((prompt) => prompt.status === 'pending');
-  if (nextIndex >= 0) prompts[nextIndex] = { ...prompts[nextIndex], status: 'generating' };
+  const stillActive = prompts.some((prompt) =>
+    ['generating', 'retrying', 'ready', 'downloading'].includes(prompt.status),
+  );
+  const nextIndex = stillActive ? -1 : prompts.findIndex((prompt) => prompt.status === 'pending');
+  if (nextIndex >= 0) {
+    prompts[nextIndex] = {
+      ...prompts[nextIndex],
+      status: 'generating',
+      attempts: prompts[nextIndex].attempts || 1,
+      failureReason: undefined,
+    };
+  }
 
-  const elapsedSeconds = batch.elapsedSeconds + batch.estimatedSecondsPerImage;
+  const elapsedSeconds = batch.elapsedSeconds + (
+    activeStatus === 'generating' || activeStatus === 'retrying' ? batch.estimatedSecondsPerImage : activeStatus ? 0.2 : 0
+  );
   const hourlyRate = state.pod.hourlyRate ?? 0.54;
+  const activePrompt = nextIndex >= 0
+    ? prompts[nextIndex]
+    : prompts.find((prompt) => ['generating', 'retrying', 'ready', 'downloading'].includes(prompt.status));
   let nextBatch: BatchState = {
     ...batch,
     prompts,
     elapsedSeconds,
     estimatedCost: (elapsedSeconds / 3600) * hourlyRate,
-    statusMessage:
-      nextIndex >= 0
-        ? `Generating image ${String(prompts[nextIndex].index).padStart(3, '0')} of ${String(prompts.length).padStart(3, '0')}`
-        : 'Finalizing manifest and verified downloads',
+    statusMessage: activePrompt
+      ? `${activePrompt.status === 'ready' ? 'Verifying' : activePrompt.status === 'downloading' ? 'Downloading' : activePrompt.status === 'retrying' ? 'Retrying' : 'Generating'} image ${String(activePrompt.index).padStart(3, '0')} of ${String(prompts.length).padStart(3, '0')}`
+      : 'Finalizing manifest and verified downloads',
   };
 
-  if (activeIndex >= 0 && prompts[activeIndex].status === 'downloaded') {
-    newAsset = assetFromPrompt(nextBatch, prompts[activeIndex]);
-  }
-
-  if (nextIndex < 0) {
+  if (!activePrompt && nextIndex < 0) {
     const counts = batchCounts(nextBatch);
     nextBatch = {
       ...nextBatch,
@@ -476,14 +558,22 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       if (!['offline', 'error'].includes(state.pod.phase)) return state;
       return {
         ...state,
-        pod: podDetails('selecting', 4, 'Checking live RTX 4090 and RTX 5090 inventory', state.pod),
+        pod: {
+          ...podDetails(
+            'selecting',
+            4,
+            `Checking seven ordinary EU-RO-1 GPUs${state.settings.slowEmergencyGpuEnabled ? ' plus RTX 2000 Ada as a slow emergency fallback' : ''}`,
+            state.pod,
+          ),
+          lifecycleSequence: state.pod.lifecycleSequence + 1,
+        },
         ...toast(state, 'info', 'Finding the best available GPU', 'Live inventory and measured cost per image are being compared.'),
       };
     case 'SET_POD_PHASE':
       return {
         ...state,
         pod: {
-          ...podDetails(action.phase, action.progress, action.detail, state.pod),
+          ...podDetails(action.phase, action.progress, action.detail, state.pod, action),
           ...(action.podId
             ? { podId: action.podId, matchingPodIds: [action.podId] }
             : {}),
@@ -506,7 +596,16 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         pod: emptyPod(),
         batch: interrupted
-          ? { ...state.batch!, phase: 'interrupted', statusMessage: 'Interrupted manifest saved · ready to resume' }
+          ? {
+              ...state.batch!,
+              phase: 'interrupted',
+              prompts: state.batch!.prompts.map((prompt) =>
+                ['generating', 'retrying', 'ready', 'downloading'].includes(prompt.status)
+                  ? { ...prompt, status: 'pending' as const, failureReason: undefined }
+                  : prompt,
+              ),
+              statusMessage: 'Interrupted manifest saved · restart a GPU to resume or cancel',
+            }
           : state.batch,
         ...toast(state, 'success', 'GPU stopped', 'Compute was terminated explicitly. Local files are unchanged.'),
       };
@@ -525,8 +624,10 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           ...toast(state, 'warning', 'Batch is not ready', 'Resolve the highlighted requirements before starting.'),
         };
       }
+      const suffix = state.settings.editorialSuffixEnabled ? state.settings.editorialSuffix.trim() : '';
       const prompts: BatchPrompt[] = state.draft.prompts.map((prompt) => ({
         ...prompt,
+        text: suffix ? `${prompt.text} ${suffix}` : prompt.text,
         status: 'pending',
         attempts: 0,
       }));
@@ -555,6 +656,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       const prompts = state.batch.prompts.map((prompt, index) => ({
         ...prompt,
         status: index === 0 ? ('generating' as const) : prompt.status,
+        attempts: index === 0 ? 1 : prompt.attempts,
       }));
       return {
         ...state,
@@ -612,12 +714,48 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...toast(state, 'info', 'Retry started', 'Only failed slots will regenerate; existing files stay untouched.'),
       };
     }
+    case 'RESUME_INTERRUPTED_BATCH': {
+      if (
+        !state.batch ||
+        state.batch.phase !== 'interrupted' ||
+        state.batch.owner !== state.settings.userName ||
+        state.pod.phase !== 'ready'
+      ) return state;
+      let started = false;
+      const prompts = state.batch.prompts.map((prompt) => {
+        if (started || prompt.status !== 'pending') return prompt;
+        started = true;
+        return { ...prompt, status: 'generating' as const, attempts: prompt.attempts || 1 };
+      });
+      return {
+        ...state,
+        batch: {
+          ...state.batch,
+          phase: 'running',
+          prompts,
+          statusMessage: started ? 'Resumed from the first incomplete prompt' : 'Finalizing resumed manifest',
+        },
+        ...toast(state, 'success', 'Interrupted batch resumed', 'Verified files were kept; generation continues at the first incomplete slot.'),
+      };
+    }
     case 'DISMISS_DIALOG':
       return { ...state, dialog: null };
     case 'DISMISS_TOAST':
       return { ...state, toast: null };
     case 'SET_SETTING':
       return { ...state, settings: { ...state.settings, [action.key]: action.value } as SettingsState };
+    case 'SET_STUDIO_PROFILE':
+      return { ...state, setup: { ...state.setup, studioProfile: action.profile } };
+    case 'SET_DESTINATION_VALIDATED':
+      return { ...state, setup: { ...state.setup, destinationValidated: action.validated } };
+    case 'SET_CREDENTIAL_METADATA':
+      return { ...state, setup: { ...state.setup, credentials: action.credentials } };
+    case 'COMPLETE_SETUP':
+      return {
+        ...state,
+        setup: { ...state.setup, completed: true },
+        draft: { ...state.draft, destination: state.draft.destination ?? state.settings.defaultDestination },
+      };
     case 'SAVE_SETTINGS':
       return {
         ...state,
@@ -634,6 +772,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...reset,
         settings: state.settings,
+        setup: state.setup,
         ...toast(state, 'info', 'Workspace reset', 'You are back to an offline, empty production desk.'),
       };
     }

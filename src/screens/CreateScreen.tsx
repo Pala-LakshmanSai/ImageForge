@@ -61,7 +61,9 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
     setChoosingDestination(true);
     try {
       const path = await adapter.chooseDestination(state.settings.defaultDestination);
-      dispatch({ type: 'SET_DESTINATION', path });
+      const valid = await adapter.validateDestination(path);
+      if (valid) dispatch({ type: 'SET_DESTINATION', path });
+      else dispatch({ type: 'SHOW_TOAST', tone: 'error', title: 'Folder is not writable', message: 'Choose another destination and try the write test again.' });
     } finally {
       setChoosingDestination(false);
     }
@@ -173,7 +175,7 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
               <span>
                 {errors[0]?.message ??
                   (warnings.length
-                    ? `${warnings.length} non-blocking ${warnings.length === 1 ? 'note' : 'notes'} · duplicates retain separate ordered slots`
+                    ? `${warnings[0].message}${warnings.length > 1 ? ` · ${warnings.length - 1} more non-blocking ${warnings.length === 2 ? 'note' : 'notes'}` : ''}`
                     : 'TXT and CSV stay on this device until you explicitly start the batch.')}
               </span>
             </div>
@@ -203,7 +205,7 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
             <button className="folder-picker" type="button" onClick={() => void chooseDestination()} aria-busy={choosingDestination}>
               <span><Folder size={21} /></span>
               <span>
-                <strong>{choosingDestination ? 'Opening folder chooser…' : state.draft.destination ? state.draft.destination.split('/').at(-1) : 'Choose output folder'}</strong>
+                <strong>{choosingDestination ? 'Opening folder chooser…' : state.draft.destination ? state.draft.destination.split(/[\\/]/).at(-1) : 'Choose output folder'}</strong>
                 <small>{state.draft.destination ?? 'JPEGs, previews, and manifest.csv'}</small>
               </span>
               <ArrowRight size={17} />
@@ -231,6 +233,7 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
               />
               <i aria-hidden="true" />
             </label>
+            {state.settings.editorialSuffixEnabled ? <p className="visible-suffix"><strong>Appended to every submitted prompt:</strong> {state.settings.editorialSuffix}</p> : null}
           </section>
 
           <section className={`panel launch-panel ${isReady ? 'launch-panel--ready' : ''}`}>

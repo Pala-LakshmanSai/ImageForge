@@ -43,4 +43,18 @@ describe('parsePromptText', () => {
     expect(result.prompts).toHaveLength(451);
     expect(result.issues).toContainEqual(expect.objectContaining({ code: 'too_many', level: 'error' }));
   });
+
+  it('explains skipped blank rows without treating a trailing newline as an issue', () => {
+    const result = parsePromptText('First detailed editorial image\n\nSecond detailed editorial image\n');
+
+    expect(result.prompts).toHaveLength(2);
+    expect(result.issues).toContainEqual(expect.objectContaining({ code: 'empty', level: 'warning', line: 2 }));
+    expect(result.issues.filter((issue) => issue.code === 'empty')).toHaveLength(1);
+  });
+
+  it('blocks an unterminated quoted CSV field', () => {
+    const result = parsePromptText('prompt,notes\n"A quiet room at dawn,keep', 'brief.csv');
+
+    expect(result.issues).toContainEqual(expect.objectContaining({ code: 'invalid_csv', level: 'error' }));
+  });
 });

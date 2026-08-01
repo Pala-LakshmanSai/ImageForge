@@ -53,31 +53,46 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
   const [choosingDestination, setChoosingDestination] = useState(false);
   const [scenario, setScenario] = useState<OperationalScenario>('running');
   const [showSetup, setShowSetup] = useState(false);
+  const [setupInitialStep, setSetupInitialStep] = useState(0);
 
   async function chooseDefaultDestination() {
     setChoosingDestination(true);
     try {
       const path = await adapter.chooseDestination(state.settings.defaultDestination);
+      const validated = await adapter.validateDestination(path);
       dispatch({ type: 'SET_SETTING', key: 'defaultDestination', value: path });
+      dispatch({ type: 'SET_DESTINATION_VALIDATED', validated });
     } finally {
       setChoosingDestination(false);
     }
   }
 
-  const credentialToast = (name: string) =>
+  function openSetup(step = 0) {
+    setSetupInitialStep(step);
+    setShowSetup(true);
+  }
+
+  async function testConnection() {
+    const result = await adapter.testConnection({
+      profile: state.setup.studioProfile,
+      destination: state.settings.defaultDestination,
+      destinationValidated: state.setup.destinationValidated,
+      credentials: state.setup.credentials,
+    });
     dispatch({
       type: 'SHOW_TOAST',
-      tone: 'info',
-      title: `${name} stays in the OS credential vault`,
-      message: 'The web simulation receives configured status and a redacted suffix only.',
+      tone: result.ok ? 'success' : 'error',
+      title: result.ok ? 'Connection metadata passed' : 'Connection needs attention',
+      message: result.message,
     });
+  }
 
   return (
     <div className="screen settings-screen">
       <section className="page-heading">
         <div><Eyebrow>Settings · this device</Eyebrow><h1>Make the desk yours.</h1><p>Identity, local delivery, redacted connection health, and a deterministic state lab.</p></div>
         <div className="page-heading__actions">
-          <Button icon={Laptop} onClick={() => setShowSetup(true)}>Review setup</Button>
+          <Button icon={Laptop} onClick={() => openSetup()}>Review setup</Button>
           <PhaseBadge tone="success"><ShieldCheck size={13} /> secrets redacted</PhaseBadge>
           <Button tone="primary" icon={Save} onClick={() => dispatch({ type: 'SAVE_SETTINGS' })}>Save preferences</Button>
         </div>
@@ -99,15 +114,15 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
             <div className="credential-list">
               <article className="credential-card">
                 <span className="credential-card__icon"><KeyRound size={18} /></span>
-                <div><strong>RunPod restricted API key</strong><small>Configured · suffix •••• K7P9 · macOS Keychain</small></div>
-                <PhaseBadge tone="success">configured</PhaseBadge>
-                <Button compact onClick={() => credentialToast('RunPod key')}>Replace</Button>
+                <div><strong>RunPod restricted API key</strong><small>{state.setup.credentials.runpodApiKey.configured ? `Configured · suffix •••• ${state.setup.credentials.runpodApiKey.suffix} · ${state.setup.credentials.runpodApiKey.provider}` : `Not configured · ${state.setup.credentials.runpodApiKey.provider}`}</small></div>
+                <PhaseBadge tone={state.setup.credentials.runpodApiKey.configured ? 'success' : 'warning'}>{state.setup.credentials.runpodApiKey.configured ? 'configured' : 'required'}</PhaseBadge>
+                <Button compact onClick={() => openSetup(1)}>Replace</Button>
               </article>
               <article className="credential-card">
                 <span className="credential-card__icon"><LockKeyhole size={18} /></span>
-                <div><strong>Per-user worker credential</strong><small>Configured · suffix •••• F2M4 · never placed in a URL</small></div>
-                <PhaseBadge tone="success">configured</PhaseBadge>
-                <Button compact onClick={() => credentialToast('Worker credential')}>Replace</Button>
+                <div><strong>Per-user worker credential</strong><small>{state.setup.credentials.workerToken.configured ? `Configured · suffix •••• ${state.setup.credentials.workerToken.suffix} · never placed in a URL` : `Not configured · ${state.setup.credentials.workerToken.provider}`}</small></div>
+                <PhaseBadge tone={state.setup.credentials.workerToken.configured ? 'success' : 'warning'}>{state.setup.credentials.workerToken.configured ? 'configured' : 'required'}</PhaseBadge>
+                <Button compact onClick={() => openSetup(2)}>Replace</Button>
               </article>
             </div>
             <div className="redaction-note"><EyeOff size={17} /><span><strong>Screenshot-safe by design</strong><small>Secrets are excluded from UI state, logs, analytics, crash reports, and project files.</small></span></div>
@@ -118,7 +133,6 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
             <div className="setting-rows">
               <label className="select-row"><span><strong>Theme</strong><small>Both modes preserve the dark production-console contrast.</small></span><select value={state.settings.theme} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'theme', value: event.target.value as 'midnight' | 'ink' })}><option value="midnight">Midnight cobalt</option><option value="ink">Deep ink</option></select></label>
               <label className="select-row"><span><strong>Information density</strong><small>Compact keeps 450-item review efficient.</small></span><select value={state.settings.density} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'density', value: event.target.value as 'comfortable' | 'compact' })}><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select></label>
-              <label className="toggle-row"><span><strong>Completion sounds</strong><small>Only plays on explicit batch events.</small></span><input type="checkbox" checked={state.settings.soundsEnabled} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'soundsEnabled', value: event.target.checked })} /><i /></label>
             </div>
           </section>
         </div>
@@ -128,18 +142,18 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
             <SettingSectionTitle icon={Server} eyebrow="RunPod attachment" title="One GPU, discovered live" />
             <div className="pod-attachment-card">
               <div className="pod-attachment-card__top"><span><Zap size={20} /></span><div><strong>{state.pod.gpu ?? 'No active compute'}</strong><small>{state.pod.podId ? `${state.pod.podId} · disposable session ID` : 'A fresh Pod ID is discovered after each explicit start.'}</small></div><PhaseBadge tone={state.pod.phase === 'ready' ? 'success' : state.pod.phase === 'error' ? 'danger' : 'neutral'}>{state.pod.phase}</PhaseBadge></div>
-              <dl><div><dt>Fallback pool</dt><dd>10 approved 16–32 GB GPUs</dd></div><div><dt>Selection</dt><dd>Atomic ordered fallback</dd></div><div><dt>Template</dt><dd>ImageForge worker v1</dd></div><div><dt>Port</dt><dd>8000 / HTTPS proxy</dd></div></dl>
+              <dl><div><dt>Fallback pool</dt><dd>7 ordinary EU-RO-1 GPUs</dd></div><div><dt>Selection</dt><dd>Atomic ordered fallback</dd></div><div><dt>Template</dt><dd>ImageForge worker v1</dd></div><div><dt>Port</dt><dd>8000 / HTTPS proxy</dd></div></dl>
             </div>
             <div className="setting-rows pod-preferences">
               <label className="select-row"><span><strong>GPU preference</strong><small>Ranks the compatible pool; it never pins one GPU model.</small></span><select value={state.settings.gpuPreference} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'gpuPreference', value: event.target.value as 'best_value' | 'fastest' })}><option value="best_value">Best whole-batch value</option><option value="fastest">Fastest measured</option></select></label>
-              <label className="toggle-row"><span><strong>Emergency 48 GB fallback tier</strong><small>Opt in only after reviewing current A40/A6000/L40 pricing.</small></span><input type="checkbox" checked={state.settings.emergencyGpuTierEnabled} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'emergencyGpuTierEnabled', value: event.target.checked })} /><i /></label>
+              <label className="toggle-row"><span><strong>Slow emergency RTX 2000 Ada</strong><small>Add only as the final fallback after the seven ordinary EU-RO-1 candidates.</small></span><input type="checkbox" checked={state.settings.slowEmergencyGpuEnabled} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'slowEmergencyGpuEnabled', value: event.target.checked })} /><i /></label>
             </div>
             {state.pod.matchingPodIds.length > 1 ? (
               <div className="duplicate-pod-card" role="alert"><AlertTriangle size={19} /><div><strong>Duplicate hourly spend detected</strong><small>{state.pod.matchingPodIds.join(' · ')}. Neither Pod will be silently deleted.</small></div></div>
             ) : null}
             <div className="manual-only-card"><ShieldCheck size={18} /><div><strong>Termination is manual only</strong><small>No completed-job event, idle timer, app exit, background monitor, or connectivity failure can terminate a Pod.</small></div></div>
             {state.pod.phase === 'ready' ? <Button tone="danger" onClick={() => dispatch({ type: 'REQUEST_STOP_POD' })}>Stop GPU with confirmation</Button> : <Button tone="primary" icon={Zap} disabled={!['offline', 'error'].includes(state.pod.phase)} onClick={() => dispatch({ type: 'START_POD' })}>Start GPU explicitly</Button>}
-            <Button icon={Check} onClick={() => dispatch({ type: 'SHOW_TOAST', tone: 'success', title: 'Connection metadata passed', message: 'Profile, vault status, and folder permissions are valid. No Pod was created.' })}>Run read-only connection test</Button>
+            <Button icon={Check} onClick={() => void testConnection()}>Run read-only connection test</Button>
             <details className="advanced-settings">
               <summary><span><Database size={15} /><strong>Advanced connection details</strong></span><ChevronRight size={15} /></summary>
               <dl>
@@ -150,7 +164,7 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
                 <div><dt>Health timeout</dt><dd>12 seconds · 2 misses</dd></div>
                 <div><dt>Diagnostics</dt><dd>Prompt + secret logging off</dd></div>
               </dl>
-              <p>The volume region constrains ordinary GPU fallback inventory. ImageForge passes an ordered compatible pool to RunPod so the actual available GPU resolves at creation time.</p>
+              <p>EU-RO-1 cold order: RTX 4090, RTX PRO 4500 Blackwell, RTX 5090, RTX PRO 4000 Blackwell, L4, RTX A4500, and RTX 4000 Ada. RTX 2000 Ada is slow emergency-only.</p>
             </details>
           </section>
 
@@ -176,7 +190,7 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
           </section>
         </div>
       </div>
-      {showSetup ? <SetupAssistant state={state} dispatch={dispatch} adapter={adapter} onClose={() => setShowSetup(false)} /> : null}
+      {showSetup ? <SetupAssistant key={`setup-${setupInitialStep}`} state={state} dispatch={dispatch} adapter={adapter} initialStep={setupInitialStep} onClose={() => setShowSetup(false)} /> : null}
     </div>
   );
 }

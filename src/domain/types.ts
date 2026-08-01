@@ -48,6 +48,19 @@ export type OperationalScenario =
   | 'complete'
   | 'error';
 
+export type CredentialKind = 'runpodApiKey' | 'workerToken';
+
+export interface CredentialMetadata {
+  configured: boolean;
+  suffix: string | null;
+  provider: string;
+}
+
+export interface CredentialMetadataMap {
+  runpodApiKey: CredentialMetadata;
+  workerToken: CredentialMetadata;
+}
+
 export interface ValidationIssue {
   code: 'empty' | 'too_many' | 'too_long' | 'duplicate' | 'too_short' | 'invalid_csv';
   level: 'error' | 'warning';
@@ -94,6 +107,7 @@ export interface PodState {
   matchingPodIds: string[];
   lastCheckedAt: string | null;
   errorMessage: string | null;
+  lifecycleSequence: number;
 }
 
 export interface BatchState {
@@ -145,9 +159,15 @@ export interface SettingsState {
   theme: 'midnight' | 'ink';
   density: 'comfortable' | 'compact';
   simulationSpeed: 1 | 4 | 12;
-  soundsEnabled: boolean;
   gpuPreference: 'best_value' | 'fastest';
-  emergencyGpuTierEnabled: boolean;
+  slowEmergencyGpuEnabled: boolean;
+}
+
+export interface SetupState {
+  completed: boolean;
+  studioProfile: string;
+  destinationValidated: boolean;
+  credentials: CredentialMetadataMap;
 }
 
 export type DialogState =
@@ -171,6 +191,7 @@ export interface AppState {
   library: LibraryAsset[];
   usage: UsageRun[];
   settings: SettingsState;
+  setup: SetupState;
   dialog: DialogState;
   toast: ToastState | null;
   toastSequence: number;
@@ -185,7 +206,7 @@ export type AppAction =
   | { type: 'NEW_BATCH' }
   | { type: 'SET_DESTINATION'; path: string }
   | { type: 'START_POD' }
-  | { type: 'SET_POD_PHASE'; phase: PodPhase; progress: number; detail: string; podId?: string }
+  | { type: 'SET_POD_PHASE'; phase: PodPhase; progress: number; detail: string; podId?: string; gpu?: string; vram?: string; hourlyRate?: number }
   | { type: 'REQUEST_STOP_POD' }
   | { type: 'CONFIRM_STOP_POD' }
   | { type: 'POD_STOPPED' }
@@ -197,9 +218,14 @@ export type AppAction =
   | { type: 'REQUEST_CANCEL_BATCH' }
   | { type: 'CONFIRM_CANCEL_BATCH' }
   | { type: 'RETRY_FAILED' }
+  | { type: 'RESUME_INTERRUPTED_BATCH' }
   | { type: 'DISMISS_DIALOG' }
   | { type: 'DISMISS_TOAST' }
   | { type: 'SET_SETTING'; key: keyof SettingsState; value: SettingsState[keyof SettingsState] }
+  | { type: 'SET_STUDIO_PROFILE'; profile: string }
+  | { type: 'SET_DESTINATION_VALIDATED'; validated: boolean }
+  | { type: 'SET_CREDENTIAL_METADATA'; credentials: CredentialMetadataMap }
+  | { type: 'COMPLETE_SETUP' }
   | { type: 'SAVE_SETTINGS' }
   | { type: 'PREVIEW_SCENARIO'; scenario: OperationalScenario }
   | { type: 'RESET_WORKSPACE' }

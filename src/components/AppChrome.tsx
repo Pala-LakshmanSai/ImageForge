@@ -40,6 +40,8 @@ function formatEta(state: AppState) {
   const counts = batchCounts(state.batch);
   if (['complete', 'partial_failure'].includes(state.batch.phase)) return 'done';
   if (state.batch.phase === 'paused') return 'paused';
+  if (state.batch.phase === 'interrupted') return 'resume';
+  if (state.batch.phase === 'cancelled' || state.batch.phase === 'error') return 'stopped';
   const seconds = Math.round(counts.pending * state.batch.estimatedSecondsPerImage);
   const minutes = Math.floor(seconds / 60);
   return minutes > 0 ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
