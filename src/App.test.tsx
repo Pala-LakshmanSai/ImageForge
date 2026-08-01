@@ -220,6 +220,29 @@ describe('ImageForge shell', () => {
     expect(screen.getByRole('heading', { name: 'Direct the frame.' })).toBeVisible();
   });
 
+  it('moves keyboard focus to the first control on every setup step', async () => {
+    const user = userEvent.setup();
+    render(<App initialState={createInitialState()} adapter={immediateAdapter(false)} />);
+
+    const name = screen.getByRole('textbox', { name: 'Your name' });
+    expect(name).toHaveFocus();
+    await user.type(name, 'Lakshman');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+
+    const apiKey = await screen.findByPlaceholderText('Paste restricted key');
+    expect(apiKey).toHaveFocus();
+    await user.type(apiKey, 'runpod-secret-1234');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+
+    const profile = await screen.findByRole('textbox', { name: 'Connection profile' });
+    expect(profile).toHaveFocus();
+    const workerToken = screen.getByPlaceholderText('Paste personal worker token');
+    await user.type(workerToken, 'worker-secret-5678');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+
+    expect(await screen.findByRole('button', { name: /Pictures\/ImageForge/i })).toHaveFocus();
+  });
+
   it('clears prior destination validation when the native folder chooser is cancelled', async () => {
     const user = userEvent.setup();
     const configured = createConfiguredInitialState();

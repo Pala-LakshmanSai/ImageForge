@@ -62,10 +62,13 @@ covered by tests.
 
 ## Current automated evidence — `77d5c8d` + preview hardening
 
-- Frontend: 12 Vitest files, 69 tests passed; `npm run typecheck` and
+- Frontend: 12 Vitest files, 70 tests passed; `npm run typecheck` and
   `npm run build` passed. The production preview path now renders authenticated
   WebP bytes through native Rust, with a session-local object URL cache and a
-  safe decoder-error fallback.
+  safe decoder-error fallback. Setup navigation now returns keyboard focus to
+  the first control on every step (including the read-only profile), with a
+  regression test covering the complete four-step path. Scope/speed segmented
+  controls expose pressed state and group labels to assistive technology.
 - Worker: 33 offline tests passed, 1 explicitly paid real-GPU test deselected;
   Ruff passed for `worker/src` and `worker/tests`.
 - External RunPod setup: the durable `imageforge-prod-50gb` volume exists as

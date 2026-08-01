@@ -97,7 +97,7 @@ function NoBatch({ state, dispatch }: Pick<ScreenProps, 'state' | 'dispatch'>) {
         <section className="panel boot-panel">
           <div className="boot-panel__visual"><LoaderCircle className="spin" size={38} /><span>{state.pod.phaseProgress}%</span></div>
           <div className="boot-panel__copy"><PhaseBadge tone="info">{state.pod.phase}</PhaseBadge><h2>{state.pod.statusDetail}</h2><p>The model lives on the persistent network volume. Normal starts install no packages and download no weights.</p><LinearProgress value={state.pod.phaseProgress} label="GPU start progress" /></div>
-          <div className="boot-steps" aria-label="GPU boot phases">
+          <div className="boot-steps" role="group" aria-label="GPU boot phases">
             {['Inventory', 'Provision', 'Boot', 'Load', 'Warm', 'Ready'].map((label, index) => <span key={label} className={state.pod.phaseProgress >= [4, 20, 38, 60, 82, 100][index] ? 'boot-step--complete' : ''}>{label}</span>)}
           </div>
         </section>

@@ -1,5 +1,5 @@
 import { ArrowLeft, ArrowRight, Check, Folder, KeyRound, Server, ShieldCheck, UserRound, X } from 'lucide-react';
-import { useRef, useState, type Dispatch } from 'react';
+import { useLayoutEffect, useRef, useState, type Dispatch } from 'react';
 import type { ImageForgeAdapter } from '../adapters/imageForgeAdapter';
 import type { AppAction, AppState, CredentialKind } from '../domain/types';
 import { BrandMark } from './BrandMark';
@@ -37,6 +37,14 @@ export function SetupAssistant({
   const [error, setError] = useState<string | null>(null);
   const apiKeyRef = useRef<HTMLInputElement>(null);
   const workerTokenRef = useRef<HTMLInputElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  // The dialog's initial focus effect runs only when it mounts. Each setup
+  // step replaces its form controls, so explicitly move focus to the first
+  // control after a keyboard user advances or goes back.
+  useLayoutEffect(() => {
+    contentRef.current?.querySelector<HTMLElement>('[data-autofocus]')?.focus();
+  }, [step]);
 
   async function chooseFolder() {
     if (locked) {
@@ -175,7 +183,7 @@ export function SetupAssistant({
         <div className="setup-security"><ShieldCheck size={16} /><span>Credentials go directly to the operating system vault abstraction.</span></div>
       </aside>
 
-      <div className="setup-content">
+      <div ref={contentRef} className="setup-content">
         {canClose ? <IconButton className="setup-close" label="Close setup assistant" icon={X} onClick={onClose} /> : null}
         <div className="setup-step-count">Step {step + 1} of {STEPS.length}</div>
         {step === 0 ? (
@@ -198,7 +206,7 @@ export function SetupAssistant({
             <Eyebrow>Import studio connection</Eyebrow>
             <h1 id="setup-title">Bring in the studio profile.</h1>
             <p>The non-secret profile describes the template, volume, seven-GPU EU-RO-1 policy, worker port, and pinned model preset.</p>
-            <label className="setup-field"><span>Connection profile</span><textarea key="studio-profile" readOnly={locked} value={state.setup.studioProfile} onChange={(event) => dispatch({ type: 'SET_STUDIO_PROFILE', profile: event.target.value })} /></label>
+            <label className="setup-field"><span>Connection profile</span><textarea key="studio-profile" readOnly={locked} data-autofocus value={state.setup.studioProfile} onChange={(event) => dispatch({ type: 'SET_STUDIO_PROFILE', profile: event.target.value })} /></label>
             <label className="setup-field"><span>Worker token</span><input key="worker-token" ref={workerTokenRef} disabled={locked} type="password" autoComplete="off" placeholder={state.setup.credentials.workerToken.configured ? `Configured · •••• ${state.setup.credentials.workerToken.suffix}` : 'Paste personal worker token'} /><small>Stored separately; never included in the profile or a URL.</small></label>
           </div>
         ) : (

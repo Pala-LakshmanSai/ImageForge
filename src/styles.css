@@ -2321,7 +2321,7 @@ textarea:disabled {
   grid-template-columns: 310px minmax(0, 1fr);
   overflow: hidden;
   width: min(1080px, 100%);
-  min-height: 640px;
+  min-height: min(640px, calc(100vh - 56px));
   max-height: calc(100vh - 56px);
   border: 1px solid var(--border-bright);
   border-radius: 31px;
@@ -2332,7 +2332,7 @@ textarea:disabled {
 .setup-rail {
   position: relative;
   display: flex;
-  overflow: hidden;
+  overflow: auto;
   flex-direction: column;
   padding: 30px;
   background:
@@ -2358,6 +2358,7 @@ textarea:disabled {
 .setup-content {
   position: relative;
   display: flex;
+  overflow: auto;
   min-width: 0;
   flex-direction: column;
   padding: 46px 48px 29px;

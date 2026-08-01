@@ -59,7 +59,7 @@ export function LibraryScreen({ state, dispatch, adapter }: ScreenProps) {
         </div>
       </section>
 
-      <div className="library-stats" aria-label="Library summary">
+      <div className="library-stats" role="group" aria-label="Library summary">
         <div><span>Verified images</span><strong>{state.library.length.toLocaleString()}</strong><small>JPEG + receipt ledger</small></div>
         <div><span>Production batches</span><strong>{batches}</strong><small>Stable numeric order</small></div>
         <div><span>Render time indexed</span><strong>{Math.round(totalSeconds / 60)}m</strong><small>Measured, not estimated</small></div>
@@ -68,9 +68,9 @@ export function LibraryScreen({ state, dispatch, adapter }: ScreenProps) {
 
       <section className="panel library-panel">
         <header className="library-toolbar">
-          <div className="segmented-control" aria-label="Library scope">
-            <button className={scope === 'all' ? 'active' : ''} onClick={() => setScope('all')}>All batches</button>
-            <button className={scope === 'current' ? 'active' : ''} onClick={() => setScope('current')}>Current batch</button>
+          <div className="segmented-control" role="group" aria-label="Library scope">
+            <button type="button" className={scope === 'all' ? 'active' : ''} aria-pressed={scope === 'all'} onClick={() => setScope('all')}>All batches</button>
+            <button type="button" className={scope === 'current' ? 'active' : ''} aria-pressed={scope === 'current'} onClick={() => setScope('current')}>Current batch</button>
           </div>
           <label className="search-field">
             <Search size={16} />
