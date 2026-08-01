@@ -1,16 +1,18 @@
 mod native;
 
 use native::{
-    CredentialKind, CredentialMetadata, CredentialVault, DestinationMetadata, DestinationStore,
-    DownloadReceipt, DownloadRequest, Downloader, KeyringVault, NativeError, NativeResult,
-    RunPodHttpRequest, RunPodHttpResponse, RunPodTransport, WorkerApi, WorkerHttpResponse,
-    WorkerSession,
+    CredentialKind, CredentialMetadata, CredentialVault, DestinationMetadata, DestinationSelection,
+    DestinationStore, DownloadReceipt, DownloadRequest, Downloader, KeyringVault, NativeError,
+    NativeResult, ReceiptLedger, RunPodCreateMarkerMetadata, RunPodHttpRequest, RunPodHttpResponse,
+    RunPodTransport, WorkerApi, WorkerHttpResponse, WorkerSession,
 };
 use serde::Serialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tauri::webview::{NewWindowResponse, WebviewWindowBuilder};
 use tauri::State;
+use tauri::WebviewUrl;
 use uuid::Uuid;
 
 #[derive(Serialize)]
@@ -29,12 +31,13 @@ struct NativeState {
     runpod: RunPodTransport,
     worker: WorkerApi,
     downloader: Downloader,
+    control_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl NativeState {
     fn new() -> NativeResult<Self> {
         let vault: Arc<dyn CredentialVault> = Arc::new(KeyringVault);
-        let destination = DestinationStore::default();
+        let destination = DestinationStore::new()?;
         let session = WorkerSession::default();
         let runpod = RunPodTransport::new(vault.clone())?;
         let worker = WorkerApi::new(vault.clone(), session.clone())?;
@@ -46,6 +49,7 @@ impl NativeState {
             runpod,
             worker,
             downloader,
+            control_gate: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 }
@@ -95,7 +99,7 @@ async fn replace_credential(
 async fn choose_destination(
     state: State<'_, NativeState>,
     default_path: String,
-) -> NativeResult<Option<DestinationMetadata>> {
+) -> NativeResult<Option<DestinationSelection>> {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let mut dialog =
@@ -109,17 +113,15 @@ async fn choose_destination(
         };
         let selected = folder.path().to_path_buf();
         let destination = state.destination.clone();
-        return tauri::async_runtime::spawn_blocking(move || {
-            destination.validate_and_bind(&selected)
-        })
-        .await
-        .map_err(|_| {
-            NativeError::new(
-                "native_task_failed",
-                "The destination could not be verified.",
-            )
-        })?
-        .map(Some);
+        tauri::async_runtime::spawn_blocking(move || destination.authorize_selected(&selected))
+            .await
+            .map_err(|_| {
+                NativeError::new(
+                    "native_task_failed",
+                    "The destination could not be verified.",
+                )
+            })?
+            .map(Some)
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -136,21 +138,41 @@ async fn choose_destination(
 async fn validate_destination(
     state: State<'_, NativeState>,
     path: String,
+    chooser_grant: String,
 ) -> NativeResult<DestinationMetadata> {
     let destination = state.destination.clone();
-    tauri::async_runtime::spawn_blocking(move || destination.validate_and_bind(Path::new(&path)))
+    tauri::async_runtime::spawn_blocking(move || {
+        destination.validate_selected(Path::new(&path), &chooser_grant)
+    })
+    .await
+    .map_err(|_| {
+        NativeError::new(
+            "native_task_failed",
+            "The destination could not be verified.",
+        )
+    })?
+}
+
+#[tauri::command]
+async fn restore_destination(
+    state: State<'_, NativeState>,
+) -> NativeResult<Option<DestinationMetadata>> {
+    let destination = state.destination.clone();
+    tauri::async_runtime::spawn_blocking(move || destination.restore())
         .await
         .map_err(|_| {
             NativeError::new(
                 "native_task_failed",
-                "The destination could not be verified.",
+                "The saved destination could not be restored.",
             )
         })?
 }
 
 #[tauri::command]
-fn bind_worker_session(state: State<'_, NativeState>, pod_id: String) -> NativeResult<Value> {
-    serde_json::to_value(state.session.bind(&pod_id)?).map_err(|_| {
+async fn bind_worker_session(state: State<'_, NativeState>, pod_id: String) -> NativeResult<Value> {
+    let _control = state.control_gate.lock().await;
+    state.runpod.assert_verified_pod(&pod_id)?;
+    serde_json::to_value(state.session.bind_verified(&pod_id).await?).map_err(|_| {
         NativeError::new(
             "native_serialization_failed",
             "Worker session metadata could not be encoded.",
@@ -159,17 +181,57 @@ fn bind_worker_session(state: State<'_, NativeState>, pod_id: String) -> NativeR
 }
 
 #[tauri::command]
-fn clear_worker_session(state: State<'_, NativeState>) -> NativeResult<()> {
-    state.session.clear()
+async fn clear_worker_session(state: State<'_, NativeState>) -> NativeResult<()> {
+    let _control = state.control_gate.lock().await;
+    state.session.clear().await
 }
 
 #[tauri::command]
-fn bind_runpod_profile(
+async fn bind_runpod_profile(
     state: State<'_, NativeState>,
     template_id: String,
     network_volume_id: String,
 ) -> NativeResult<()> {
+    let _control = state.control_gate.lock().await;
+    state.session.clear().await?;
     state.runpod.bind_profile(&template_id, &network_volume_id)
+}
+
+#[tauri::command]
+async fn authorize_runpod_create(state: State<'_, NativeState>) -> NativeResult<String> {
+    let _control = state.control_gate.lock().await;
+    state.runpod.authorize_create()
+}
+
+#[tauri::command]
+async fn authorize_emergency_gpu(state: State<'_, NativeState>) -> NativeResult<String> {
+    let _control = state.control_gate.lock().await;
+    state.runpod.authorize_emergency_gpu()
+}
+
+#[tauri::command]
+async fn clear_runpod_start_authorization(state: State<'_, NativeState>) -> NativeResult<()> {
+    let _control = state.control_gate.lock().await;
+    state.runpod.clear_start_authorization()
+}
+
+#[tauri::command]
+fn runpod_create_marker_metadata(
+    state: State<'_, NativeState>,
+) -> NativeResult<RunPodCreateMarkerMetadata> {
+    state.runpod.create_marker_metadata()
+}
+
+#[tauri::command]
+async fn resolve_runpod_create_marker(
+    state: State<'_, NativeState>,
+    attempt_id: String,
+    reconciled_pod_id: Option<String>,
+) -> NativeResult<()> {
+    let _control = state.control_gate.lock().await;
+    state
+        .runpod
+        .resolve_create_marker(&attempt_id, reconciled_pod_id.as_deref())
 }
 
 #[tauri::command]
@@ -177,6 +239,7 @@ async fn runpod_inventory_http(
     state: State<'_, NativeState>,
     url: String,
 ) -> NativeResult<RunPodHttpResponse> {
+    let _control = state.control_gate.lock().await;
     state
         .runpod
         .execute(RunPodHttpRequest::get(
@@ -191,6 +254,7 @@ async fn runpod_list_pods_http(
     state: State<'_, NativeState>,
     url: String,
 ) -> NativeResult<RunPodHttpResponse> {
+    let _control = state.control_gate.lock().await;
     state
         .runpod
         .execute(RunPodHttpRequest::get(
@@ -205,13 +269,18 @@ async fn runpod_create_pod_http(
     state: State<'_, NativeState>,
     url: String,
     body: Value,
+    create_grant: String,
+    emergency_grant: Option<String>,
 ) -> NativeResult<RunPodHttpResponse> {
+    let _control = state.control_gate.lock().await;
     state
         .runpod
         .execute(RunPodHttpRequest::post(
             native::runpod::RunPodOperation::CreatePod,
             url,
             body,
+            create_grant,
+            emergency_grant,
         ))
         .await
 }
@@ -221,6 +290,7 @@ async fn runpod_get_pod_http(
     state: State<'_, NativeState>,
     url: String,
 ) -> NativeResult<RunPodHttpResponse> {
+    let _control = state.control_gate.lock().await;
     state
         .runpod
         .execute(RunPodHttpRequest::get(
@@ -235,6 +305,7 @@ async fn runpod_terminate_pod_http(
     state: State<'_, NativeState>,
     url: String,
 ) -> NativeResult<RunPodHttpResponse> {
+    let _control = state.control_gate.lock().await;
     state
         .runpod
         .execute(RunPodHttpRequest::delete(
@@ -269,6 +340,20 @@ fn parse_batch_id(value: &str) -> NativeResult<Uuid> {
             "The worker returned an invalid batch identifier.",
         )
     })
+}
+
+fn navigation_allowed(url: &url::Url) -> bool {
+    let production = (url.scheme() == "tauri" && url.host_str() == Some("localhost"))
+        || (url.scheme() == "http" && url.host_str() == Some("tauri.localhost"));
+    let development = cfg!(debug_assertions)
+        && url.scheme() == "http"
+        && url.host_str() == Some("127.0.0.1")
+        && url.port() == Some(5173);
+    (production || development)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && matches!(url.path(), "/" | "/index.html")
 }
 
 #[tauri::command]
@@ -319,20 +404,61 @@ async fn download_artifact(
     state.downloader.download_and_acknowledge(request).await
 }
 
+#[tauri::command]
+async fn read_receipt_ledger(
+    state: State<'_, NativeState>,
+    batch_id: String,
+) -> NativeResult<ReceiptLedger> {
+    state
+        .downloader
+        .read_receipt_ledger(parse_batch_id(&batch_id)?)
+        .await
+}
+
+#[tauri::command]
+async fn reconcile_receipts(
+    state: State<'_, NativeState>,
+    batch_id: String,
+) -> NativeResult<ReceiptLedger> {
+    state
+        .downloader
+        .reconcile_receipts(parse_batch_id(&batch_id)?)
+        .await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let state = NativeState::new().expect("ImageForge secure native state failed to initialize");
     tauri::Builder::default()
         .manage(state)
+        .setup(|app| {
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                .title("ImageForge")
+                .inner_size(1440.0, 900.0)
+                .min_inner_size(900.0, 650.0)
+                .resizable(true)
+                .fullscreen(false)
+                .center()
+                .on_navigation(navigation_allowed)
+                .on_new_window(|_, _| NewWindowResponse::Deny)
+                .build()?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             app_environment,
             credential_metadata,
             replace_credential,
             choose_destination,
             validate_destination,
+            restore_destination,
             bind_worker_session,
             clear_worker_session,
             bind_runpod_profile,
+            authorize_runpod_create,
+            authorize_emergency_gpu,
+            clear_runpod_start_authorization,
+            runpod_create_marker_metadata,
+            resolve_runpod_create_marker,
             runpod_inventory_http,
             runpod_list_pods_http,
             runpod_create_pod_http,
@@ -347,6 +473,8 @@ pub fn run() {
             worker_cancel_batch,
             worker_retry_failed,
             download_artifact,
+            read_receipt_ledger,
+            reconcile_receipts,
         ])
         .run(tauri::generate_context!())
         .expect("ImageForge native host failed to start");
@@ -369,6 +497,26 @@ mod tests {
         assert_eq!(
             parse_batch_id("../../secret").unwrap_err().code,
             "batch_id_invalid"
+        );
+    }
+
+    #[test]
+    fn top_level_navigation_is_restricted_to_the_app_origin() {
+        assert!(navigation_allowed(
+            &url::Url::parse("tauri://localhost/index.html").unwrap()
+        ));
+        assert!(navigation_allowed(
+            &url::Url::parse("http://tauri.localhost/").unwrap()
+        ));
+        assert!(!navigation_allowed(
+            &url::Url::parse("https://example.com/").unwrap()
+        ));
+        assert!(!navigation_allowed(
+            &url::Url::parse("http://tauri.localhost/?redirect=https://example.com").unwrap()
+        ));
+        assert_eq!(
+            navigation_allowed(&url::Url::parse("http://127.0.0.1:5173/").unwrap()),
+            cfg!(debug_assertions)
         );
     }
 }

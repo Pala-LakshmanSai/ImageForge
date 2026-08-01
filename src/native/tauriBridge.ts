@@ -18,6 +18,11 @@ export interface NativeDestinationMetadata {
   writable: boolean;
 }
 
+export interface NativeDestinationSelection {
+  path: string;
+  chooserGrant: string;
+}
+
 export interface NativeHttpResponse<T = unknown> {
   status: number;
   body: T;
@@ -29,6 +34,13 @@ interface NativeRunPodHttpResponse {
   retryAfter: string | null;
   contentType: string | null;
 }
+
+interface PendingRunPodStartGrant {
+  createGrant: string;
+  emergencyGrant: string | null;
+}
+
+let pendingRunPodStartGrant: PendingRunPodStartGrant | null = null;
 
 export interface NativeDownloadRequest {
   batchId: string;
@@ -45,6 +57,21 @@ export interface NativeDownloadReceipt {
   sha256: string;
   sizeBytes: number;
   verifiedAtUnixMs: number;
+}
+
+export interface NativeReceiptLedger {
+  schemaVersion: 1;
+  batchId: string;
+  receipts: NativeDownloadReceipt[];
+}
+
+export interface NativeRunPodCreateMarkerMetadata {
+  pending: boolean;
+  attemptId: string | null;
+  attemptedAtUnixMs: number | null;
+  podName: string | null;
+  gpuId: string | null;
+  podId: string | null;
 }
 
 declare global {
@@ -93,12 +120,19 @@ export function nativeReplaceCredential(
   return invoke<NativeCredentialMetadata>('replace_credential', { kind, value });
 }
 
-export function nativeChooseDestination(defaultPath: string): Promise<NativeDestinationMetadata | null> {
-  return invoke<NativeDestinationMetadata | null>('choose_destination', { defaultPath });
+export function nativeChooseDestination(defaultPath: string): Promise<NativeDestinationSelection | null> {
+  return invoke<NativeDestinationSelection | null>('choose_destination', { defaultPath });
 }
 
-export function nativeValidateDestination(path: string): Promise<NativeDestinationMetadata> {
-  return invoke<NativeDestinationMetadata>('validate_destination', { path });
+export function nativeValidateDestination(
+  path: string,
+  chooserGrant: string,
+): Promise<NativeDestinationMetadata> {
+  return invoke<NativeDestinationMetadata>('validate_destination', { path, chooserGrant });
+}
+
+export function nativeRestoreDestination(): Promise<NativeDestinationMetadata | null> {
+  return invoke<NativeDestinationMetadata | null>('restore_destination');
 }
 
 export function bindNativeWorkerSession(podId: string): Promise<void> {
@@ -111,6 +145,38 @@ export function clearNativeWorkerSession(): Promise<void> {
 
 export function bindNativeRunPodProfile(templateId: string, networkVolumeId: string): Promise<void> {
   return invoke('bind_runpod_profile', { templateId, networkVolumeId });
+}
+
+/** Arms exactly one foreground Pod create. RTX 2000 Ada additionally requires
+ * the separately issued emergency grant. Grants expire natively and are
+ * cleared from renderer memory before the create invoke begins. */
+export async function nativeAuthorizeRunPodStart(allowSlowEmergency: boolean): Promise<void> {
+  const createGrant = await invoke<string>('authorize_runpod_create');
+  try {
+    const emergencyGrant = allowSlowEmergency
+      ? await invoke<string>('authorize_emergency_gpu')
+      : null;
+    pendingRunPodStartGrant = { createGrant, emergencyGrant };
+  } catch (error) {
+    await invoke('clear_runpod_start_authorization').catch(() => undefined);
+    throw error;
+  }
+}
+
+export async function nativeClearRunPodStartAuthorization(): Promise<void> {
+  pendingRunPodStartGrant = null;
+  await invoke('clear_runpod_start_authorization');
+}
+
+export function nativeRunPodCreateMarkerMetadata(): Promise<NativeRunPodCreateMarkerMetadata> {
+  return invoke<NativeRunPodCreateMarkerMetadata>('runpod_create_marker_metadata');
+}
+
+export function nativeResolveRunPodCreateMarker(
+  attemptId: string,
+  reconciledPodId: string | null,
+): Promise<void> {
+  return invoke('resolve_runpod_create_marker', { attemptId, reconciledPodId });
 }
 
 export function nativeWorkerHealth(): Promise<NativeHttpResponse> {
@@ -149,6 +215,14 @@ export function nativeDownloadArtifact(request: NativeDownloadRequest): Promise<
   return invoke('download_artifact', { request });
 }
 
+export function nativeReadReceiptLedger(batchId: string): Promise<NativeReceiptLedger> {
+  return invoke<NativeReceiptLedger>('read_receipt_ledger', { batchId });
+}
+
+export function nativeReconcileReceipts(batchId: string): Promise<NativeReceiptLedger> {
+  return invoke<NativeReceiptLedger>('reconcile_receipts', { batchId });
+}
+
 function authorizationIsNativeSentinel(headers: Headers): boolean {
   return headers.get('authorization') === `Bearer ${NATIVE_RUNPOD_API_KEY_SENTINEL}`;
 }
@@ -167,9 +241,14 @@ async function invokeRunPodTransport(url: URL, init: RequestInit): Promise<Nativ
     if (method === 'GET') return invoke('runpod_list_pods_http', { url: url.toString() });
     if (method === 'POST') {
       if (typeof init.body !== 'string') throw new Error('RunPod create body is missing.');
+      const grants = pendingRunPodStartGrant;
+      pendingRunPodStartGrant = null;
+      if (!grants) throw new Error('Authorize this foreground Pod start before creating it.');
       return invoke('runpod_create_pod_http', {
         url: url.toString(),
         body: JSON.parse(init.body) as unknown,
+        createGrant: grants.createGrant,
+        emergencyGrant: grants.emergencyGrant,
       });
     }
   }
@@ -200,7 +279,7 @@ export const nativeRunPodFetch: typeof fetch = async (input, init = {}) => {
   return new Response(body, { status: result.status, headers });
 };
 
-const WORKER_PROXY_HOST = /^([A-Za-z0-9][A-Za-z0-9-]{1,62})-8000\.proxy\.runpod\.net$/;
+const WORKER_PROXY_HOST = /^([A-Za-z0-9](?:[A-Za-z0-9-]{0,56}[A-Za-z0-9])?)-8000\.proxy\.runpod\.net$/;
 
 /** Health-only fetch surface used by the RunPod readiness controller. The
  * lifecycle has already verified the managed Pod; this binds its derived ID to

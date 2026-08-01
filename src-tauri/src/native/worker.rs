@@ -1,3 +1,4 @@
+use super::session::WorkerSessionPin;
 use super::{CredentialKind, CredentialVault, NativeError, NativeResult, WorkerSession};
 use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
@@ -33,6 +34,14 @@ pub struct WorkerApi {
     session: WorkerSession,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum WorkerOperation {
+    Health,
+    Status,
+    Manifest,
+    Receipt,
+}
+
 impl WorkerApi {
     pub fn new(vault: Arc<dyn CredentialVault>, session: WorkerSession) -> NativeResult<Self> {
         let client = Client::builder()
@@ -56,13 +65,25 @@ impl WorkerApi {
     }
 
     pub async fn health(&self) -> NativeResult<WorkerHttpResponse> {
-        self.request_json(Method::GET, "/v1/health", None, false)
-            .await
+        self.request_json(
+            Method::GET,
+            "/v1/health",
+            None,
+            false,
+            WorkerOperation::Health,
+        )
+        .await
     }
 
     pub async fn status(&self) -> NativeResult<WorkerHttpResponse> {
-        self.request_json(Method::GET, "/v1/status", None, true)
-            .await
+        self.request_json(
+            Method::GET,
+            "/v1/status",
+            None,
+            true,
+            WorkerOperation::Status,
+        )
+        .await
     }
 
     pub async fn create_batch(&self, input: CreateBatchInput) -> NativeResult<WorkerHttpResponse> {
@@ -72,13 +93,20 @@ impl WorkerApi {
             "/v1/batches",
             Some(json!({"prompts": input.prompts, "base_seed": input.base_seed})),
             true,
+            WorkerOperation::Manifest,
         )
         .await
     }
 
     pub async fn get_batch(&self, batch_id: Uuid) -> NativeResult<WorkerHttpResponse> {
-        self.request_json(Method::GET, &format!("/v1/batches/{batch_id}"), None, true)
-            .await
+        self.request_json(
+            Method::GET,
+            &format!("/v1/batches/{batch_id}"),
+            None,
+            true,
+            WorkerOperation::Manifest,
+        )
+        .await
     }
 
     pub async fn pause(&self, batch_id: Uuid) -> NativeResult<WorkerHttpResponse> {
@@ -97,8 +125,9 @@ impl WorkerApi {
         self.mutate_batch(batch_id, "retry-failed").await
     }
 
-    pub async fn acknowledge(
+    pub(crate) async fn acknowledge_with_pin(
         &self,
+        pin: &WorkerSessionPin,
         batch_id: Uuid,
         index: u16,
         sha256: &str,
@@ -112,13 +141,15 @@ impl WorkerApi {
                 "A download receipt must contain a positive byte count.",
             ));
         }
-        self.request_json(
+        self.request_json_with_pin(
+            pin,
             Method::POST,
             &format!("/v1/batches/{batch_id}/receipts"),
             Some(json!({
                 "receipts": [{"index": index, "sha256": sha256, "size_bytes": size_bytes}]
             })),
             true,
+            WorkerOperation::Receipt,
         )
         .await
     }
@@ -135,6 +166,14 @@ impl WorkerApi {
         self.vault.load(CredentialKind::WorkerToken)
     }
 
+    pub(crate) fn saved_secrets(&self) -> NativeResult<Vec<String>> {
+        let mut secrets = vec![self.worker_token()?];
+        if let Ok(runpod_key) = self.vault.load(CredentialKind::RunpodApiKey) {
+            secrets.push(runpod_key);
+        }
+        Ok(secrets)
+    }
+
     async fn mutate_batch(&self, batch_id: Uuid, action: &str) -> NativeResult<WorkerHttpResponse> {
         debug_assert!(matches!(
             action,
@@ -145,6 +184,7 @@ impl WorkerApi {
             &format!("/v1/batches/{batch_id}/{action}"),
             None,
             true,
+            WorkerOperation::Manifest,
         )
         .await
     }
@@ -155,17 +195,30 @@ impl WorkerApi {
         path: &str,
         body: Option<Value>,
         authenticated: bool,
+        operation: WorkerOperation,
     ) -> NativeResult<WorkerHttpResponse> {
-        let url = self.session.endpoint(path)?;
-        self.session.assert_url_is_current(&url)?;
+        let pin = self.session.pin().await?;
+        self.request_json_with_pin(&pin, method, path, body, authenticated, operation)
+            .await
+    }
+
+    async fn request_json_with_pin(
+        &self,
+        pin: &WorkerSessionPin,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        authenticated: bool,
+        operation: WorkerOperation,
+    ) -> NativeResult<WorkerHttpResponse> {
+        let url = pin.endpoint(path)?;
         let mut builder = self
             .client
             .request(method, url)
             .header(ACCEPT, "application/json");
-        if authenticated {
-            let credential = self.worker_token()?;
+        let worker_token = authenticated.then(|| self.worker_token()).transpose()?;
+        if let Some(credential) = worker_token.as_deref() {
             builder = builder.header(AUTHORIZATION, format!("Bearer {credential}"));
-            drop(credential);
         }
         if let Some(body) = body {
             builder = builder.header(CONTENT_TYPE, "application/json").json(&body);
@@ -188,7 +241,21 @@ impl WorkerApi {
                 )
             })?
         };
+        let reflected_worker_token = worker_token
+            .clone()
+            .or_else(|| self.vault.load(CredentialKind::WorkerToken).ok());
+        let runpod_key = self.vault.load(CredentialKind::RunpodApiKey).ok();
+        reject_secret_reflection(
+            &body,
+            reflected_worker_token.as_deref(),
+            runpod_key.as_deref(),
+        )?;
         validate_worker_envelope(status, &body)?;
+        let body = if status.is_success() {
+            project_worker_success(operation, &body)?
+        } else {
+            project_worker_error(&body)?
+        };
         Ok(WorkerHttpResponse {
             status: status.as_u16(),
             body,
@@ -208,7 +275,7 @@ fn validate_create_batch(input: &CreateBatchInput) -> NativeResult<()> {
     }
     if input.prompts.iter().any(|prompt| {
         prompt.trim().is_empty()
-            || prompt.as_bytes().len() > MAX_PROMPT_BYTES
+            || prompt.len() > MAX_PROMPT_BYTES
             || prompt.chars().any(|character| character == '\0')
     }) {
         return Err(NativeError::new(
@@ -265,6 +332,243 @@ fn validate_worker_envelope(status: StatusCode, body: &Value) -> NativeResult<()
         ));
     }
     Ok(())
+}
+
+fn project_worker_success(operation: WorkerOperation, body: &Value) -> NativeResult<Value> {
+    match operation {
+        WorkerOperation::Health => project_health(body),
+        WorkerOperation::Status => project_status(body),
+        WorkerOperation::Manifest => project_manifest(body),
+        WorkerOperation::Receipt => Ok(json!({"schema_version": 1})),
+    }
+}
+
+fn project_health(body: &Value) -> NativeResult<Value> {
+    let mut projected = project_object(
+        body,
+        &[
+            "schema_version",
+            "service",
+            "version",
+            "phase",
+            "phase_progress",
+            "process",
+            "model",
+            "gpu",
+        ],
+    )?;
+    project_nested(&mut projected, "process", &["status", "uptime_ms"])?;
+    project_nested(
+        &mut projected,
+        "model",
+        &["id", "revision", "precision", "status"],
+    )?;
+    project_nested(
+        &mut projected,
+        "gpu",
+        &["state", "available", "approved", "device_count"],
+    )?;
+    Ok(Value::Object(projected))
+}
+
+fn project_status(body: &Value) -> NativeResult<Value> {
+    let mut projected = project_object(
+        body,
+        &["schema_version", "ready", "active_batch", "permissions"],
+    )?;
+    project_nested(
+        &mut projected,
+        "permissions",
+        &["can_create", "can_manage_active", "is_owner"],
+    )?;
+    if !projected.get("active_batch").is_some_and(Value::is_null) {
+        let mut active = project_object(
+            projected
+                .get("active_batch")
+                .ok_or_else(worker_response_invalid)?,
+            &[
+                "batch_id",
+                "owner",
+                "state",
+                "progress",
+                "pause_requested",
+                "cancel_requested",
+            ],
+        )?;
+        project_nested(&mut active, "owner", &["user_id", "display_name"])?;
+        project_nested(
+            &mut active,
+            "progress",
+            &[
+                "total",
+                "completed",
+                "downloaded",
+                "failed",
+                "cancelled",
+                "processed",
+                "current_index",
+            ],
+        )?;
+        projected.insert("active_batch".into(), Value::Object(active));
+    }
+    Ok(Value::Object(projected))
+}
+
+fn project_manifest(body: &Value) -> NativeResult<Value> {
+    let mut projected = project_object(
+        body,
+        &[
+            "schema_version",
+            "batch_id",
+            "owner",
+            "state",
+            "created_at",
+            "updated_at",
+            "completed_at",
+            "interrupted_at",
+            "pause_requested",
+            "cancel_requested",
+            "images",
+            "progress",
+        ],
+    )?;
+    project_nested(&mut projected, "owner", &["user_id", "display_name"])?;
+    project_nested(
+        &mut projected,
+        "progress",
+        &[
+            "total",
+            "completed",
+            "downloaded",
+            "failed",
+            "cancelled",
+            "processed",
+            "current_index",
+        ],
+    )?;
+    let images = projected
+        .get("images")
+        .and_then(Value::as_array)
+        .ok_or_else(worker_response_invalid)?
+        .iter()
+        .map(project_image)
+        .collect::<NativeResult<Vec<_>>>()?;
+    projected.insert("images".into(), Value::Array(images));
+    Ok(Value::Object(projected))
+}
+
+fn project_image(value: &Value) -> NativeResult<Value> {
+    let mut image = project_object(
+        value,
+        &[
+            "index",
+            "prompt",
+            "seed",
+            "status",
+            "attempts",
+            "retry_rounds",
+            "filename",
+            "sha256",
+            "size_bytes",
+            "generation_ms",
+            "error",
+            "receipt",
+        ],
+    )?;
+    project_optional_nested(&mut image, "error", &["code", "message"])?;
+    project_optional_nested(
+        &mut image,
+        "receipt",
+        &["sha256", "size_bytes", "acknowledged_at"],
+    )?;
+    Ok(Value::Object(image))
+}
+
+fn project_worker_error(body: &Value) -> NativeResult<Value> {
+    let error = body
+        .get("error")
+        .and_then(Value::as_object)
+        .ok_or_else(worker_response_invalid)?;
+    let code = error
+        .get("code")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 100)
+        .ok_or_else(worker_response_invalid)?;
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 500)
+        .ok_or_else(worker_response_invalid)?;
+    Ok(json!({"error": {"code": code, "message": message, "details": null}}))
+}
+
+fn project_object(value: &Value, keys: &[&str]) -> NativeResult<serde_json::Map<String, Value>> {
+    let source = value.as_object().ok_or_else(worker_response_invalid)?;
+    keys.iter()
+        .map(|key| {
+            source
+                .get(*key)
+                .cloned()
+                .map(|value| ((*key).to_owned(), value))
+                .ok_or_else(worker_response_invalid)
+        })
+        .collect()
+}
+
+fn project_nested(
+    object: &mut serde_json::Map<String, Value>,
+    key: &str,
+    keys: &[&str],
+) -> NativeResult<()> {
+    let nested = project_object(object.get(key).ok_or_else(worker_response_invalid)?, keys)?;
+    object.insert(key.to_owned(), Value::Object(nested));
+    Ok(())
+}
+
+fn project_optional_nested(
+    object: &mut serde_json::Map<String, Value>,
+    key: &str,
+    keys: &[&str],
+) -> NativeResult<()> {
+    if !object.get(key).is_some_and(Value::is_null) {
+        project_nested(object, key, keys)?;
+    }
+    Ok(())
+}
+
+fn reject_secret_reflection(
+    value: &Value,
+    worker_token: Option<&str>,
+    runpod_key: Option<&str>,
+) -> NativeResult<()> {
+    let reflected = match value {
+        Value::String(candidate) => [worker_token, runpod_key]
+            .into_iter()
+            .flatten()
+            .any(|secret| !secret.is_empty() && candidate.contains(secret)),
+        Value::Array(items) => items
+            .iter()
+            .any(|item| reject_secret_reflection(item, worker_token, runpod_key).is_err()),
+        Value::Object(items) => items
+            .values()
+            .any(|item| reject_secret_reflection(item, worker_token, runpod_key).is_err()),
+        _ => false,
+    };
+    if reflected {
+        Err(NativeError::new(
+            "worker_secret_reflection",
+            "The worker response was rejected because it exposed saved credential material.",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn worker_response_invalid() -> NativeError {
+    NativeError::new(
+        "worker_response_invalid",
+        "The ImageForge worker returned an invalid response shape.",
+    )
 }
 
 async fn read_bounded(response: reqwest::Response, limit: usize) -> NativeResult<Vec<u8>> {
@@ -328,5 +632,93 @@ mod tests {
         assert!(validate_checksum(&"a".repeat(64)).is_ok());
         assert!(validate_checksum(&"A".repeat(64)).is_err());
         assert!(validate_checksum("../../file").is_err());
+    }
+
+    #[test]
+    fn native_http_fixtures_project_only_reviewed_worker_contracts() {
+        let health = json!({
+            "schema_version": 1, "service": "imageforge", "version": "1.0.0",
+            "phase": "ready", "phase_progress": 100,
+            "process": {"status": "running", "uptime_ms": 1000, "pid": 42},
+            "model": {"id": "flux", "revision": "pinned", "precision": "bf16", "status": "ready", "path": "/secret/model"},
+            "gpu": {"state": "ready", "available": true, "approved": true, "device_count": 1, "serial": "hidden"},
+            "env": {"WORKER_TOKEN": "hidden"}
+        });
+        let projected = project_worker_success(WorkerOperation::Health, &health).unwrap();
+        assert_eq!(
+            projected
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            [
+                "gpu",
+                "model",
+                "phase",
+                "phase_progress",
+                "process",
+                "schema_version",
+                "service",
+                "version"
+            ]
+        );
+        assert!(projected["model"].get("path").is_none());
+        assert!(projected.get("env").is_none());
+
+        let manifest = json!({
+            "schema_version": 1,
+            "batch_id": "00000000-0000-4000-8000-000000000001",
+            "owner": {"user_id": "owner", "display_name": "Owner", "token": "hidden"},
+            "state": "complete", "created_at": "2026-08-01T00:00:00Z", "updated_at": "2026-08-01T00:01:00Z",
+            "completed_at": "2026-08-01T00:01:00Z", "interrupted_at": null,
+            "pause_requested": false, "cancel_requested": false,
+            "images": [{
+                "index": 1, "prompt": "safe prompt", "seed": 1, "status": "downloaded", "attempts": 1,
+                "retry_rounds": 0, "filename": "000001.jpg", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "size_bytes": 1024, "generation_ms": 1000, "error": null,
+                "receipt": {"sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "size_bytes": 1024,
+                    "acknowledged_at": "2026-08-01T00:01:00Z", "user_id": "must-not-cross"},
+                "preview_path": "/workspace/previews/1.webp", "attempt_history": [{"raw_error": "hidden"}]
+            }],
+            "progress": {"total": 1, "completed": 1, "downloaded": 1, "failed": 0, "cancelled": 0, "processed": 1, "current_index": null},
+            "cleanup_tombstones": ["hidden"]
+        });
+        let projected = project_worker_success(WorkerOperation::Manifest, &manifest).unwrap();
+        let image = &projected["images"][0];
+        assert!(image.get("preview_path").is_none());
+        assert!(image.get("attempt_history").is_none());
+        assert!(image["receipt"].get("user_id").is_none());
+        assert!(projected.get("cleanup_tombstones").is_none());
+    }
+
+    #[test]
+    fn worker_errors_are_sanitized_and_saved_secret_reflection_is_rejected() {
+        let error = json!({
+            "schema_version": 1,
+            "error": {"code": "batch_busy", "message": "Another batch is active.", "details": {"owner": "Owner"}, "traceback": "raw"}
+        });
+        validate_worker_envelope(StatusCode::LOCKED, &error).unwrap();
+        assert_eq!(
+            project_worker_error(&error).unwrap(),
+            json!({"error": {"code": "batch_busy", "message": "Another batch is active.", "details": null}})
+        );
+        let secret = "worker-secret-exact";
+        assert_eq!(
+            reject_secret_reflection(&json!({"nested": [secret]}), Some(secret), None)
+                .unwrap_err()
+                .code,
+            "worker_secret_reflection"
+        );
+        assert_eq!(
+            reject_secret_reflection(
+                &json!({"message": format!("Bearer {secret} leaked")}),
+                Some(secret),
+                None,
+            )
+            .unwrap_err()
+            .code,
+            "worker_secret_reflection"
+        );
     }
 }

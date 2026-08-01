@@ -3,5 +3,5 @@
   "identifier": "main-capability",
   "description": "Minimal core capability for the ImageForge main window",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": []
 }

@@ -218,6 +218,24 @@ describe('ImageForge shell', () => {
     expect(screen.getByRole('heading', { name: 'Direct the frame.' })).toBeVisible();
   });
 
+  it('clears prior destination validation when the native folder chooser is cancelled', async () => {
+    const user = userEvent.setup();
+    const configured = createConfiguredInitialState();
+    const adapter = { ...immediateAdapter(), chooseDestination: async () => null };
+    render(<App initialState={{ ...configured, setup: { ...configured.setup, completed: false } }} adapter={adapter} />);
+
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await screen.findByRole('heading', { name: 'Connect RunPod.' });
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await screen.findByRole('heading', { name: 'Bring in the studio profile.' });
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    const chooser = await screen.findByRole('button', { name: /Pictures\/ImageForge/i });
+    expect(screen.getByText('Folder verified')).toBeVisible();
+    await user.click(chooser);
+    await waitFor(() => expect(screen.queryByText('Folder verified')).not.toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Run connection test' })).toBeDisabled();
+  });
+
   it('closes a portaled confirmation with Escape and restores trigger focus', async () => {
     const user = userEvent.setup();
     let state = createConfiguredInitialState();

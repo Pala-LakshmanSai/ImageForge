@@ -1,3 +1,4 @@
+use super::session::WorkerSessionPin;
 use super::worker::{validate_checksum, validate_index};
 use super::{DestinationStore, NativeError, NativeResult, WorkerApi};
 use futures_util::StreamExt;
@@ -24,7 +25,7 @@ pub struct DownloadRequest {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DownloadReceipt {
     pub schema_version: u8,
     pub batch_id: Uuid,
@@ -33,6 +34,14 @@ pub struct DownloadReceipt {
     pub sha256: String,
     pub size_bytes: u64,
     pub verified_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReceiptLedger {
+    pub schema_version: u8,
+    pub batch_id: Uuid,
+    pub receipts: Vec<DownloadReceipt>,
 }
 
 #[derive(Clone)]
@@ -57,7 +66,10 @@ impl Downloader {
     ) -> NativeResult<DownloadReceipt> {
         validate_download_request(&request)?;
         let _guard = self.io_lock.lock().await;
-        let filename = format!("{:06}.jpg", request.index);
+        let session = self.worker.session().pin().await?;
+        let batch_relative = PathBuf::from("batches").join(request.batch_id.to_string());
+        ensure_relative_directory(&self.destination, &batch_relative).await?;
+        let filename = format!("batches/{}/{:06}.jpg", request.batch_id, request.index);
         let final_path = self.destination.confine(Path::new(&filename))?;
         let part_path = self
             .destination
@@ -78,8 +90,10 @@ impl Downloader {
                     "A different numbered JPEG already exists in this destination.",
                 )
             })?;
+            reject_file_secret_reflection(&final_path, &self.worker.saved_secrets()?).await?;
         } else {
-            self.download_to_part(&request, &part_path).await?;
+            self.download_to_part(&session, &request, &part_path)
+                .await?;
             verify_file(
                 &part_path,
                 request.expected_size_bytes,
@@ -96,15 +110,14 @@ impl Downloader {
                     "The JPEG checksum did not match; the safe retry will start from byte zero.",
                 )
             })?;
-            tokio::fs::rename(&part_path, &final_path)
-                .await
-                .map_err(|_| {
-                    NativeError::new(
-                        "download_finalize_failed",
-                        "The verified JPEG could not be renamed into place.",
-                    )
-                })?;
-            sync_parent(&final_path).await;
+            if let Err(error) =
+                reject_file_secret_reflection(&part_path, &self.worker.saved_secrets()?).await
+            {
+                truncate(&part_path).await?;
+                return Err(error);
+            }
+            install_no_clobber(&part_path, &final_path).await?;
+            sync_parent(&final_path).await?;
         }
 
         let receipt = DownloadReceipt {
@@ -124,7 +137,8 @@ impl Downloader {
         self.persist_receipt(&receipt).await?;
         let acknowledgement = self
             .worker
-            .acknowledge(
+            .acknowledge_with_pin(
+                &session,
                 request.batch_id,
                 request.index,
                 &receipt.sha256,
@@ -139,6 +153,7 @@ impl Downloader {
 
     async fn download_to_part(
         &self,
+        session: &WorkerSessionPin,
         request: &DownloadRequest,
         part_path: &Path,
     ) -> NativeResult<()> {
@@ -152,11 +167,10 @@ impl Downloader {
         }
 
         for attempt in 0..2 {
-            let url = self.worker.session().endpoint(&format!(
+            let url = session.endpoint(&format!(
                 "/v1/batches/{}/artifacts/{}",
                 request.batch_id, request.index
             ))?;
-            self.worker.session().assert_url_is_current(&url)?;
             let token = self.worker.worker_token()?;
             let mut builder = self
                 .worker
@@ -204,7 +218,7 @@ impl Downloader {
                 .headers()
                 .get(CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
-                .is_some_and(|value| !value.starts_with("image/jpeg"))
+                != Some("image/jpeg")
             {
                 return Err(NativeError::new(
                     "download_metadata_mismatch",
@@ -231,14 +245,7 @@ impl Downloader {
                 ));
             }
 
-            let mut output = tokio::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .append(append)
-                .truncate(!append)
-                .open(part_path)
-                .await
-                .map_err(|_| destination_io_error())?;
+            let mut output = secure_open_write(part_path, append).await?;
             let mut received = 0_u64;
             let mut stream = response.bytes_stream();
             while let Some(chunk) = stream.next().await {
@@ -283,15 +290,15 @@ impl Downloader {
         let receipt_dir_relative = PathBuf::from(".imageforge")
             .join("receipts")
             .join(receipt.batch_id.to_string());
+        ensure_relative_directory(&self.destination, &receipt_dir_relative).await?;
         let receipt_dir = self.destination.confine(&receipt_dir_relative)?;
-        reject_symlink_chain(&self.destination.current()?, &receipt_dir_relative)?;
-        tokio::fs::create_dir_all(&receipt_dir)
-            .await
-            .map_err(|_| destination_io_error())?;
         let receipt_path = receipt_dir.join(format!("{:06}.json", receipt.index));
         reject_symlink(&receipt_path)?;
         if receipt_path.is_file() {
-            let existing = tokio::fs::read(&receipt_path)
+            let mut existing_file = secure_open_read(&receipt_path).await?;
+            let mut existing = Vec::new();
+            existing_file
+                .read_to_end(&mut existing)
                 .await
                 .map_err(|_| destination_io_error())?;
             let stored: DownloadReceipt = serde_json::from_slice(&existing).map_err(|_| {
@@ -330,7 +337,7 @@ impl Downloader {
             file.flush().await?;
             file.sync_all().await?;
             drop(file);
-            tokio::fs::rename(&temporary, &receipt_path).await?;
+            move_no_replace_async(temporary.clone(), receipt_path.clone()).await?;
             Ok::<(), std::io::Error>(())
         }
         .await;
@@ -341,8 +348,91 @@ impl Downloader {
                 "The verified local receipt could not be saved.",
             ));
         }
-        sync_parent(&receipt_path).await;
+        sync_parent(&receipt_path).await?;
         Ok(())
+    }
+
+    pub async fn read_receipt_ledger(&self, batch_id: Uuid) -> NativeResult<ReceiptLedger> {
+        let _guard = self.io_lock.lock().await;
+        self.read_verified_receipts(batch_id).await
+    }
+
+    pub async fn reconcile_receipts(&self, batch_id: Uuid) -> NativeResult<ReceiptLedger> {
+        let _guard = self.io_lock.lock().await;
+        let session = self.worker.session().pin().await?;
+        let ledger = self.read_verified_receipts(batch_id).await?;
+        for receipt in &ledger.receipts {
+            let response = self
+                .worker
+                .acknowledge_with_pin(
+                    &session,
+                    batch_id,
+                    receipt.index,
+                    &receipt.sha256,
+                    receipt.size_bytes,
+                )
+                .await?;
+            if !(200..300).contains(&response.status) {
+                return Err(worker_acknowledgement_error(&response.body));
+            }
+        }
+        Ok(ledger)
+    }
+
+    async fn read_verified_receipts(&self, batch_id: Uuid) -> NativeResult<ReceiptLedger> {
+        let relative = PathBuf::from(".imageforge")
+            .join("receipts")
+            .join(batch_id.to_string());
+        let directory = self.destination.confine(&relative)?;
+        reject_symlink_chain(&self.destination.current()?, &relative)?;
+        let mut receipts = Vec::new();
+        let mut entries = match tokio::fs::read_dir(&directory).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ReceiptLedger {
+                    schema_version: 1,
+                    batch_id,
+                    receipts,
+                });
+            }
+            Err(_) => return Err(destination_io_error()),
+        };
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|_| destination_io_error())?
+        {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                return Err(receipt_ledger_invalid());
+            };
+            if !is_receipt_filename(name) {
+                continue;
+            }
+            let path = entry.path();
+            reject_symlink(&path)?;
+            let mut receipt_file = secure_open_read(&path).await?;
+            let mut encoded = Vec::new();
+            receipt_file
+                .read_to_end(&mut encoded)
+                .await
+                .map_err(|_| destination_io_error())?;
+            let receipt: DownloadReceipt =
+                serde_json::from_slice(&encoded).map_err(|_| receipt_ledger_invalid())?;
+            validate_stored_receipt(&receipt, batch_id, name)?;
+            let final_path = self.destination.confine(Path::new(&receipt.filename))?;
+            reject_symlink(&final_path)?;
+            verify_file(&final_path, receipt.size_bytes, &receipt.sha256)
+                .await
+                .map_err(|_| receipt_ledger_invalid())?;
+            receipts.push(receipt);
+        }
+        receipts.sort_by_key(|receipt| receipt.index);
+        Ok(ReceiptLedger {
+            schema_version: 1,
+            batch_id,
+            receipts,
+        })
     }
 }
 
@@ -373,6 +463,14 @@ fn validate_content_range(
                 "The worker did not confirm the resumed JPEG range.",
             )
         })?;
+    validate_content_range_value(raw, expected_start, expected_total)
+}
+
+fn validate_content_range_value(
+    raw: &str,
+    expected_start: u64,
+    expected_total: u64,
+) -> NativeResult<()> {
     let (range, total) = raw
         .strip_prefix("bytes ")
         .and_then(|value| value.split_once('/'))
@@ -397,7 +495,11 @@ fn validate_content_range(
             "The JPEG range metadata was invalid.",
         )
     })?;
-    if start != expected_start || total != expected_total || end + 1 != total {
+    if start != expected_start
+        || total != expected_total
+        || end.checked_add(1) != Some(total)
+        || start > end
+    {
         return Err(NativeError::new(
             "download_metadata_mismatch",
             "The worker returned a different JPEG byte range than requested.",
@@ -407,60 +509,366 @@ fn validate_content_range(
 }
 
 async fn file_size(path: &Path) -> NativeResult<u64> {
-    match tokio::fs::metadata(path).await {
-        Ok(metadata) if metadata.is_file() => Ok(metadata.len()),
-        Ok(_) => Err(NativeError::new(
+    match secure_open_read(path).await {
+        Ok(file) => {
+            let metadata = file.metadata().await.map_err(|_| destination_io_error())?;
+            if metadata.is_file() {
+                Ok(metadata.len())
+            } else {
+                Err(NativeError::new(
+                    "destination_conflict",
+                    "A non-file entry occupies the JPEG download slot.",
+                ))
+            }
+        }
+        Err(error) if error.code == "destination_missing" => Ok(0),
+        Err(error) if error.code == "destination_path_rejected" => Err(error),
+        Err(_) => Err(NativeError::new(
             "destination_conflict",
             "A non-file entry occupies the JPEG download slot.",
         )),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
-        Err(_) => Err(destination_io_error()),
     }
 }
 
 async fn truncate(path: &Path) -> NativeResult<()> {
-    let file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(path)
-        .await
-        .map_err(|_| destination_io_error())?;
+    let file = secure_open_write(path, false).await?;
     file.sync_all().await.map_err(|_| destination_io_error())
 }
 
 async fn verify_file(path: &Path, expected_size: u64, expected_sha256: &str) -> NativeResult<()> {
-    let metadata = tokio::fs::metadata(path)
-        .await
-        .map_err(|_| destination_io_error())?;
+    let mut file = secure_open_read(path).await?;
+    let metadata = file.metadata().await.map_err(|_| destination_io_error())?;
     if !metadata.is_file() || metadata.len() != expected_size {
         return Err(NativeError::new(
             "download_checksum_mismatch",
             "The local JPEG byte count did not match its receipt.",
         ));
     }
-    let mut file = tokio::fs::File::open(path)
+    let mut bytes = Vec::with_capacity(expected_size as usize);
+    file.read_to_end(&mut bytes)
         .await
         .map_err(|_| destination_io_error())?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    loop {
-        let count = file
-            .read(&mut buffer)
-            .await
-            .map_err(|_| destination_io_error())?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-    }
-    if hex::encode(hasher.finalize()) != expected_sha256 {
+    if hex::encode(Sha256::digest(&bytes)) != expected_sha256 {
         return Err(NativeError::new(
             "download_checksum_mismatch",
             "The local JPEG checksum did not match its receipt.",
         ));
     }
+    if jpeg_dimensions(&bytes) != Some((1280, 720)) {
+        return Err(NativeError::new(
+            "download_jpeg_invalid",
+            "The downloaded file is not an exact 1280 × 720 JPEG.",
+        ));
+    }
     Ok(())
+}
+
+async fn secure_open_read(path: &Path) -> NativeResult<tokio::fs::File> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.read(true);
+    apply_no_follow(&mut options);
+    match options.open(path).await {
+        Ok(file) => {
+            reject_open_reparse(&file).await?;
+            Ok(file)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(NativeError::new(
+            "destination_missing",
+            "The requested destination file does not exist.",
+        )),
+        Err(error) if is_link_error(&error) => Err(NativeError::new(
+            "destination_path_rejected",
+            "ImageForge will not read or write through a link.",
+        )),
+        Err(_) => Err(destination_io_error()),
+    }
+}
+
+async fn secure_open_write(path: &Path, append: bool) -> NativeResult<tokio::fs::File> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options
+        .create(true)
+        .write(true)
+        .append(append)
+        .truncate(!append);
+    apply_no_follow(&mut options);
+    let file = options.open(path).await.map_err(|error| {
+        if is_link_error(&error) {
+            NativeError::new(
+                "destination_path_rejected",
+                "ImageForge will not read or write through a link.",
+            )
+        } else {
+            destination_io_error()
+        }
+    })?;
+    reject_open_reparse(&file).await?;
+    Ok(file)
+}
+
+fn apply_no_follow(options: &mut tokio::fs::OpenOptions) {
+    #[cfg(unix)]
+    {
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+}
+
+async fn reject_open_reparse(file: &tokio::fs::File) -> NativeResult<()> {
+    let metadata = file.metadata().await.map_err(|_| destination_io_error())?;
+    if !metadata.is_file() {
+        return Err(NativeError::new(
+            "destination_path_rejected",
+            "The destination entry is not a regular file.",
+        ));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(NativeError::new(
+                "destination_path_rejected",
+                "ImageForge will not read or write through a reparse point.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_link_error(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(libc::ELOOP)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+async fn install_no_clobber(part_path: &Path, final_path: &Path) -> NativeResult<()> {
+    match move_no_replace_async(part_path.to_path_buf(), final_path.to_path_buf()).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Err(NativeError::new(
+            "destination_conflict",
+            "A numbered JPEG already exists in this destination; nothing was overwritten.",
+        )),
+        Err(_) => Err(NativeError::new(
+            "download_finalize_failed",
+            "The verified JPEG could not be atomically installed without overwriting a file.",
+        )),
+    }
+}
+
+async fn move_no_replace_async(source: PathBuf, destination: PathBuf) -> std::io::Result<()> {
+    tokio::task::spawn_blocking(move || move_no_replace(&source, &destination))
+        .await
+        .map_err(|_| std::io::Error::other("native no-replace move task failed"))?
+}
+
+#[cfg(target_os = "macos")]
+fn move_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let destination = CString::new(destination.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    // `RENAME_EXCL` is a same-volume atomic move that fails if the destination
+    // exists. Unlike hard links it is supported by removable FAT/exFAT media.
+    let result =
+        unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn move_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // Omitting MOVEFILE_REPLACE_EXISTING is the required atomic no-clobber
+    // behavior and works on NTFS, FAT, and exFAT destinations.
+    let result = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn move_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let destination = CString::new(destination.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+fn move_no_replace(_source: &Path, _destination: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "atomic no-replace move is unsupported on this development platform",
+    ))
+}
+
+fn jpeg_dimensions(bytes: &[u8]) -> Option<(u16, u16)> {
+    if bytes.len() < 4 || !bytes.starts_with(&[0xff, 0xd8]) || !bytes.ends_with(&[0xff, 0xd9]) {
+        return None;
+    }
+    let mut position = 2_usize;
+    while position + 1 < bytes.len() {
+        if bytes[position] != 0xff {
+            return None;
+        }
+        while position < bytes.len() && bytes[position] == 0xff {
+            position += 1;
+        }
+        let marker = *bytes.get(position)?;
+        position += 1;
+        if marker == 0xd9 {
+            return None;
+        }
+        if marker == 0x01 || (0xd0..=0xd8).contains(&marker) {
+            continue;
+        }
+        let length =
+            u16::from_be_bytes([*bytes.get(position)?, *bytes.get(position + 1)?]) as usize;
+        if length < 2 || position.checked_add(length)? > bytes.len() {
+            return None;
+        }
+        if matches!(
+            marker,
+            0xc0 | 0xc1
+                | 0xc2
+                | 0xc3
+                | 0xc5
+                | 0xc6
+                | 0xc7
+                | 0xc9
+                | 0xca
+                | 0xcb
+                | 0xcd
+                | 0xce
+                | 0xcf
+        ) {
+            if length < 7 {
+                return None;
+            }
+            let height = u16::from_be_bytes([bytes[position + 3], bytes[position + 4]]);
+            let width = u16::from_be_bytes([bytes[position + 5], bytes[position + 6]]);
+            return Some((width, height));
+        }
+        if marker == 0xda {
+            return None;
+        }
+        position += length;
+    }
+    None
+}
+
+async fn reject_file_secret_reflection(path: &Path, secrets: &[String]) -> NativeResult<()> {
+    let mut file = secure_open_read(path).await?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .await
+        .map_err(|_| destination_io_error())?;
+    if secrets.iter().any(|secret| {
+        !secret.is_empty()
+            && bytes
+                .windows(secret.len())
+                .any(|window| window == secret.as_bytes())
+    }) {
+        return Err(NativeError::new(
+            "worker_secret_reflection",
+            "The worker artifact was rejected because it exposed saved credential material.",
+        ));
+    }
+    Ok(())
+}
+
+fn is_receipt_filename(name: &str) -> bool {
+    name.len() == 11
+        && name.ends_with(".json")
+        && name[..6].bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn validate_stored_receipt(
+    receipt: &DownloadReceipt,
+    expected_batch_id: Uuid,
+    filename: &str,
+) -> NativeResult<()> {
+    validate_index(receipt.index)?;
+    validate_checksum(&receipt.sha256)?;
+    if receipt.schema_version != 1
+        || receipt.batch_id != expected_batch_id
+        || receipt.size_bytes == 0
+        || receipt.size_bytes > MAX_JPEG_BYTES
+        || receipt.filename != format!("batches/{}/{:06}.jpg", expected_batch_id, receipt.index)
+        || filename != format!("{:06}.json", receipt.index)
+    {
+        return Err(receipt_ledger_invalid());
+    }
+    Ok(())
+}
+
+fn receipt_ledger_invalid() -> NativeError {
+    NativeError::new(
+        "receipt_ledger_invalid",
+        "A local receipt or its final JPEG is missing, invalid, or inconsistent.",
+    )
+}
+
+fn destination_durability_error() -> NativeError {
+    NativeError::retryable(
+        "destination_durability_failed",
+        "The downloads folder could not confirm durable storage; no receipt was acknowledged.",
+    )
 }
 
 fn reject_symlink(path: &Path) -> NativeResult<()> {
@@ -490,14 +898,88 @@ fn reject_symlink_chain(root: &Path, relative: &Path) -> NativeResult<()> {
     Ok(())
 }
 
-async fn sync_parent(path: &Path) {
+async fn sync_parent(path: &Path) -> NativeResult<()> {
     if let Some(parent) = path.parent() {
         let parent = parent.to_path_buf();
-        let _ = tokio::task::spawn_blocking(move || {
-            std::fs::File::open(parent).and_then(|directory| directory.sync_all())
-        })
-        .await;
+        tokio::task::spawn_blocking(move || sync_directory_blocking(&parent))
+            .await
+            .map_err(|_| destination_durability_error())?
+            .map_err(|_| destination_durability_error())?;
     }
+    Ok(())
+}
+
+fn sync_directory_blocking(directory: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(directory)?
+    };
+    #[cfg(not(windows))]
+    let file = std::fs::File::open(directory)?;
+    sync_directory_handle(file)
+}
+
+#[cfg(windows)]
+fn sync_directory_handle(file: std::fs::File) -> std::io::Result<()> {
+    use windows_sys::Win32::Foundation::{ERROR_INVALID_FUNCTION, ERROR_INVALID_HANDLE};
+    match file.sync_all() {
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(code)
+                    if code == ERROR_INVALID_FUNCTION as i32 || code == ERROR_INVALID_HANDLE as i32
+            ) =>
+        {
+            // Windows files and no-replace moves are write-through. Some
+            // removable filesystems do not provide a flushable directory
+            // handle, so these documented directory-only errors are benign.
+            Ok(())
+        }
+        result => result,
+    }
+}
+
+#[cfg(not(windows))]
+fn sync_directory_handle(file: std::fs::File) -> std::io::Result<()> {
+    file.sync_all()
+}
+
+async fn sync_directory_chain(root: &Path, relative: &Path) -> NativeResult<()> {
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            return Err(NativeError::new(
+                "destination_path_rejected",
+                "The local receipt path is invalid.",
+            ));
+        };
+        current.push(component);
+        reject_symlink(&current)?;
+        sync_parent(&current).await?;
+    }
+    Ok(())
+}
+
+async fn ensure_relative_directory(
+    destination: &DestinationStore,
+    relative: &Path,
+) -> NativeResult<PathBuf> {
+    let root = destination.current()?;
+    reject_symlink_chain(&root, relative)?;
+    let directory = destination.confine(relative)?;
+    tokio::fs::create_dir_all(&directory)
+        .await
+        .map_err(|_| destination_io_error())?;
+    // Recheck after creation so a concurrently substituted link is never
+    // accepted as a destination or receipt directory.
+    reject_symlink_chain(&root, relative)?;
+    sync_directory_chain(&root, relative).await?;
+    Ok(directory)
 }
 
 fn worker_acknowledgement_error(body: &serde_json::Value) -> NativeError {
@@ -520,25 +1002,91 @@ fn destination_io_error() -> NativeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native::vault::MemoryVault;
+    use crate::native::{CredentialVault, WorkerSession};
+
+    fn test_downloader(destination: DestinationStore) -> Downloader {
+        let vault: Arc<dyn CredentialVault> = Arc::new(MemoryVault::default());
+        let worker = WorkerApi::new(vault, WorkerSession::default()).unwrap();
+        Downloader::new(worker, destination)
+    }
 
     #[tokio::test]
     async fn verifies_exact_size_and_sha256() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("000001.jpg.part");
-        tokio::fs::write(&path, b"verified-jpeg").await.unwrap();
-        let checksum = hex::encode(Sha256::digest(b"verified-jpeg"));
-        verify_file(&path, 13, &checksum).await.unwrap();
+        let jpeg = structural_jpeg(1280, 720);
+        tokio::fs::write(&path, &jpeg).await.unwrap();
+        let checksum = hex::encode(Sha256::digest(&jpeg));
+        verify_file(&path, jpeg.len() as u64, &checksum)
+            .await
+            .unwrap();
         assert_eq!(
-            verify_file(&path, 12, &checksum).await.unwrap_err().code,
-            "download_checksum_mismatch"
-        );
-        assert_eq!(
-            verify_file(&path, 13, &"0".repeat(64))
+            verify_file(&path, (jpeg.len() - 1) as u64, &checksum)
                 .await
                 .unwrap_err()
                 .code,
             "download_checksum_mismatch"
         );
+        assert_eq!(
+            verify_file(&path, jpeg.len() as u64, &"0".repeat(64))
+                .await
+                .unwrap_err()
+                .code,
+            "download_checksum_mismatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn artifact_secret_reflection_is_rejected_even_when_wrapped_in_binary_data() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("artifact.jpg.part");
+        let secret = "worker-secret-exact".to_owned();
+        tokio::fs::write(&path, format!("binary-prefix-{secret}-binary-suffix"))
+            .await
+            .unwrap();
+        assert_eq!(
+            reject_file_secret_reflection(&path, &[secret])
+                .await
+                .unwrap_err()
+                .code,
+            "worker_secret_reflection"
+        );
+    }
+
+    #[test]
+    fn jpeg_structure_requires_exact_magic_and_dimensions() {
+        assert_eq!(
+            jpeg_dimensions(&structural_jpeg(1280, 720)),
+            Some((1280, 720))
+        );
+        assert_eq!(
+            jpeg_dimensions(&structural_jpeg(1279, 720)),
+            Some((1279, 720))
+        );
+        let mut missing_eoi = structural_jpeg(1280, 720);
+        missing_eoi.pop();
+        assert_eq!(jpeg_dimensions(&missing_eoi), None);
+    }
+
+    fn structural_jpeg(width: u16, height: u16) -> Vec<u8> {
+        let [height_high, height_low] = height.to_be_bytes();
+        let [width_high, width_low] = width.to_be_bytes();
+        vec![
+            0xff,
+            0xd8,
+            0xff,
+            0xc0,
+            0x00,
+            0x07,
+            0x08,
+            height_high,
+            height_low,
+            width_high,
+            width_low,
+            0xff,
+            0xd9,
+        ]
     }
 
     #[test]
@@ -562,6 +1110,131 @@ mod tests {
         );
     }
 
+    #[test]
+    fn content_range_overflow_is_rejected_without_panicking() {
+        assert_eq!(
+            validate_content_range_value(
+                "bytes 1-18446744073709551615/18446744073709551615",
+                1,
+                u64::MAX,
+            )
+            .unwrap_err()
+            .code,
+            "download_metadata_mismatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn final_install_never_clobbers_an_existing_file() {
+        let temporary = tempfile::tempdir().unwrap();
+        let part = temporary.path().join("part");
+        let final_path = temporary.path().join("final");
+        tokio::fs::write(&part, b"new").await.unwrap();
+        tokio::fs::write(&final_path, b"existing").await.unwrap();
+        assert_eq!(
+            install_no_clobber(&part, &final_path)
+                .await
+                .unwrap_err()
+                .code,
+            "destination_conflict"
+        );
+        assert_eq!(tokio::fs::read(final_path).await.unwrap(), b"existing");
+        assert_eq!(tokio::fs::read(part).await.unwrap(), b"new");
+    }
+
+    #[tokio::test]
+    async fn removable_volume_uses_atomic_no_replace_move_when_requested() {
+        let Some(root) = std::env::var_os("IMAGEFORGE_REMOVABLE_TEST_ROOT") else {
+            return;
+        };
+        let directory =
+            PathBuf::from(root).join(format!(".imageforge-no-replace-test-{}", Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let downloads = directory.join("downloads");
+        std::fs::create_dir(&downloads).unwrap();
+        let destination_store =
+            DestinationStore::new_for_test(directory.join("state").join("destination.json"));
+        destination_store.validate_and_bind(&downloads).unwrap();
+        let batch_id = Uuid::new_v4();
+        let batch_directory = ensure_relative_directory(
+            &destination_store,
+            &PathBuf::from("batches").join(batch_id.to_string()),
+        )
+        .await
+        .unwrap();
+        let source = batch_directory.join("source.part");
+        let destination = batch_directory.join("destination.jpg");
+        tokio::fs::write(&source, b"first").await.unwrap();
+        install_no_clobber(&source, &destination).await.unwrap();
+        assert!(!source.exists());
+        assert_eq!(tokio::fs::read(&destination).await.unwrap(), b"first");
+
+        tokio::fs::write(&source, b"second").await.unwrap();
+        assert_eq!(
+            install_no_clobber(&source, &destination)
+                .await
+                .unwrap_err()
+                .code,
+            "destination_conflict"
+        );
+        assert_eq!(tokio::fs::read(&destination).await.unwrap(), b"first");
+        assert_eq!(tokio::fs::read(&source).await.unwrap(), b"second");
+        std::fs::remove_file(source).unwrap();
+        std::fs::remove_file(destination).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn batch_scoped_receipt_ledger_survives_restart_without_filename_collisions() {
+        let temporary = tempfile::tempdir().unwrap();
+        let destination_path = temporary.path().join("downloads");
+        let record_path = temporary.path().join("state").join("destination.json");
+        std::fs::create_dir(&destination_path).unwrap();
+        let destination = DestinationStore::new_for_test(record_path.clone());
+        destination.validate_and_bind(&destination_path).unwrap();
+        let downloader = test_downloader(destination);
+        let batch_id = Uuid::new_v4();
+        let batch_relative = PathBuf::from("batches").join(batch_id.to_string());
+        let batch_directory = ensure_relative_directory(&downloader.destination, &batch_relative)
+            .await
+            .unwrap();
+        let jpeg = structural_jpeg(1280, 720);
+        let sha256 = hex::encode(Sha256::digest(&jpeg));
+        tokio::fs::write(batch_directory.join("000001.jpg"), &jpeg)
+            .await
+            .unwrap();
+        let receipt = DownloadReceipt {
+            schema_version: 1,
+            batch_id,
+            index: 1,
+            filename: format!("batches/{batch_id}/000001.jpg"),
+            sha256,
+            size_bytes: jpeg.len() as u64,
+            verified_at_unix_ms: 1,
+        };
+        downloader.persist_receipt(&receipt).await.unwrap();
+        assert_eq!(
+            downloader
+                .read_receipt_ledger(batch_id)
+                .await
+                .unwrap()
+                .receipts,
+            vec![receipt.clone()]
+        );
+
+        let restored_destination = DestinationStore::new_for_test(record_path);
+        restored_destination.restore().unwrap().unwrap();
+        let restarted = test_downloader(restored_destination);
+        assert_eq!(
+            restarted
+                .read_receipt_ledger(batch_id)
+                .await
+                .unwrap()
+                .receipts,
+            vec![receipt]
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlink_targets_are_never_followed() {
@@ -576,5 +1249,36 @@ mod tests {
             "destination_path_rejected"
         );
         assert_eq!(std::fs::read(&outside).unwrap(), b"do not overwrite");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn batch_directory_links_are_rejected_before_any_artifact_write() {
+        use std::os::unix::fs::symlink;
+        let temporary = tempfile::tempdir().unwrap();
+        let destination_path = temporary.path().join("downloads");
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir(&destination_path).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::create_dir(destination_path.join("batches")).unwrap();
+        let batch_id = Uuid::new_v4();
+        symlink(
+            &outside,
+            destination_path.join("batches").join(batch_id.to_string()),
+        )
+        .unwrap();
+        let destination = DestinationStore::new_for_test(temporary.path().join("record.json"));
+        destination.validate_and_bind(&destination_path).unwrap();
+        assert_eq!(
+            ensure_relative_directory(
+                &destination,
+                &PathBuf::from("batches").join(batch_id.to_string()),
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "destination_path_rejected"
+        );
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
     }
 }

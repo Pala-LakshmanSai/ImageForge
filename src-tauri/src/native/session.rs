@@ -1,6 +1,7 @@
 use super::{NativeError, NativeResult};
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use url::Url;
 
 const WORKER_PORT: u16 = 8000;
@@ -17,11 +18,13 @@ pub struct WorkerSessionMetadata {
 #[derive(Clone, Default)]
 pub struct WorkerSession {
     pod_id: Arc<RwLock<Option<String>>>,
+    gate: Arc<Mutex<()>>,
 }
 
 impl WorkerSession {
-    pub fn bind(&self, pod_id: &str) -> NativeResult<WorkerSessionMetadata> {
+    pub async fn bind_verified(&self, pod_id: &str) -> NativeResult<WorkerSessionMetadata> {
         validate_pod_id(pod_id)?;
+        let _gate = self.gate.lock().await;
         let mut guard = self.pod_id.write().map_err(|_| {
             NativeError::new(
                 "worker_session_unavailable",
@@ -33,7 +36,8 @@ impl WorkerSession {
         self.metadata()
     }
 
-    pub fn clear(&self) -> NativeResult<()> {
+    pub async fn clear(&self) -> NativeResult<()> {
+        let _gate = self.gate.lock().await;
         let mut guard = self.pod_id.write().map_err(|_| {
             NativeError::new(
                 "worker_session_unavailable",
@@ -42,6 +46,15 @@ impl WorkerSession {
         })?;
         *guard = None;
         Ok(())
+    }
+
+    pub async fn pin(&self) -> NativeResult<WorkerSessionPin> {
+        let gate = self.gate.clone().lock_owned().await;
+        let pod_id = self.current_pod_id()?;
+        Ok(WorkerSessionPin {
+            pod_id,
+            _gate: gate,
+        })
     }
 
     pub fn metadata(&self) -> NativeResult<WorkerSessionMetadata> {
@@ -81,6 +94,7 @@ impl WorkerSession {
             })
     }
 
+    #[cfg(test)]
     pub fn endpoint(&self, path: &str) -> NativeResult<Url> {
         validate_worker_path(path)?;
         let pod_id = self.current_pod_id()?;
@@ -92,6 +106,7 @@ impl WorkerSession {
         })
     }
 
+    #[cfg(test)]
     pub fn assert_url_is_current(&self, url: &Url) -> NativeResult<()> {
         let expected = self.endpoint("/v1/health")?;
         if url.scheme() != "https"
@@ -109,13 +124,31 @@ impl WorkerSession {
     }
 }
 
+pub struct WorkerSessionPin {
+    pod_id: String,
+    _gate: OwnedMutexGuard<()>,
+}
+
+impl WorkerSessionPin {
+    pub fn endpoint(&self, path: &str) -> NativeResult<Url> {
+        validate_worker_path(path)?;
+        Url::parse(&format!("{}{path}", worker_origin(&self.pod_id))).map_err(|_| {
+            NativeError::new(
+                "worker_session_invalid",
+                "The verified worker endpoint could not be constructed.",
+            )
+        })
+    }
+}
+
 fn worker_origin(pod_id: &str) -> String {
     format!("https://{pod_id}-{WORKER_PORT}{PROXY_SUFFIX}")
 }
 
 pub(super) fn validate_pod_id(pod_id: &str) -> NativeResult<()> {
-    if pod_id.len() < 3
-        || pod_id.len() > 64
+    // `<pod-id>-8000` must fit in one 63-byte DNS label.
+    if pod_id.is_empty()
+        || pod_id.len() > 58
         || !pod_id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
@@ -152,7 +185,10 @@ mod tests {
     #[test]
     fn session_derives_one_exact_https_proxy_origin() {
         let session = WorkerSession::default();
-        let metadata = session.bind("abc123xy").unwrap();
+        let metadata = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(session.bind_verified("abc123xy"))
+            .unwrap();
         assert_eq!(
             metadata.origin.as_deref(),
             Some("https://abc123xy-8000.proxy.runpod.net")
@@ -166,17 +202,19 @@ mod tests {
     #[test]
     fn session_rejects_host_and_path_injection() {
         let session = WorkerSession::default();
-        for pod in [
-            "ab",
-            "-abc",
-            "abc-",
-            "abc.example.com",
-            "abc/def",
-            "abc_123",
-        ] {
-            assert_eq!(session.bind(pod).unwrap_err().code, "pod_id_invalid");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for pod in ["", "-abc", "abc-", "abc.example.com", "abc/def", "abc_123"] {
+            assert_eq!(
+                runtime
+                    .block_on(session.bind_verified(pod))
+                    .unwrap_err()
+                    .code,
+                "pod_id_invalid"
+            );
         }
-        session.bind("safe-pod-1").unwrap();
+        runtime
+            .block_on(session.bind_verified("safe-pod-1"))
+            .unwrap();
         for path in [
             "/health",
             "/v1/../secret",
@@ -193,6 +231,17 @@ mod tests {
         assert_eq!(
             session.assert_url_is_current(&hostile).unwrap_err().code,
             "worker_host_rejected"
+        );
+
+        assert!(runtime
+            .block_on(session.bind_verified(&"a".repeat(58)))
+            .is_ok());
+        assert_eq!(
+            runtime
+                .block_on(session.bind_verified(&"a".repeat(59)))
+                .unwrap_err()
+                .code,
+            "pod_id_invalid"
         );
     }
 }
