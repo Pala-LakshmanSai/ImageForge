@@ -100,10 +100,11 @@ async def contention(
     status_code, status_body = await request(
         client, observer_client[0], observer_client[1], "GET", "/v1/status"
     )
+    observed_active = status_body.get("active_batch") if isinstance(status_body, dict) else None
     if (
         status_code != 200
-        or not isinstance(status_body, dict)
-        or status_body.get("active_batch", {}).get("batch_id") != batch_id
+        or not isinstance(observed_active, dict)
+        or observed_active.get("batch_id") != batch_id
     ):
         raise RuntimeError("Observer did not see the one authoritative active batch")
     mutation_code, _ = await request(
