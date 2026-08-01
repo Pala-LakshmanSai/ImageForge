@@ -1,0 +1,17 @@
+[package]
+name = "imageforge-desktop-core"
+version = "0.1.0"
+description = "Narrow native host for the ImageForge desktop production console"
+authors = ["ImageForge"]
+edition = "2021"
+
+[lib]
+name = "imageforge_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3", features = [] }
+
+[dependencies]
+serde = { version = "=1.0.228", features = ["derive"] }
+tauri = { version = "=2.11.5", features = [] }
