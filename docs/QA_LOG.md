@@ -118,3 +118,9 @@ template ID was present. The lifecycle request now carries the exact
 `benchmarkContract.softwareImage` digest as `imageName`; the provider validates
 it and sends it on every create. The provider and lifecycle regression suites
 assert the field, and the RunPod client suite passes 91/91.
+
+The first real 4090 warmup also exposed a worker-image defect: Triton could not
+find a C compiler after all model weights and pipeline components loaded. The
+worker image now installs `gcc` at build time (`647c1e6`); normal Pod boot still
+performs no package installation. A fresh immutable image must pass the paid
+warmup/generation smoke before the template is considered production-ready.
