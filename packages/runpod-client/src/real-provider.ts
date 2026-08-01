@@ -524,6 +524,8 @@ export class RunPodRestProvider implements RunPodProvider {
       request.gpuTypePriority !== "custom" ||
       request.interruptible !== false ||
       !/^[A-Za-z0-9][A-Za-z0-9._-]{0,190}$/.test(request.templateId) ||
+      request.imageName.trim().length === 0 ||
+      request.imageName.length > 512 ||
       !/^[A-Za-z0-9][A-Za-z0-9._-]{0,190}$/.test(request.networkVolumeId) ||
       !isNormalizedMountPath(request.networkVolumeMountPath) ||
       cudaVersions === undefined ||
@@ -565,6 +567,7 @@ export class RunPodRestProvider implements RunPodProvider {
     const body: Record<string, unknown> = {
       name: request.name,
       templateId: request.templateId,
+      imageName: request.imageName,
       networkVolumeId: request.networkVolumeId,
       volumeMountPath: request.networkVolumeMountPath,
       ports: [`${request.workerPort}/http`],

@@ -93,6 +93,10 @@ describe("RunPodLifecycleController refresh and start", () => {
     assert.equal(result.outcome, "created");
     assert.equal(provider.calls.create.length, 1);
     assert.equal(provider.calls.create[0]?.gpuCount, 1);
+    assert.equal(
+      provider.calls.create[0]?.imageName,
+      "ghcr.io/imageforge/worker@sha256:0123456789abcdef",
+    );
     assert.equal(provider.calls.create[0]?.gpuTypePriority, "custom");
     assert.equal(provider.calls.create[0]?.cloud, "secure");
     assert.deepEqual(provider.calls.create[0]?.gpuTypeIds, [

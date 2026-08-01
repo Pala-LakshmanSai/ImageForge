@@ -915,6 +915,7 @@ export class RunPodLifecycleController {
         name: podName,
         startRequestId,
         templateId: this.#config.templateId,
+        imageName: this.#config.benchmarkContract.softwareImage,
         networkVolumeId: this.#config.networkVolumeId,
         networkVolumeDataCenterId: this.#config.networkVolumeDataCenterId,
         networkVolumeMountPath: this.#config.networkVolumeMountPath,

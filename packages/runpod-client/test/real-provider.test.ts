@@ -261,6 +261,7 @@ describe("RunPodRestProvider", () => {
       name: "imageforge-request1",
       startRequestId: "request1",
       templateId: "template1",
+      imageName: "ghcr.io/imageforge/worker@sha256:0123456789abcdef",
       networkVolumeId: "volume1",
       networkVolumeDataCenterId: "EU-RO-1",
       networkVolumeMountPath: "/workspace",
@@ -353,6 +354,7 @@ describe("RunPodRestProvider", () => {
     assert.equal(capturedAuthorization, "Bearer secure-test-key");
     assert.equal(capturedRedirect, "error");
     assert.equal(body?.templateId, "template1");
+    assert.equal(body?.imageName, "ghcr.io/imageforge/worker@sha256:0123456789abcdef");
     assert.equal(body?.networkVolumeId, "volume1");
     assert.equal(body?.gpuCount, 1);
     assert.equal(body?.gpuTypePriority, "custom");

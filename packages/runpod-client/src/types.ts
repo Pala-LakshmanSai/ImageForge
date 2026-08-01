@@ -187,6 +187,8 @@ export interface CreatePodFromTemplateRequest {
   readonly name: string;
   readonly startRequestId: string;
   readonly templateId: string;
+  /** Immutable worker image digest. RunPod requires this on the v1 create API. */
+  readonly imageName: string;
   readonly networkVolumeId: string;
   readonly networkVolumeDataCenterId: "EU-RO-1";
   readonly networkVolumeMountPath: string;
