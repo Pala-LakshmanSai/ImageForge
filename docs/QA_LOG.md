@@ -203,7 +203,7 @@ the recovery poll observes it.
   `windows-sys`.
 - macOS native Rust tests remain green (38/38). A minimal removable-disk
   Windows-target compile of the exact Win32 API usage passed. The authoritative
-  `windows-latest` NSIS workflow now compiles the full native Windows test
-  target with `cargo test --no-run` before packaging. The complete Rust suite
-  remains covered by the removable-disk macOS run; this avoids a
-  runner-hosted credential/UI test holding the installer job indefinitely.
+  `windows-latest` NSIS workflow builds the full Tauri Windows target directly;
+  the complete Rust suite remains covered by the removable-disk macOS run.
+  This keeps the native packaging path focused and avoids a runner-hosted
+  credential/UI test holding the installer job indefinitely.
