@@ -98,6 +98,9 @@ set the Pod endpoints/tokens and exact image digest variables documented by the
 script, and record its JSON evidence. The gate must prove one HTTP-201 winner,
 one immediate HTTP-423 observer, read-only observer mutations, isolated gate
 paths, and survivor recovery after the explicitly confirmed owner stop. Run it
-again with roles reversed and separately verify idle-worker presence/maintenance
-exclusion. A missing, timed-out, or failed gate disqualifies that volume
+again after stopping the recorded winner with `IMAGEFORGE_GATE_SURVIVOR` set to
+the live role, `IMAGEFORGE_GATE_OWNER` set to the original winner role, and
+`IMAGEFORGE_GATE_BATCH_ID` set to the recorded batch. Run it with roles
+reversed and separately verify idle-worker presence/maintenance exclusion. A
+missing, timed-out, or failed gate disqualifies that volume
 configuration; no local-process test can waive it.
