@@ -12,14 +12,15 @@ a new disposable compute attachment around those durable pieces.
 1. Require an explicit click from the foreground application.
 2. List existing ImageForge Pods. Connect to a healthy existing Pod rather than
    creating another one.
-3. Fetch current availability and price for approved GPU types and cloud lanes.
-4. Filter offers that cannot attach the configured volume/data center or meet
-   CUDA, RAM, disk-bandwidth, and network requirements.
-5. Rank candidates using the batch-aware cost estimate below.
-6. Create a Pod with the fixed template, volume, secrets, one GPU, and port
-   `8000/http`. GPU IDs are exact RunPod IDs.
-7. Capture the returned Pod ID and derive/discover its HTTPS proxy endpoint.
-8. Poll Pod state and worker health through every boot phase until ready or a
+3. Rank approved candidates using the batch-aware cost estimate below. With no
+   comparable measurements, use 4090 then 5090.
+4. Create a Pod with the fixed template, volume, secrets, one GPU, port
+   `8000/http`, ordered `gpuTypeIds`, and `gpuTypePriority: custom`. RunPod tries
+   the order against current capacity, so selection is not based on a stale
+   inventory response.
+5. Record the response's actual GPU and hourly rate for estimates/benchmarks.
+6. Capture the returned Pod ID and derive/discover its HTTPS proxy endpoint.
+7. Poll Pod state and worker health through every boot phase until ready or a
    bounded provisioning timeout produces an actionable error.
 
 Approved IDs:

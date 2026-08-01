@@ -15,8 +15,8 @@ application took 30-60 minutes to become usable.
 
 1. Complete one-time setup with user identity, RunPod API key, worker secret,
    network volume, template, and local output folder.
-2. Press **Start GPU**. ImageForge queries live RunPod inventory and deploys one
-   approved available GPU with the shared worker template and model volume.
+2. Press **Start GPU**. ImageForge asks RunPod to deploy the best-value approved
+   GPU, atomically falling back to the next type when the first is unavailable.
 3. Watch `provisioning -> loading -> warming -> ready` without using a terminal.
 4. Paste or import one prompt per line (TXT or CSV), validate it, and start.
 5. Download each completed image directly into the initiating machine's chosen
@@ -28,8 +28,9 @@ application took 30-60 minutes to become usable.
 
 - AC-1: A nontechnical user can start a compatible available RunPod GPU and
   connect to the resulting worker without copying a Pod ID or proxy URL.
-- AC-2: Start selection supports at least RTX 4090 and RTX 5090 and evaluates
-  availability at click time. It chooses one GPU, never multiple GPUs.
+- AC-2: Start selection supports RTX 4090 and RTX 5090 and evaluates availability
+  at creation time through RunPod's ordered fallback. It chooses one GPU, never
+  multiple GPUs.
 - AC-3: Stop terminates compute only after an explicit confirmation. No timer,
   background monitor, or completed-job event can terminate a Pod.
 - AC-4: The app parses, previews, and submits 300-450 ordered prompts.

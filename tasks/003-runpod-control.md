@@ -2,12 +2,13 @@
 
 ## Acceptance criteria
 
-- List live approved inventory and existing ImageForge Pods on every refresh.
-- Rank available 4090/5090 offers using measured cost/image, with safe fallback.
+- List existing ImageForge Pods on every refresh.
+- Rank 4090/5090 using measured cost/image with a 4090 safe default, then use
+  RunPod's ordered creation fallback to resolve live availability atomically.
 - Start exactly one Pod from configured template/volume after an explicit click.
 - Discover the new proxy endpoint automatically and surface every phase.
 - Terminate only after an explicit Stop click and confirmation.
-- Fake adapter tests cover unavailable inventory, create races, API errors,
+- Fake adapter tests cover unavailable candidates, create races, API errors,
   changed Pod IDs, and termination failures.
 
 ## Non-goals

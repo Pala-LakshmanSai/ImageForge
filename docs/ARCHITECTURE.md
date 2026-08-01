@@ -12,11 +12,13 @@
 
 ### RunPod management
 
-The app lists live GPU types and secure/community offers at every explicit start.
-The selection engine filters approved CUDA-capable types, estimates cost/image
-from measured benchmark history, and tries candidates in value order. Creation
-uses the fixed ImageForge template, one GPU, shared network volume, required
-ports, and runtime secrets. The resulting Pod ID determines its proxy URL.
+The selection engine estimates cost/image from measured benchmark history and
+orders approved GPU IDs by value. At every explicit start, one REST create call
+uses RunPod's `gpuTypePriority: custom`, allowing RunPod to atomically try those
+types in order against current capacity instead of trusting a stale availability
+snapshot. Creation uses the fixed ImageForge template, one GPU, shared network
+volume, required ports, and runtime secrets. The response supplies the actual
+GPU, hourly rate, Pod ID, and the ID used for its proxy URL.
 
 Only user actions create or terminate Pods. Polling may observe state but never
 changes it. Concurrent start clicks are reconciled by discovering matching live
