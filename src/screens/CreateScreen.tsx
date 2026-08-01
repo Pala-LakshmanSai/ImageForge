@@ -61,6 +61,7 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
     setChoosingDestination(true);
     try {
       const path = await adapter.chooseDestination(state.settings.defaultDestination);
+      if (path === null) return;
       const valid = await adapter.validateDestination(path);
       if (valid) dispatch({ type: 'SET_DESTINATION', path });
       else dispatch({ type: 'SHOW_TOAST', tone: 'error', title: 'Folder is not writable', message: 'Choose another destination and try the write test again.' });

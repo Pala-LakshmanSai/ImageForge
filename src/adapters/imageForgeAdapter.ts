@@ -52,8 +52,18 @@ export interface ConnectionTestResult {
   message: string;
 }
 
+export interface StudioProfile {
+  profile: string;
+  templateId: string;
+  networkVolumeId: string;
+  dataCenter: 'EU-RO-1';
+  gpuPolicy: string;
+  workerPort: 8000;
+  modelPreset: 'flux2-klein-bf16';
+}
+
 export interface ImageForgeAdapter {
-  chooseDestination(defaultPath: string): Promise<string>;
+  chooseDestination(defaultPath: string): Promise<string | null>;
   validateDestination(path: string): Promise<boolean>;
   credentialMetadata(): Promise<CredentialMetadataMap>;
   replaceCredential(kind: CredentialKind, value: string): Promise<CredentialMetadata>;
@@ -85,16 +95,55 @@ function cloneCredentialMetadata(credentials: CredentialMetadataMap): Credential
   };
 }
 
+export function parseStudioProfile(source: string): StudioProfile | null {
+  const entries = new Map<string, string>();
+  for (const rawLine of source.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const separator = line.indexOf(':');
+    if (separator <= 0) return null;
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    if (!value || entries.has(key)) return null;
+    entries.set(key, value);
+  }
+  const allowed = new Set([
+    'profile',
+    'template_id',
+    'network_volume_id',
+    'data_center',
+    'gpu_policy',
+    'worker_port',
+    'model_preset',
+  ]);
+  if (entries.size !== allowed.size || [...entries.keys()].some((key) => !allowed.has(key))) return null;
+  const safeId = /^[A-Za-z0-9][A-Za-z0-9._-]{0,190}$/;
+  const profile = entries.get('profile')!;
+  const templateId = entries.get('template_id')!;
+  const networkVolumeId = entries.get('network_volume_id')!;
+  const gpuPolicy = entries.get('gpu_policy')!;
+  if (
+    !safeId.test(profile) ||
+    !safeId.test(templateId) ||
+    !safeId.test(networkVolumeId) ||
+    !safeId.test(gpuPolicy) ||
+    entries.get('data_center') !== 'EU-RO-1' ||
+    entries.get('worker_port') !== '8000' ||
+    entries.get('model_preset') !== 'flux2-klein-bf16'
+  ) return null;
+  return {
+    profile,
+    templateId,
+    networkVolumeId,
+    dataCenter: 'EU-RO-1',
+    gpuPolicy,
+    workerPort: 8000,
+    modelPreset: 'flux2-klein-bf16',
+  };
+}
+
 function validateProfile(profile: string): boolean {
-  const required = [
-    /template_id\s*:/i,
-    /network_volume_id\s*:/i,
-    /data_center\s*:\s*EU-RO-1/i,
-    /gpu_policy\s*:/i,
-    /worker_port\s*:\s*8000/i,
-    /model_preset\s*:/i,
-  ];
-  return required.every((pattern) => pattern.test(profile));
+  return parseStudioProfile(profile) !== null;
 }
 
 function selectionFor(policy: GpuSelectionPolicy) {

@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="128" y1="96" x2="896" y2="928" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#190d19"/>
+      <stop offset="0.52" stop-color="#101329"/>
+      <stop offset="1" stop-color="#09152d"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="248" y1="184" x2="790" y2="836" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff5a6a"/>
+      <stop offset="0.52" stop-color="#f03d5a"/>
+      <stop offset="1" stop-color="#805df5"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(286 292) rotate(44) scale(710)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff405d" stop-opacity=".28"/>
+      <stop offset=".62" stop-color="#7558ff" stop-opacity=".11"/>
+      <stop offset="1" stop-color="#7558ff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="20"/>
+    </filter>
+  </defs>
+  <rect x="56" y="56" width="912" height="912" rx="220" fill="url(#bg)"/>
+  <rect x="56" y="56" width="912" height="912" rx="220" fill="url(#glow)"/>
+  <rect x="73" y="73" width="878" height="878" rx="204" fill="none" stroke="#ffffff" stroke-opacity=".11" stroke-width="8"/>
+  <path d="M311 215h245l183 183v316c0 71-58 129-129 129H311c-71 0-129-58-129-129V344c0-71 58-129 129-129Z" fill="#11142a" fill-opacity=".8" stroke="url(#edge)" stroke-width="54" stroke-linejoin="round"/>
+  <path d="M555 217v145c0 37 30 67 67 67h115" fill="none" stroke="#ff7180" stroke-width="48" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M315 590c0-100 81-181 181-181 69 0 129 39 160 96l-98 1-64 110-49-85-121 70" fill="none" stroke="#faf7f1" stroke-width="56" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m711 583 23 54 54 23-54 23-23 54-23-54-54-23 54-23 23-54Z" fill="#ff4e66"/>
+  <path d="M206 753c55 82 157 124 305 126" fill="none" stroke="#755cff" stroke-opacity=".38" stroke-width="32" stroke-linecap="round" filter="url(#shadow)"/>
+</svg>

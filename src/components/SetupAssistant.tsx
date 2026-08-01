@@ -43,6 +43,7 @@ export function SetupAssistant({
     dispatch({ type: 'SET_DESTINATION_VALIDATED', validated: false });
     try {
       const path = await adapter.chooseDestination(state.settings.defaultDestination);
+      if (path === null) return;
       const valid = await adapter.validateDestination(path);
       dispatch({ type: 'SET_SETTING', key: 'defaultDestination', value: path });
       dispatch({ type: 'SET_DESTINATION_VALIDATED', validated: valid });
@@ -75,7 +76,9 @@ export function SetupAssistant({
     setBusy(true);
     try {
       if (step === 1) {
-        const value = apiKeyRef.current?.value.trim() ?? '';
+        const input = apiKeyRef.current;
+        const value = input?.value.trim() ?? '';
+        if (input) input.value = '';
         if (!value && !state.setup.credentials.runpodApiKey.configured) {
           setError('Paste a RunPod API key before continuing.');
           return;
@@ -90,7 +93,9 @@ export function SetupAssistant({
         setError('The profile must include the EU-RO-1 template, volume, GPU policy, worker port, and model preset.');
         return;
       }
-      const value = workerTokenRef.current?.value.trim() ?? '';
+      const input = workerTokenRef.current;
+      const value = input?.value.trim() ?? '';
+      if (input) input.value = '';
       if (!value && !state.setup.credentials.workerToken.configured) {
         setError('Paste your worker token before continuing.');
         return;

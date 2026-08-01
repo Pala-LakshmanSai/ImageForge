@@ -59,6 +59,7 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
     setChoosingDestination(true);
     try {
       const path = await adapter.chooseDestination(state.settings.defaultDestination);
+      if (path === null) return;
       const validated = await adapter.validateDestination(path);
       dispatch({ type: 'SET_SETTING', key: 'defaultDestination', value: path });
       dispatch({ type: 'SET_DESTINATION_VALIDATED', validated });
