@@ -4,6 +4,7 @@ node_modules/
 dist/
 .cache/
 .tmp/
+.toolchains/
 target/
 src-tauri/target/
 .env
