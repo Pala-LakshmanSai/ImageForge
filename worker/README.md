@@ -10,13 +10,13 @@ It never creates, stops, or terminates a Pod.
 - API schema: `1`
 - model: `black-forest-labs/FLUX.2-klein-4B`
 - model revision: `e7b7dc27f91deacad38e78976d1f2b499d76a294`
-- precision: BF16, loaded directly onto one NVIDIA CUDA 13.0+ device with at least 16 GiB VRAM
+- precision: BF16, loaded directly onto one NVIDIA CUDA 13.0+ device with at least 16,380 MiB VRAM
 - output: 1280x720 JPEG quality 95 and 320x180 WebP preview
 - inference: four steps, guidance 1.0
 - retries: one initial attempt and two automatic retries
 - prompts: 1-500, at most 4096 UTF-8 bytes each
 
-The CUDA 13.0 Docker base supports the approved Ada and Blackwell families. The
+The CUDA 13.0 Docker base supports the approved Ampere, Ada, and Blackwell families. The
 Docker base image, Python minor version, direct dependencies, PyTorch,
 Diffusers, model revision, and schema are pinned. The production adapter uses
 `local_files_only=True` while all Hugging Face offline flags are set. Model
@@ -44,15 +44,21 @@ This preparation command is never invoked by the Docker entrypoint.
 GPU family selection remains the desktop/RunPod provider's responsibility. The
 worker is hardware-generic across the approved NVIDIA fallback pool: it checks
 that exactly one CUDA device is visible and that the actual device has at least
-16 GiB VRAM, then reports its real name, capacity, allocation, reservation, and
-peak memory through health. An undersized device fails measured readiness
-instead of attempting CPU offload.
+16,380 MiB VRAM, then reports its real name, capacity, allocation, reservation,
+and peak memory through health. The byte-exact floor is only 4 MiB below nominal
+16 GiB, accommodating the approved emergency RTX 2000 Ada's reported capacity
+without admitting materially smaller cards. An undersized device fails measured
+readiness instead of attempting CPU offload.
 
 RunPod network-volume Pods are terminated and recreated rather than stopped.
-The new Pod gets a new ID, but `/workspace` persists. A POSIX advisory lock at
-`/workspace/imageforge/.active-batch.lock` is held for the entire running, paused,
-or interrupted lifetime and is released by the operating system after a crash.
-A duplicate live Pod can read owner/progress but cannot mutate the active manifest.
+The new Pod gets a new ID, but `/workspace` persists. The worker attempts to hold
+a POSIX advisory lock at `/workspace/imageforge/.active-batch.lock` for the entire
+running, paused, or interrupted lifetime; a duplicate process that observes the
+lock remains read-only. Local multi-process tests verify the worker logic, but
+they do **not** establish that a selected RunPod network-volume driver propagates
+`flock` correctly between Pods. Before approving a deployment region/volume type,
+run the paid two-Pod gate below. Do not rely on this lease in production until
+that exact storage configuration passes.
 After the prior process exits, recovery scans
 `/workspace/imageforge/batches`, validates every ready artifact against its
 size and SHA-256, changes a previously running batch to `interrupted`, and
@@ -94,9 +100,13 @@ The fake emits valid JPEG/WebP files derived from prompt, index, and seed. A
 real-GPU test is excluded unless `IMAGEFORGE_REAL_GPU_TEST=1` is set explicitly;
 running that paid gate also requires the pinned weights and an already-authorized
 Pod. The harness never creates or terminates compute. Run it once on representative
-Ada and Blackwell Pods:
+Ampere, Ada, and Blackwell Pods (the current pool includes RTX A4500, RTX 2000
+Ada/RTX 4090, and RTX 5090 architectures):
 
 ```sh
+IMAGEFORGE_REAL_GPU_TEST=1 IMAGEFORGE_REAL_GPU_FAMILY=ampere \
+  IMAGEFORGE_MODEL_CACHE_DIR=/workspace/models/huggingface \
+  .venv/bin/pytest -m real_gpu tests/test_real_gpu_smoke.py
 IMAGEFORGE_REAL_GPU_TEST=1 IMAGEFORGE_REAL_GPU_FAMILY=ada \
   IMAGEFORGE_MODEL_CACHE_DIR=/workspace/models/huggingface \
   .venv/bin/pytest -m real_gpu tests/test_real_gpu_smoke.py
@@ -104,6 +114,14 @@ IMAGEFORGE_REAL_GPU_TEST=1 IMAGEFORGE_REAL_GPU_FAMILY=blackwell \
   IMAGEFORGE_MODEL_CACHE_DIR=/workspace/models/huggingface \
   .venv/bin/pytest -m real_gpu tests/test_real_gpu_smoke.py
 ```
+
+The real shared-volume lease is a separate paid/deployment gate. Attach the exact
+candidate network volume to two Pods. Hold a running batch on Pod A, then verify
+Pod B can read status but every mutation returns HTTP 423 and the retention
+cleanup command refuses to acquire its exclusive maintenance guard. Force-stop
+Pod A, verify Pod B recovers the manifest exactly once, then repeat the contention
+check in both directions. Record the region, volume type, mount options, image
+digest, and results; any failure disqualifies that storage configuration.
 
 ## API behavior
 
@@ -123,7 +141,9 @@ Receipts are durable, but the current manifest represents one acknowledgement
 rather than an all-device acknowledgement set. ImageForge therefore never deletes
 artifacts automatically. An operator may explicitly remove only checksum-verified,
 acknowledged artifacts after a minimum 24-hour safety window. Terminate all worker
-Pods before running this maintenance command so it cannot race an active download:
+Pods before running this maintenance command. The command also acquires the
+exclusive shared-volume guard and refuses while a worker holds it, but this is
+defense in depth and depends on the real cross-Pod validation gate above:
 
 ```sh
 python -m imageforge_worker.cleanup_retention \
@@ -133,8 +153,11 @@ python -m imageforge_worker.cleanup_retention \
 ```
 
 Unacknowledged, recent, corrupt, or active-batch artifacts are never eligible.
-The durable manifest, receipt, filenames, sizes, and checksums remain after cleanup;
-subsequent artifact requests return the typed `artifact_expired` response.
+For each eligible image, cleanup durably records intent before unlinking either
+file and records completion afterward. Interrupted cleanup is resumable, and the
+durable receipt, filenames, sizes, and checksums remain at every crash boundary;
+subsequent artifact requests return the typed `artifact_expired` response as soon
+as cleanup intent is durable.
 
 Artifact responses include `Content-Type`, `Content-Length`, `Digest`, `ETag`,
 `X-ImageForge-SHA256`, and `X-Checksum-SHA256`. A receipt must repeat the full

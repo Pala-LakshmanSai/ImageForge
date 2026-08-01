@@ -10,6 +10,7 @@ import pytest
 from imageforge_worker.constants import (
     MIN_CUDA_VERSION,
     MIN_GPU_MEMORY_BYTES,
+    MIN_GPU_MEMORY_MIB,
     MODEL_ALLOW_PATTERNS,
     MODEL_ID,
     MODEL_REVISION,
@@ -60,12 +61,71 @@ def test_flux_adapter_rejects_insufficient_vram_but_surfaces_actual_gpu(
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
     monkeypatch.setitem(sys.modules, "diffusers", SimpleNamespace(Flux2KleinPipeline=object()))
     adapter = FluxInferenceAdapter(tmp_path)
-    with pytest.raises(RuntimeError, match="less than 16 GiB"):
+    with pytest.raises(RuntimeError, match="less than 16380 MiB"):
         adapter._load_pipeline(str(tmp_path))
     snapshot = adapter.gpu_snapshot()
     assert snapshot["name"] == "NVIDIA T4"
     assert snapshot["total_memory_bytes"] == 15 * 1024**3
     assert snapshot["approved"] is False
+
+
+@pytest.mark.parametrize(
+    ("total_memory", "accepted"),
+    [
+        (MIN_GPU_MEMORY_BYTES - 1, False),
+        (MIN_GPU_MEMORY_BYTES, True),
+        (MIN_GPU_MEMORY_BYTES + 1, True),
+    ],
+    ids=["one-byte-below", "exact-floor", "one-byte-above"],
+)
+def test_flux_adapter_enforces_byte_exact_emergency_vram_floor_without_cpu_offload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    total_memory: int,
+    accepted: bool,
+) -> None:
+    bfloat16 = object()
+    fake_torch = SimpleNamespace(
+        cuda=FakeCuda(name="NVIDIA RTX 2000 Ada Generation", total_memory=total_memory),
+        bfloat16=bfloat16,
+        version=SimpleNamespace(cuda="13.0"),
+    )
+    captured: dict = {}
+
+    class Parameter:
+        device = SimpleNamespace(type="cuda")
+        dtype = bfloat16
+
+    class Pipeline:
+        transformer = SimpleNamespace(parameters=lambda: iter([Parameter()]))
+
+        def set_progress_bar_config(self, *, disable: bool) -> None:
+            captured["progress_disabled"] = disable
+
+    class FakePipelineType:
+        @classmethod
+        def from_pretrained(cls, _path: str, **kwargs):
+            captured.update(kwargs)
+            return Pipeline()
+
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(
+        sys.modules,
+        "diffusers",
+        SimpleNamespace(Flux2KleinPipeline=FakePipelineType),
+    )
+    adapter = FluxInferenceAdapter(tmp_path)
+
+    if accepted:
+        adapter._load_pipeline(str(tmp_path / "snapshot"))
+        assert captured["device_map"] == "cuda"
+        assert captured["torch_dtype"] is bfloat16
+        assert adapter.gpu_snapshot()["approved"] is True
+    else:
+        with pytest.raises(RuntimeError, match="less than 16380 MiB"):
+            adapter._load_pipeline(str(tmp_path / "snapshot"))
+        assert captured == {}
+        assert adapter.gpu_snapshot()["approved"] is False
 
 
 def test_flux_adapter_is_family_generic_and_loads_bf16_directly_on_cuda(
@@ -154,7 +214,9 @@ def test_model_snapshot_resolution_is_pinned_and_offline(
         "local_files_only": True,
         "allow_patterns": list(MODEL_ALLOW_PATTERNS),
     }
-    assert MIN_GPU_MEMORY_BYTES == 16 * 1024**3
+    assert MIN_GPU_MEMORY_MIB == 16_380
+    assert MIN_GPU_MEMORY_BYTES == 16_380 * 1024**2
+    assert 16 * 1024**3 - MIN_GPU_MEMORY_BYTES == 4 * 1024**2
     assert MIN_CUDA_VERSION == (13, 0)
 
 

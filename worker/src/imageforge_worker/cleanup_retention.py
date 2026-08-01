@@ -17,10 +17,11 @@ def cleanup_retained_artifacts(
     """Run explicit conservative cleanup; ImageForge never schedules this automatically."""
 
     store = FileManifestStore(data_root)
-    store.initialize()
     if not store.try_acquire_active_lease():
-        raise RuntimeError("another worker process owns the shared-volume lease")
+        raise RuntimeError("another worker or maintenance process owns the shared-volume guard")
     try:
+        # Acquire the maintenance guard before even the storage write probe.
+        store.initialize()
         for batch_id in store.list_batch_ids():
             if store.load(batch_id).state in LOCK_HOLDING_STATES:
                 raise RuntimeError("cleanup is disabled while an active batch is retained")

@@ -20,12 +20,14 @@ REAL_GPU_AUTHORIZED = os.environ.get("IMAGEFORGE_REAL_GPU_TEST") == "1"
     not REAL_GPU_AUTHORIZED,
     reason="requires explicit IMAGEFORGE_REAL_GPU_TEST=1 authorization on an existing GPU",
 )
-async def test_authorized_ada_or_blackwell_flux_smoke(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run once on representative Ada and Blackwell Pods; this test never creates a Pod."""
+async def test_authorized_approved_architecture_flux_smoke(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Run on representative Ampere, Ada, and Blackwell Pods; never create a Pod."""
 
     expected_family = os.environ.get("IMAGEFORGE_REAL_GPU_FAMILY")
-    if expected_family not in {"ada", "blackwell"}:
-        pytest.fail("set IMAGEFORGE_REAL_GPU_FAMILY=ada or blackwell")
+    if expected_family not in {"ampere", "ada", "blackwell"}:
+        pytest.fail("set IMAGEFORGE_REAL_GPU_FAMILY=ampere, ada, or blackwell")
     cache_raw = os.environ.get("IMAGEFORGE_MODEL_CACHE_DIR")
     if not cache_raw:
         pytest.fail("IMAGEFORGE_MODEL_CACHE_DIR must point at the prepared pinned snapshot")
@@ -37,7 +39,9 @@ async def test_authorized_ada_or_blackwell_flux_smoke(monkeypatch: pytest.Monkey
     import torch
 
     capability = torch.cuda.get_device_capability(0)
-    if expected_family == "ada":
+    if expected_family == "ampere":
+        assert capability == (8, 6), torch.cuda.get_device_name(0)
+    elif expected_family == "ada":
         assert capability == (8, 9), torch.cuda.get_device_name(0)
     else:
         assert capability[0] >= 10, torch.cuda.get_device_name(0)

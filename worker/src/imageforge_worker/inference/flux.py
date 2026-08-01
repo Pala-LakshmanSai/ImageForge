@@ -11,6 +11,7 @@ from PIL import Image
 from ..constants import (
     MIN_CUDA_VERSION,
     MIN_GPU_MEMORY_BYTES,
+    MIN_GPU_MEMORY_MIB,
     MODEL_ALLOW_PATTERNS,
     MODEL_ID,
     MODEL_REVISION,
@@ -94,7 +95,7 @@ class FluxInferenceAdapter:
         if "NVIDIA" not in gpu_name.upper():
             raise RuntimeError("the visible CUDA device is not an NVIDIA GPU")
         if total_memory < MIN_GPU_MEMORY_BYTES:
-            raise RuntimeError("the visible GPU has less than 16 GiB of VRAM")
+            raise RuntimeError(f"the visible GPU has less than {MIN_GPU_MEMORY_MIB} MiB of VRAM")
 
         pipeline = Flux2KleinPipeline.from_pretrained(
             snapshot_path,

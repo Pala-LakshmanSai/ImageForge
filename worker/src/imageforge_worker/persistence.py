@@ -208,8 +208,9 @@ class FileManifestStore:
     ) -> CleanupResult:
         """Explicitly remove verified artifacts acknowledged at least 24 hours ago.
 
-        ImageForge never calls this automatically. The manifest, checksums, and receipt remain
-        durable so cleanup cannot be mistaken for an incomplete generation after a restart.
+        ImageForge never calls this automatically. A per-image cleanup intent is saved before
+        either file is unlinked. The manifest, checksums, and receipt therefore remain durable
+        at every crash point, and a later explicit cleanup safely resumes partial deletion.
         """
 
         self._require_active_lease()
@@ -221,41 +222,56 @@ class FileManifestStore:
         images_deleted = 0
         files_deleted = 0
         bytes_deleted = 0
-        deleted_at = now.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        cleanup_timestamp = (
+            now.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        )
         for batch_id in self.list_batch_ids():
             manifest = self.load(batch_id)
             if manifest.state in LOCK_HOLDING_STATES:
                 continue
-            changed = False
             for image in manifest.images:
-                receipt = image.receipt
-                if (
-                    image.status != ImageState.DOWNLOADED
-                    or receipt is None
-                    or receipt.user_id != manifest.owner.user_id
-                    or image.artifacts_deleted_at is not None
-                ):
+                if image.artifacts_deleted_at is not None:
                     continue
-                acknowledged_at = _parse_timestamp(receipt.acknowledged_at)
-                if acknowledged_at is None or now.astimezone(UTC) - acknowledged_at < minimum_age:
-                    continue
-                if not self.verify_record_artifacts(batch_id, image):
-                    continue
+
+                if image.artifacts_cleanup_started_at is None:
+                    receipt = image.receipt
+                    if (
+                        image.status != ImageState.DOWNLOADED
+                        or receipt is None
+                        or receipt.user_id != manifest.owner.user_id
+                    ):
+                        continue
+                    acknowledged_at = _parse_timestamp(receipt.acknowledged_at)
+                    if (
+                        acknowledged_at is None
+                        or now.astimezone(UTC) - acknowledged_at < minimum_age
+                    ):
+                        continue
+                    if not self.verify_record_artifacts(batch_id, image):
+                        continue
+                    image.artifacts_cleanup_started_at = cleanup_timestamp
+                    # This tombstone must be durable before the first destructive mutation.
+                    self.save(manifest)
+
                 assert image.filename is not None
                 assert image.preview_filename is not None
                 full = self.artifact_path(batch_id, image.filename)
                 preview = self.artifact_path(batch_id, image.preview_filename)
-                bytes_deleted += full.stat().st_size + preview.stat().st_size
-                full.unlink()
-                preview.unlink()
-                self._fsync_directory(full.parent)
-                self._fsync_directory(preview.parent)
-                image.artifacts_deleted_at = deleted_at
-                images_deleted += 1
-                files_deleted += 2
-                changed = True
-            if changed:
+                for path in (full, preview):
+                    try:
+                        size = path.stat().st_size
+                    except FileNotFoundError:
+                        continue
+                    path.unlink()
+                    self._fsync_directory(path.parent)
+                    files_deleted += 1
+                    bytes_deleted += size
+
+                image.artifacts_deleted_at = cleanup_timestamp
+                # Finalization is idempotent: after a failed save the durable intent makes a
+                # restart preserve metadata, and the next explicit run saves completion.
                 self.save(manifest)
+                images_deleted += 1
         return CleanupResult(
             images_deleted=images_deleted,
             files_deleted=files_deleted,

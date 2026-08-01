@@ -145,7 +145,14 @@ class ImageRecord(StrictModel):
     generation_ms: float | None = Field(default=None, ge=0)
     error: SafeImageError | None = None
     receipt: StoredReceipt | None = None
+    artifacts_cleanup_started_at: str | None = None
     artifacts_deleted_at: str | None = None
+
+    @property
+    def artifacts_expired(self) -> bool:
+        return (
+            self.artifacts_cleanup_started_at is not None or self.artifacts_deleted_at is not None
+        )
 
     def clear_artifact(self) -> None:
         self.filename = None
@@ -157,6 +164,7 @@ class ImageRecord(StrictModel):
         self.finished_at = None
         self.generation_ms = None
         self.receipt = None
+        self.artifacts_cleanup_started_at = None
         self.artifacts_deleted_at = None
 
 

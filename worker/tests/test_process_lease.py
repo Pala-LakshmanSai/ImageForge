@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from imageforge_worker.auth import Principal
+from imageforge_worker.cleanup_retention import cleanup_retained_artifacts
 from imageforge_worker.controller import GenerationController
 from imageforge_worker.domain import CreateBatchRequest
 from imageforge_worker.errors import WorkerError
@@ -76,6 +77,18 @@ def _active_owner_child(root, results) -> None:
         await asyncio.Event().wait()
 
     asyncio.run(run())
+
+
+def _lease_holder_child(root, ready, release) -> None:
+    store = FileManifestStore(Path(root), fsync_writes=False)
+    store.initialize()
+    if not store.try_acquire_active_lease():
+        raise RuntimeError("test lease holder could not acquire the guard")
+    ready.set()
+    try:
+        release.wait()
+    finally:
+        store.release_active_lease()
 
 
 def _duplicate_observer_child(root, batch_id, results) -> None:
@@ -190,6 +203,26 @@ def test_two_processes_sharing_a_volume_get_one_atomic_batch_winner(tmp_path: Pa
         release.set()
         for process in processes:
             _join_or_terminate(process)
+
+
+def test_cleanup_maintenance_guard_refuses_while_worker_lease_is_live(tmp_path: Path) -> None:
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    root = tmp_path / "shared-volume"
+    holder = context.Process(target=_lease_holder_child, args=(root, ready, release))
+    holder.start()
+    try:
+        assert ready.wait(20), "lease holder did not become ready"
+        try:
+            cleanup_retained_artifacts(root)
+        except RuntimeError as exc:
+            assert "shared-volume guard" in str(exc)
+        else:
+            raise AssertionError("cleanup acquired the guard while a worker lease was live")
+    finally:
+        release.set()
+        _join_or_terminate(holder)
 
 
 def test_duplicate_boot_is_read_only_and_forced_kill_recovers_once(tmp_path: Path) -> None:

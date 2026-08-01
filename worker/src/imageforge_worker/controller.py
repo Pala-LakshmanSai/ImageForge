@@ -106,7 +106,7 @@ class GenerationController:
         for image in manifest.images:
             if image.status in {ImageState.READY, ImageState.DOWNLOADED}:
                 if (
-                    image.artifacts_deleted_at is not None
+                    image.artifacts_expired
                     and image.status == ImageState.DOWNLOADED
                     and image.receipt is not None
                 ):
@@ -393,7 +393,7 @@ class GenerationController:
         records: list[tuple[ImageRecord, str, int]] = []
         for receipt in request.receipts:
             image = self._find_image(manifest, receipt.index)
-            if image.artifacts_deleted_at is not None:
+            if image.artifacts_expired:
                 raise WorkerError(
                     status_code=410,
                     code="artifact_expired",
@@ -445,7 +445,7 @@ class GenerationController:
         async with self._lock:
             manifest = self._load_owned(principal, batch_id)
             image = self._find_image(manifest, index)
-            if image.artifacts_deleted_at is not None:
+            if image.artifacts_expired:
                 raise WorkerError(
                     status_code=410,
                     code="artifact_expired",
@@ -554,6 +554,7 @@ class GenerationController:
             image.finished_at = finished_at
             image.status = ImageState.READY
             image.error = None
+            image.artifacts_cleanup_started_at = None
             image.artifacts_deleted_at = None
             image.attempt_history.append(
                 AttemptRecord(

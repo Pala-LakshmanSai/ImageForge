@@ -19,7 +19,11 @@ MAX_PROMPTS: Final = 500
 MAX_PROMPT_UTF8_BYTES: Final = 4096
 MAX_GENERATION_ATTEMPTS: Final = 3
 
-MIN_GPU_MEMORY_BYTES: Final = 16 * 1024**3
+# RunPod's approved emergency RTX 2000 Ada reports 16,380 MiB rather than the
+# nominal 16 GiB. Keep the allowance byte-exact and limited to that 4 MiB
+# reporting margin so materially smaller devices still fail readiness.
+MIN_GPU_MEMORY_MIB: Final = 16_380
+MIN_GPU_MEMORY_BYTES: Final = MIN_GPU_MEMORY_MIB * 1024**2
 MIN_CUDA_VERSION: Final = (13, 0)
 
 # The root single-file checkpoint duplicates transformer/ and is deliberately excluded.
