@@ -30,9 +30,19 @@ RunPod hosts to a compatible CUDA runtime before creation.
 The GHCR package must be readable by RunPod. For a private package, create a
 read-only package-pull secret in RunPod and record that it was used; for a
 public package, verify the package visibility explicitly. Never put a personal
-GitHub token in the repository, desktop profile, or this runbook. The current
-repository has no published image digest or RunPod template ID yet; those are
-one-time release outputs, not values to guess.
+GitHub token in the repository, desktop profile, or this runbook.
+
+Current immutable worker release evidence (published 2026-08-01):
+
+- Repository: `Pala-LakshmanSai/imageforge-worker`
+- Source commit: `4ee11c09f3c18610920454b70b472695714afe15`
+- Image: `ghcr.io/pala-lakshmansai/imageforge-worker@sha256:78af99a918c9baafdb9a7246e73c054cd89448edce0f3b6fd7496074128800b6`
+- Architecture: `linux/amd64`
+
+The package is private. RunPod still needs a read-only GHCR package-pull
+secret, and the RunPod template must be updated to this exact digest before a
+paid smoke test. The template ID remains a deliberate one-time deployment
+value; do not guess it.
 
 ## 2. Worker authentication
 

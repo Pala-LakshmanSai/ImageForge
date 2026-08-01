@@ -79,3 +79,32 @@ covered by tests.
   `ukh207b26r` in EU-RO-1. The immutable ImageForge worker image/template,
   runtime secrets, paid GPU smoke, two-Pod volume gate, and installers are not
   yet published, so the unrelated default ComfyUI template must not be used.
+
+## Production completion loop — `fb765a0` + worker `4ee11c09`
+
+### Evidence that passed
+
+- Frontend: 13 Vitest files, 80 tests passed; `npm run typecheck`, `npm run
+  build`, and the focused RunPod recovery regression passed.
+- RunPod client: 91 lifecycle/configuration/provider tests passed, including
+  live `gpuCount` plus `machine.gpuTypeId` Pod responses and ambiguous-create
+  reconciliation.
+- Worker: 39 offline tests passed, 1 explicitly authorized real-GPU test
+  skipped; Ruff checks passed.
+- Rust native core: 38 tests passed with the removable-disk toolchain.
+- The ambiguous RunPod-start banner no longer reports a failed start as 100%
+  complete; it shows that confirmation is required and keeps the progress track
+  empty.
+- Worker published from `4ee11c09f3c18610920454b70b472695714afe15` as
+  `ghcr.io/pala-lakshmansai/imageforge-worker@sha256:78af99a918c9baafdb9a7246e73c054cd89448edce0f3b6fd7496074128800b6`.
+- Rebuilt removable-disk macOS Apple-silicon DMG:
+  `/Volumes/ImageForgeBuild/cargo-target/release/bundle/dmg/ImageForge_0.1.0_aarch64.dmg`
+  SHA-256 `89d713b3beb74e6615bcbab702dfff96aaada5e52ba0eb2ec488ee7af066ca10`.
+
+### Still-required external gates
+
+- Update the RunPod template to the new private GHCR digest and verify its
+  read-only package-pull secret.
+- Run the explicitly authorized real-GPU smoke and EU-RO-1 two-Pod volume gate.
+- Build and smoke-test the Windows x64 NSIS installer on a Windows runner.
+- Perform the final packaged-app keyboard/folder-reveal pass on the target OSes.
