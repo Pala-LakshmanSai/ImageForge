@@ -77,8 +77,9 @@ covered by tests.
   Ruff passed for `worker/src` and `worker/tests`.
 - External RunPod setup: the durable `imageforge-prod-50gb` volume exists as
   `ukh207b26r` in EU-RO-1. The immutable ImageForge worker image/template,
-  runtime secrets, paid GPU smoke, two-Pod volume gate, and installers are not
-  yet published, so the unrelated default ComfyUI template must not be used.
+  runtime secret, and template are now published/configured; paid GPU smoke,
+  model-cache preparation, two-Pod volume gate, and installers remain pending.
+  The unrelated default ComfyUI template must not be used.
 
 ## Production completion loop — `fb765a0` + worker `4ee11c09`
 
@@ -103,8 +104,8 @@ covered by tests.
 
 ### Still-required external gates
 
-- Update the RunPod template to the new private GHCR digest and verify its
-  read-only package-pull secret.
+- Verify the configured RunPod template boots the new public GHCR digest and
+  prepare the pinned model cache on the EU-RO-1 network volume.
 - Run the explicitly authorized real-GPU smoke and EU-RO-1 two-Pod volume gate.
 - Build and smoke-test the Windows x64 NSIS installer on a Windows runner.
 - Perform the final packaged-app keyboard/folder-reveal pass on the target OSes.

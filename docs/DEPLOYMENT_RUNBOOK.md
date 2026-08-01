@@ -39,10 +39,16 @@ Current immutable worker release evidence (published 2026-08-01):
 - Image: `ghcr.io/pala-lakshmansai/imageforge-worker@sha256:78af99a918c9baafdb9a7246e73c054cd89448edce0f3b6fd7496074128800b6`
 - Architecture: `linux/amd64`
 
-The package is private. RunPod still needs a read-only GHCR package-pull
-secret, and the RunPod template must be updated to this exact digest before a
-paid smoke test. The template ID remains a deliberate one-time deployment
-value; do not guess it.
+The GHCR package is public, so the template uses **No credentials** for image
+pulls. The ImageForge RunPod template has now been updated to this exact
+digest:
+
+- Template: `imageforge-flux-worker-v1` (`q8sfgixfy2`)
+- Network volume: `imageforge-prod-50gb` (`ukh207b26`)
+- Data center: `EU-RO-1`
+
+The template still requires the paid smoke gate and model-cache preparation
+below before production batches are declared ready.
 
 ## 2. Worker authentication
 
