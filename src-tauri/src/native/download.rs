@@ -911,42 +911,16 @@ async fn sync_parent(path: &Path) -> NativeResult<()> {
 
 fn sync_directory_blocking(directory: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
-    let file = {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-            .open(directory)?
-    };
-    #[cfg(not(windows))]
-    let file = std::fs::File::open(directory)?;
-    sync_directory_handle(file)
-}
-
-#[cfg(windows)]
-fn sync_directory_handle(file: std::fs::File) -> std::io::Result<()> {
-    use windows_sys::Win32::Foundation::{ERROR_INVALID_FUNCTION, ERROR_INVALID_HANDLE};
-    match file.sync_all() {
-        Err(error)
-            if matches!(
-                error.raw_os_error(),
-                Some(code)
-                    if code == ERROR_INVALID_FUNCTION as i32 || code == ERROR_INVALID_HANDLE as i32
-            ) =>
-        {
-            // Windows files and no-replace moves are write-through. Some
-            // removable filesystems do not provide a flushable directory
-            // handle, so these documented directory-only errors are benign.
-            Ok(())
-        }
-        result => result,
+    {
+        // Windows has no portable directory fsync. Receipt files are synced
+        // individually, and callers use write-through atomic replacement.
+        let _ = directory;
+        Ok(())
     }
-}
-
-#[cfg(not(windows))]
-fn sync_directory_handle(file: std::fs::File) -> std::io::Result<()> {
-    file.sync_all()
+    #[cfg(not(windows))]
+    {
+        std::fs::File::open(directory)?.sync_all()
+    }
 }
 
 async fn sync_directory_chain(root: &Path, relative: &Path) -> NativeResult<()> {
