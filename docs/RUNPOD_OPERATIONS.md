@@ -97,6 +97,7 @@ connectivity failure may invoke termination.
 Pod names are not unique. Before creating, each client lists matching Pods. A
 simultaneous race can still create duplicates, so clients must surface every
 matching Pod and warn about duplicate hourly spend. Do not automatically delete
-the newer/older Pod. The shared worker batch lease prevents two Pods from
-generating simultaneously when they share a volume, but it does not make extra
-compute free.
+the newer/older Pod. The shared worker batch lease is expected to prevent two
+Pods from generating simultaneously, but RunPod cross-Pod filesystem behavior
+is deployment-specific; it is not trusted until the opt-in two-Pod EU-RO-1
+volume gate in `worker/scripts/run_volume_gate.py` passes with isolated paths.

@@ -135,6 +135,14 @@ export function nativeRestoreDestination(): Promise<NativeDestinationMetadata | 
   return invoke<NativeDestinationMetadata | null>('restore_destination');
 }
 
+export function nativeRevealDestination(relativePath?: string): Promise<void> {
+  return invoke('reveal_destination', { relativePath: relativePath ?? null });
+}
+
+export function nativeWriteManifest(batchId: string, content: string): Promise<string> {
+  return invoke<string>('write_manifest', { batchId, content });
+}
+
 export function bindNativeWorkerSession(podId: string): Promise<void> {
   return invoke('bind_worker_session', { podId });
 }

@@ -39,7 +39,7 @@ function parse(value: unknown): SafePreferencesV1 | null {
     'gpuPreference',
     'studioProfile',
   ]);
-  const rawBatchId = item.lastOwnedBatchId === null
+  const rawBatchId = item.lastOwnedBatchId === undefined || item.lastOwnedBatchId === null
     ? null
     : boundedString(item.lastOwnedBatchId, 80);
   const lastOwnedBatchId = rawBatchId === null || BATCH_ID_PATTERN.test(rawBatchId) ? rawBatchId : null;
@@ -47,7 +47,7 @@ function parse(value: unknown): SafePreferencesV1 | null {
     Object.keys(item).some((key) => !allowed.has(key)) ||
     item.version !== 1 ||
     item.setupCompleted !== true
-    || (item.lastOwnedBatchId !== null && lastOwnedBatchId === null)
+    || (item.lastOwnedBatchId !== undefined && item.lastOwnedBatchId !== null && lastOwnedBatchId === null)
   ) return null;
   const userName = boundedString(item.userName, 80);
   const destination = boundedString(item.defaultDestination, 2_048);
@@ -116,11 +116,19 @@ export function hydrateSafePreferences(base: AppState, storage: Pick<Storage, 'g
   };
 }
 
-export function persistSafePreferences(state: AppState, storage: Pick<Storage, 'setItem'>): void {
+export function persistSafePreferences(
+  state: AppState,
+  storage: Pick<Storage, 'setItem'>,
+  recoveryBatchIdOverride?: string | null,
+): void {
   const preferences: SafePreferencesV1 = {
     version: 1,
     setupCompleted: true,
-    lastOwnedBatchId: state.batch && BATCH_ID_PATTERN.test(state.batch.id) ? state.batch.id : null,
+    lastOwnedBatchId: recoveryBatchIdOverride !== undefined
+      ? recoveryBatchIdOverride
+      : state.batch?.canManage === true && BATCH_ID_PATTERN.test(state.batch.id)
+        ? state.batch.id
+        : null,
     userName: state.settings.userName.slice(0, 80),
     defaultDestination: state.settings.defaultDestination.slice(0, 2_048),
     editorialSuffixEnabled: state.settings.editorialSuffixEnabled,

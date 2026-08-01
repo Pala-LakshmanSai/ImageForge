@@ -50,12 +50,17 @@ function SettingSectionTitle({ icon: Icon, eyebrow, title }: { icon: typeof User
 }
 
 export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
+  const productionLocked = adapter.mode === 'production' && (
+    state.pod.podId !== null ||
+    (state.batch !== null && !['complete', 'cancelled'].includes(state.batch.phase))
+  );
   const [choosingDestination, setChoosingDestination] = useState(false);
   const [scenario, setScenario] = useState<OperationalScenario>('running');
   const [showSetup, setShowSetup] = useState(false);
   const [setupInitialStep, setSetupInitialStep] = useState(0);
 
   async function chooseDefaultDestination() {
+    if (productionLocked) return;
     setChoosingDestination(true);
     try {
       const path = await adapter.chooseDestination(state.settings.defaultDestination);
@@ -93,7 +98,7 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
       <section className="page-heading">
         <div><Eyebrow>Settings · this device</Eyebrow><h1>Make the desk yours.</h1><p>Identity, local delivery, redacted connection health, and explicit GPU control.</p></div>
         <div className="page-heading__actions">
-          <Button icon={Laptop} onClick={() => openSetup()}>Review setup</Button>
+          <Button icon={Laptop} disabled={productionLocked} onClick={() => openSetup()}>Review setup</Button>
           <PhaseBadge tone="success"><ShieldCheck size={13} /> secrets redacted</PhaseBadge>
           <Button tone="primary" icon={Save} onClick={() => dispatch({ type: 'SAVE_SETTINGS' })}>Save preferences</Button>
         </div>
@@ -105,7 +110,7 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
             <SettingSectionTitle icon={UserRound} eyebrow="Identity & delivery" title="Local production profile" />
             <div className="settings-form-grid">
               <label className="settings-field"><span>Display name</span><small>Visible when you hold the shared batch lock.</small><input value={state.settings.userName} maxLength={40} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'userName', value: event.target.value })} /></label>
-              <label className="settings-field"><span>Default destination</span><small>Full images and receipts stay on this device.</small><button type="button" className="settings-picker" onClick={() => void chooseDefaultDestination()}><Folder size={16} /><strong>{choosingDestination ? 'Opening chooser…' : state.settings.defaultDestination}</strong><ChevronRight size={15} /></button></label>
+              <label className="settings-field"><span>Default destination</span><small>Full images and receipts stay on this device.</small><button type="button" className="settings-picker" disabled={productionLocked || choosingDestination} onClick={() => void chooseDefaultDestination()}><Folder size={16} /><strong>{choosingDestination ? 'Opening chooser…' : state.settings.defaultDestination}</strong><ChevronRight size={15} /></button></label>
             </div>
           </section>
 
@@ -117,13 +122,13 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
                 <span className="credential-card__icon"><KeyRound size={18} /></span>
                 <div><strong>RunPod restricted API key</strong><small>{state.setup.credentials.runpodApiKey.configured ? `Configured · suffix •••• ${state.setup.credentials.runpodApiKey.suffix} · ${state.setup.credentials.runpodApiKey.provider}` : `Not configured · ${state.setup.credentials.runpodApiKey.provider}`}</small></div>
                 <PhaseBadge tone={state.setup.credentials.runpodApiKey.configured ? 'success' : 'warning'}>{state.setup.credentials.runpodApiKey.configured ? 'configured' : 'required'}</PhaseBadge>
-                <Button compact onClick={() => openSetup(1)}>Replace</Button>
+                <Button compact disabled={productionLocked} onClick={() => openSetup(1)}>Replace</Button>
               </article>
               <article className="credential-card">
                 <span className="credential-card__icon"><LockKeyhole size={18} /></span>
                 <div><strong>Per-user worker credential</strong><small>{state.setup.credentials.workerToken.configured ? `Configured · suffix •••• ${state.setup.credentials.workerToken.suffix} · never placed in a URL` : `Not configured · ${state.setup.credentials.workerToken.provider}`}</small></div>
                 <PhaseBadge tone={state.setup.credentials.workerToken.configured ? 'success' : 'warning'}>{state.setup.credentials.workerToken.configured ? 'configured' : 'required'}</PhaseBadge>
-                <Button compact onClick={() => openSetup(2)}>Replace</Button>
+                <Button compact disabled={productionLocked} onClick={() => openSetup(2)}>Replace</Button>
               </article>
             </div>
             <div className="redaction-note"><EyeOff size={17} /><span><strong>Screenshot-safe by design</strong><small>Secrets are excluded from UI state, logs, analytics, crash reports, and project files.</small></span></div>
@@ -154,7 +159,7 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
             ) : null}
             <div className="manual-only-card"><ShieldCheck size={18} /><div><strong>Termination is manual only</strong><small>No completed-job event, idle timer, app exit, background monitor, or connectivity failure can terminate a Pod.</small></div></div>
             {state.pod.podId ? <Button tone="danger" onClick={() => dispatch({ type: 'REQUEST_STOP_POD' })}>Stop GPU with confirmation</Button> : <Button tone="primary" icon={Zap} disabled={!['offline', 'error'].includes(state.pod.phase) || state.pod.createRecovery !== null} onClick={() => dispatch({ type: 'START_POD' })}>Start GPU explicitly</Button>}
-            <Button icon={Check} onClick={() => void testConnection()}>Run read-only connection test</Button>
+            <Button icon={Check} disabled={productionLocked} onClick={() => void testConnection()}>Run read-only connection test</Button>
             <details className="advanced-settings">
               <summary><span><Database size={15} /><strong>Advanced connection details</strong></span><ChevronRight size={15} /></summary>
               <dl>
@@ -191,7 +196,7 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
           </section> : null}
         </div>
       </div>
-      {showSetup ? <SetupAssistant key={`setup-${setupInitialStep}`} state={state} dispatch={dispatch} adapter={adapter} initialStep={setupInitialStep} onClose={() => setShowSetup(false)} /> : null}
+      {showSetup ? <SetupAssistant key={`setup-${setupInitialStep}`} state={state} dispatch={dispatch} adapter={adapter} initialStep={setupInitialStep} locked={productionLocked} onClose={() => setShowSetup(false)} /> : null}
     </div>
   );
 }

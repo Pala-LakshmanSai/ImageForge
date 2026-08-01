@@ -67,6 +67,12 @@
 - Paid smoke tests are opt-in only and must record the exact GPU, hourly price,
   boot/load/warm timings, seconds per image, peak VRAM, and software/model
   revisions before that GPU can influence value ranking.
+- The paid release gate is incomplete until the exact two-Pod EU-RO-1 network-volume
+  qualification passes. Run `worker/scripts/run_volume_gate.py` with two identical
+  Pods and the same 50 GB volume; prove one 201/one 423, observer mutation denial,
+  isolated gate paths, owner-stop survivor recovery, and separately verify idle
+  worker presence and maintenance exclusion. A local fake test cannot waive this
+  gate.
 
 ## Non-goals
 

@@ -150,8 +150,12 @@ export function projectOwnedManifest(
   });
   const phase = batchPhase(manifest.state, manifest.progress.failed);
   const started = Date.parse(manifest.createdAt);
+  const terminalAt = ['complete', 'partial_failure', 'cancelled', 'interrupted', 'error'].includes(phase)
+    ? Date.parse(manifest.completedAt ?? manifest.updatedAt)
+    : Number.NaN;
+  const end = Number.isFinite(terminalAt) ? terminalAt : nowUnixMs;
   const elapsedSeconds = Number.isFinite(started)
-    ? Math.max(0, Math.round((nowUnixMs - started) / 1_000))
+    ? Math.max(0, Math.round((end - started) / 1_000))
     : 0;
   const measured = manifest.images
     .map((image) => image.generationMs)

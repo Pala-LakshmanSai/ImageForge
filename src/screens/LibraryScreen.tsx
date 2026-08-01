@@ -17,7 +17,17 @@ import { DialogPortal } from '../components/DialogPortal';
 import { Button, EmptyState, Eyebrow, IconButton, PhaseBadge } from '../components/primitives';
 import type { ScreenProps } from './types';
 
-export function LibraryScreen({ state, dispatch }: ScreenProps) {
+function VerifiedLocalPreview({ filename, compact = false }: { filename: string; compact?: boolean }) {
+  return (
+    <span className={`verified-local-preview${compact ? ' verified-local-preview--compact' : ''}`}>
+      <ShieldCheck size={compact ? 24 : 34} />
+      <strong>JPEG verified locally</strong>
+      <small>{filename}</small>
+    </span>
+  );
+}
+
+export function LibraryScreen({ state, dispatch, adapter }: ScreenProps) {
   const [query, setQuery] = useState('');
   const [scope, setScope] = useState<'all' | 'current'>('all');
   const [visibleCount, setVisibleCount] = useState(36);
@@ -42,14 +52,14 @@ export function LibraryScreen({ state, dispatch }: ScreenProps) {
       <section className="page-heading">
         <div><Eyebrow>Library · verified local artifacts</Eyebrow><h1>Your visual ledger.</h1><p>Every card maps back to an ordered prompt, seed, checksum, and local filename.</p></div>
         <div className="page-heading__actions">
-          <Button icon={FolderOpen} onClick={() => dispatch({ type: 'SHOW_TOAST', tone: 'info', title: 'Library folder revealed', message: state.settings.defaultDestination })}>Reveal output folder</Button>
+          <Button icon={FolderOpen} onClick={() => void adapter.revealPath().then(() => dispatch({ type: 'SHOW_TOAST', tone: 'success', title: 'Library folder revealed', message: state.settings.defaultDestination })).catch((error: unknown) => dispatch({ type: 'SHOW_TOAST', tone: 'error', title: 'Could not reveal folder', message: error instanceof Error ? error.message : 'The destination could not be revealed.' }))}>Reveal output folder</Button>
           {state.library.length ? <Button tone="danger" icon={Trash2} onClick={() => dispatch({ type: 'REQUEST_CLEAR_LIBRARY' })}>Clear index</Button> : null}
           <Button tone="primary" icon={Sparkles} onClick={() => dispatch({ type: 'NAVIGATE', view: 'create' })}>Create next batch</Button>
         </div>
       </section>
 
       <div className="library-stats" aria-label="Library summary">
-        <div><span>Verified images</span><strong>{state.library.length.toLocaleString()}</strong><small>JPEG + 320px preview</small></div>
+        <div><span>Verified images</span><strong>{state.library.length.toLocaleString()}</strong><small>JPEG + receipt ledger</small></div>
         <div><span>Production batches</span><strong>{batches}</strong><small>Stable numeric order</small></div>
         <div><span>Render time indexed</span><strong>{Math.round(totalSeconds / 60)}m</strong><small>Measured, not estimated</small></div>
         <div><span>Receipt health</span><strong className="success-text">100%</strong><small>SHA-256 confirmed</small></div>
@@ -75,7 +85,7 @@ export function LibraryScreen({ state, dispatch }: ScreenProps) {
             <div className="asset-grid">
               {assets.slice(0, visibleCount).map((asset) => (
                 <button className="asset-card" type="button" key={asset.id} onClick={() => setSelected(asset)}>
-                  <span className="asset-card__image"><SimulatedImage seed={asset.seed} prompt={asset.prompt} compact /><i><Check size={12} /> verified</i></span>
+                  <span className="asset-card__image">{adapter.mode === 'production' ? <VerifiedLocalPreview filename={asset.filename} compact /> : <SimulatedImage seed={asset.seed} prompt={asset.prompt} compact />}<i><Check size={12} /> verified</i></span>
                   <span className="asset-card__body">
                     <span><strong>{asset.filename}</strong><small>{asset.durationSeconds.toFixed(1)}s</small></span>
                     <em>{asset.prompt}</em>
@@ -101,7 +111,7 @@ export function LibraryScreen({ state, dispatch }: ScreenProps) {
       {selected ? (
         <DialogPortal backdropClassName="asset-inspector-backdrop" surfaceClassName="asset-inspector" labelledBy="asset-title" onRequestClose={() => setSelected(null)}>
             <IconButton data-autofocus className="asset-inspector__close" label="Close image details" icon={X} onClick={() => setSelected(null)} />
-            <div className="asset-inspector__preview"><SimulatedImage seed={selected.seed} prompt={selected.prompt} /></div>
+            <div className="asset-inspector__preview">{adapter.mode === 'production' ? <VerifiedLocalPreview filename={selected.filename} /> : <SimulatedImage seed={selected.seed} prompt={selected.prompt} />}</div>
             <div className="asset-inspector__content">
               <div><Eyebrow>{selected.batchName} · frame {String(selected.index).padStart(3, '0')}</Eyebrow><h2 id="asset-title">{selected.filename}</h2></div>
               <PhaseBadge tone="success">verified locally</PhaseBadge>
@@ -114,7 +124,7 @@ export function LibraryScreen({ state, dispatch }: ScreenProps) {
               </dl>
               <div className="asset-inspector__receipt"><ShieldCheck size={17} /><span><strong>Receipt complete</strong><small>Content type, size, and SHA-256 passed before atomic rename.</small></span></div>
               <div className="asset-inspector__actions">
-                <Button icon={FolderOpen} onClick={() => dispatch({ type: 'SHOW_TOAST', tone: 'info', title: 'File revealed', message: `${selected.destination}/${selected.filename}` })}>Reveal file</Button>
+                <Button icon={FolderOpen} onClick={() => void adapter.revealPath(selected.filename).then(() => dispatch({ type: 'SHOW_TOAST', tone: 'success', title: 'File revealed', message: `${selected.destination}/${selected.filename}` })).catch((error: unknown) => dispatch({ type: 'SHOW_TOAST', tone: 'error', title: 'Could not reveal file', message: error instanceof Error ? error.message : 'The file could not be revealed.' }))}>Reveal file</Button>
                 <Button tone="primary" icon={Download} onClick={() => dispatch({ type: 'SHOW_TOAST', tone: 'success', title: 'Already downloaded', message: `${selected.filename} is verified on this device.` })}>Download receipt</Button>
               </div>
             </div>

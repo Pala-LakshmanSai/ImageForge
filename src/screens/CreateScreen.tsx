@@ -53,11 +53,13 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
   const errors = state.draft.issues.filter((issue) => issue.level === 'error');
   const warnings = state.draft.issues.filter((issue) => issue.level === 'warning');
   const activeBatch = state.batch && !TERMINAL_BATCH_PHASES.includes(state.batch.phase);
+  const destinationLocked = state.batch !== null && !['complete', 'cancelled'].includes(state.batch.phase);
   const terminalBatch = state.batch && TERMINAL_BATCH_PHASES.includes(state.batch.phase);
   const checklist = readiness(state);
   const isReady = canStartBatch(state);
 
   async function chooseDestination() {
+    if (destinationLocked) return;
     setChoosingDestination(true);
     try {
       const path = await adapter.chooseDestination(state.settings.defaultDestination);
@@ -203,7 +205,7 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
               <div><Eyebrow>02 · Local delivery</Eyebrow><h2>Destination</h2></div>
               <HardDrive size={20} />
             </header>
-            <button className="folder-picker" type="button" onClick={() => void chooseDestination()} aria-busy={choosingDestination}>
+            <button className="folder-picker" type="button" disabled={destinationLocked || choosingDestination} onClick={() => void chooseDestination()} aria-busy={choosingDestination}>
               <span><Folder size={21} /></span>
               <span>
                 <strong>{choosingDestination ? 'Opening folder chooser…' : state.draft.destination ? state.draft.destination.split(/[\\/]/).at(-1) : 'Choose output folder'}</strong>

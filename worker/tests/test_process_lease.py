@@ -170,6 +170,46 @@ def _recovery_child(root, batch_id, results) -> None:
     asyncio.run(run())
 
 
+def _persistent_observer_child(root, batch_id, ready, release, results) -> None:
+    async def run() -> None:
+        controller = _controller(Path(root), FakeInferenceAdapter())
+        await controller.initialize()
+        principal = Principal("lakshman", "Lakshman")
+        initial = await controller.status(principal, ready=True)
+        results.put({
+            "phase": "observing",
+            "state": initial.active_batch.state.value if initial.active_batch else None,
+            "can_manage": initial.permissions.can_manage_active,
+        })
+        ready.set()
+        deadline = asyncio.get_running_loop().time() + 20
+        while True:
+            status = await controller.status(principal, ready=True)
+            if status.active_batch is not None and status.active_batch.state.value == "interrupted":
+                results.put({
+                    "phase": "recovered",
+                    "state": status.active_batch.state.value,
+                    "can_manage": status.permissions.can_manage_active,
+                })
+                await controller.resume(principal, batch_id)
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                raise RuntimeError("already-running standby did not adopt the interrupted batch")
+            await asyncio.sleep(0.01)
+        while True:
+            manifest = await controller.get_batch(principal, batch_id)
+            if manifest.state.value == "completed":
+                results.put({"phase": "completed", "state": manifest.state.value})
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                raise RuntimeError("standby-recovered batch did not complete")
+            await asyncio.sleep(0.01)
+        release.wait()
+        await controller.shutdown()
+
+    asyncio.run(run())
+
+
 def _queue_result(results, *, timeout: float = 20) -> dict:
     try:
         return results.get(timeout=timeout)
@@ -325,3 +365,45 @@ def test_duplicate_boot_is_read_only_and_forced_kill_recovers_once(tmp_path: Pat
         "images": ["ready", "ready"],
         "generated_indices": [2],
     }
+
+
+def test_already_running_standby_adopts_after_owner_kill_and_can_resume(tmp_path: Path) -> None:
+    context = multiprocessing.get_context("spawn")
+    results = context.Queue()
+    observer_ready = context.Event()
+    release = context.Event()
+    root = tmp_path / "shared-volume"
+    owner = context.Process(target=_active_owner_child, args=(root, results))
+    owner.start()
+    batch_id = _queue_result(results)["batch_id"]
+    store = FileManifestStore(root, fsync_writes=False)
+    deadline = time.monotonic() + 20
+    while True:
+        active = store.load(batch_id)
+        if [image.status.value for image in active.images] == ["ready", "generating"]:
+            break
+        if time.monotonic() >= deadline:
+            owner.terminate()
+            raise AssertionError("owner did not reach the forced-kill point")
+        time.sleep(0.01)
+
+    observer = context.Process(
+        target=_persistent_observer_child,
+        args=(root, batch_id, observer_ready, release, results),
+    )
+    observer.start()
+    assert observer_ready.wait(20), "standby did not initialize"
+    assert _queue_result(results) == {"phase": "observing", "state": "running", "can_manage": False}
+    owner.kill()
+    owner.join(10)
+    assert not owner.is_alive()
+    try:
+        assert _queue_result(results) == {
+            "phase": "recovered",
+            "state": "interrupted",
+            "can_manage": True,
+        }
+        assert _queue_result(results) == {"phase": "completed", "state": "completed"}
+    finally:
+        release.set()
+        _join_or_terminate(observer)

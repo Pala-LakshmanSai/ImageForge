@@ -1,7 +1,7 @@
 import { AlertTriangle, CheckCircle2, Info, X, XCircle } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
 import { createFakeImageForgeAdapter, type ImageForgeAdapter } from './adapters/imageForgeAdapter';
-import { persistSafePreferences } from './adapters/safePreferences';
+import { persistSafePreferences, readPersistedBatchId } from './adapters/safePreferences';
 import { BottomNav, TopBar } from './components/AppChrome';
 import { DialogPortal } from './components/DialogPortal';
 import { SetupAssistant } from './components/SetupAssistant';
@@ -29,6 +29,10 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
   const stateRef = useRef(state);
   stateRef.current = state;
   const runtime = adapter.mode === 'production' ? adapter.runtime : undefined;
+  const recoveryPointerRef = useRef<string | null>(
+    adapter.mode === 'production' ? readPersistedBatchId(window.localStorage) : null,
+  );
+  const clearRecoveryPointerRef = useRef(false);
 
   useEffect(() => {
     if (!runtime) return;
@@ -88,8 +92,18 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
 
   useEffect(() => {
     if (adapter.mode !== 'production' || !state.setup.completed) return;
+    if (state.batch?.canManage === true) recoveryPointerRef.current = state.batch.id;
+    const recoveryOverride = clearRecoveryPointerRef.current
+      ? null
+      : state.batch?.canManage !== true
+        ? recoveryPointerRef.current
+        : undefined;
     try {
-      persistSafePreferences(state, window.localStorage);
+      persistSafePreferences(state, window.localStorage, recoveryOverride);
+      if (clearRecoveryPointerRef.current) {
+        clearRecoveryPointerRef.current = false;
+        recoveryPointerRef.current = null;
+      }
     } catch {
       // A storage failure must never affect GPU or batch control.
     }
@@ -138,11 +152,12 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
 
   useEffect(() => {
     if (!runtime || !['ready', 'reconnecting'].includes(state.pod.phase)) return;
+    if (state.batch && ['complete', 'partial_failure', 'cancelled'].includes(state.batch.phase)) return;
     const poll = () => void runtime.pollBatch(stateRef.current).catch(() => undefined);
     poll();
     const timer = window.setInterval(poll, 1_500);
     return () => window.clearInterval(timer);
-  }, [runtime, state.pod.phase]);
+  }, [runtime, state.pod.phase, state.batch?.phase]);
 
   useEffect(() => {
     if (!state.toast) return;
@@ -156,6 +171,7 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
       return;
     }
     const current = stateRef.current;
+    if (action.type === 'NEW_BATCH') clearRecoveryPointerRef.current = true;
     if (action.type === 'TOGGLE_BATCH_PAUSE') {
       const control = current.batch?.phase === 'running' ? 'pause' : 'resume';
       void runtime.controlBatch(control, current).catch(() => undefined);
@@ -248,6 +264,9 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
                 <p>
                   This sends RunPod’s Pod DELETE operation. Compute and ephemeral container data will end; the ImageForge network volume, manifests, and downloaded images remain.
                 </p>
+                <div className="modal__notice">
+                  <strong>Confirmed target:</strong> {state.dialog.podId} · {state.pod.gpu ?? 'GPU unknown'} · {state.pod.hourlyRate === null ? 'rate unavailable' : `$${state.pod.hourlyRate.toFixed(2)}/hr`}
+                </div>
                 <div className="modal__notice">
                   ImageForge has no idle timer and never stops compute on completion, app exit, or connection loss.
                 </div>

@@ -3,6 +3,7 @@ import { DEFAULT_STUDIO_PROFILE } from './imageForgeAdapter';
 import {
   hydrateSafePreferences,
   persistSafePreferences,
+  readPersistedBatchId,
   SAFE_PREFERENCES_STORAGE_KEY,
 } from './safePreferences';
 import { createConfiguredInitialState, createInitialState } from '../domain/reducer';
@@ -30,6 +31,24 @@ describe('safe preference persistence', () => {
     expect(hydrated.setup.completed).toBe(true);
     expect(hydrated.setup.destinationValidated).toBe(false);
     expect(hydrated.setup.credentials.runpodApiKey.configured).toBe(true);
+  });
+
+  it('migrates an older valid v1 preference record without a recovery pointer', () => {
+    const stored = {
+      version: 1,
+      setupCompleted: true,
+      userName: 'Lakshman',
+      defaultDestination: '/safe',
+      editorialSuffixEnabled: true,
+      editorialSuffix: 'documentary realism',
+      theme: 'midnight',
+      density: 'comfortable',
+      gpuPreference: 'best_value',
+      studioProfile: DEFAULT_STUDIO_PROFILE,
+    };
+    const hydrated = hydrateSafePreferences(createInitialState(), { getItem: () => JSON.stringify(stored) });
+    expect(hydrated.setup.completed).toBe(true);
+    expect(readPersistedBatchId({ getItem: () => JSON.stringify(stored) })).toBeNull();
   });
 
   it('fails closed on malformed, expanded, or oversized storage', () => {
@@ -86,6 +105,7 @@ describe('safe preference persistence', () => {
       estimatedCost: 0,
       lockMessage: null,
       statusMessage: 'running',
+      canManage: true,
     };
     const setItem = vi.fn();
     persistSafePreferences(state, { setItem });

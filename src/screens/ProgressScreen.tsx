@@ -44,8 +44,8 @@ function phaseTone(phase: string): 'success' | 'warning' | 'danger' | 'info' | '
   return 'neutral';
 }
 
-function exportManifest(prompts: BatchPrompt[], batchName: string) {
-  const header = 'index,prompt,seed,file,checksum,duration_seconds,status';
+function manifestCsv(prompts: BatchPrompt[]) {
+  const header = 'index,prompt,seed,file,checksum,duration_seconds,status,failure_reason';
   const rows = prompts.map((prompt) =>
     [
       prompt.index,
@@ -55,9 +55,30 @@ function exportManifest(prompts: BatchPrompt[], batchName: string) {
       prompt.checksum ?? '',
       prompt.durationSeconds ?? '',
       prompt.status,
+      `"${(prompt.failureReason ?? '').replaceAll('"', '""')}"`,
     ].join(','),
   );
-  const blob = new Blob([[header, ...rows].join('\n')], { type: 'text/csv;charset=utf-8' });
+  return [header, ...rows].join('\n');
+}
+
+async function exportManifest(
+  prompts: BatchPrompt[],
+  batchId: string,
+  batchName: string,
+  adapter: ScreenProps['adapter'],
+  dispatch: ScreenProps['dispatch'],
+) {
+  const content = manifestCsv(prompts);
+  if (adapter.mode === 'production') {
+    try {
+      const path = await adapter.writeManifest(batchId, content);
+      dispatch({ type: 'SHOW_TOAST', tone: 'success', title: 'Manifest written', message: path });
+    } catch (error) {
+      dispatch({ type: 'SHOW_TOAST', tone: 'error', title: 'Manifest export failed', message: error instanceof Error ? error.message : 'The manifest could not be written to the destination.' });
+    }
+    return;
+  }
+  const blob = new Blob([content], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;
@@ -156,8 +177,8 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
           {batch.phase === 'partial_failure' ? <Button tone="primary" icon={RotateCw} onClick={() => dispatch({ type: 'RETRY_FAILED' })}>Retry {counts.failed} failed</Button> : null}
           {canResolveInterrupted && state.pod.phase === 'ready' ? <Button tone="primary" icon={Play} onClick={() => dispatch({ type: 'RESUME_INTERRUPTED_BATCH' })}>Resume interrupted batch</Button> : null}
           {canResolveInterrupted && ['offline', 'error'].includes(state.pod.phase) ? <Button tone="primary" icon={Zap} onClick={() => dispatch({ type: 'START_POD' })}>Restart GPU to resume</Button> : null}
-          {settled || isInterrupted ? <Button icon={FileDown} onClick={() => exportManifest(batch.prompts, batch.name)}>Manifest CSV</Button> : null}
-          <Button icon={FolderOpen} onClick={() => dispatch({ type: 'SHOW_TOAST', tone: 'info', title: 'Destination revealed', message: batch.destination })}>Reveal folder</Button>
+          {settled || isInterrupted ? <Button icon={FileDown} onClick={() => void exportManifest(batch.prompts, batch.id, batch.name, adapter, dispatch)}>Manifest CSV</Button> : null}
+          <Button icon={FolderOpen} onClick={() => void adapter.revealPath().then(() => dispatch({ type: 'SHOW_TOAST', tone: 'success', title: 'Destination revealed', message: batch.destination })).catch((error: unknown) => dispatch({ type: 'SHOW_TOAST', tone: 'error', title: 'Could not reveal destination', message: error instanceof Error ? error.message : 'The destination could not be revealed.' }))}>Reveal folder</Button>
           {isControllable ? <Button tone="danger" icon={X} onClick={() => dispatch({ type: 'REQUEST_CANCEL_BATCH' })}>Cancel</Button> : null}
           {canResolveInterrupted && state.pod.phase === 'ready' ? <Button tone="danger" icon={X} onClick={() => dispatch({ type: 'REQUEST_CANCEL_BATCH' })}>Cancel interrupted batch</Button> : null}
           {settled ? <Button tone="primary" icon={Sparkles} onClick={() => dispatch({ type: 'NEW_BATCH' })}>New brief</Button> : null}

@@ -71,6 +71,8 @@ class WorkerSettings:
             "RUNPOD_DC_ID",
             "RUNPOD_GPU_COUNT",
             "RUNPOD_VOLUME_ID",
+            "IMAGEFORGE_DATA_ROOT",
+            "IMAGEFORGE_IMAGE_DIGEST",
             "CUDA_VERSION",
             "PYTORCH_VERSION",
         )

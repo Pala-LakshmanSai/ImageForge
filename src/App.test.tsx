@@ -16,6 +16,8 @@ function immediateAdapter(configured = true): ImageForgeAdapter {
   return {
     chooseDestination: async () => '/tmp/imageforge-output',
     validateDestination: async () => true,
+    revealPath: async () => undefined,
+    writeManifest: async (batchId) => `${batchId}/manifest.csv`,
     credentialMetadata: async () => credentials,
     async replaceCredential(kind, value) {
       const metadata = { configured: true, suffix: value.slice(-4), provider: 'Test vault' };

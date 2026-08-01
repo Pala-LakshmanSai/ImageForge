@@ -699,9 +699,39 @@ class GenerationController:
             except FileNotFoundError:
                 active = None
             if active is not None and active.state in LOCK_HOLDING_STATES:
+                if self.store.active_lease_held:
+                    return active
+                # A standby worker may have observed this manifest while the
+                # original Pod held the lease. Once that lease disappears,
+                # status/refresh must be able to adopt it and perform the
+                # same interruption recovery as a freshly booted worker.
+                if self.store.try_acquire_active_lease():
+                    try:
+                        recovered = self._discover_active_locked(recover=True)
+                    except BaseException:
+                        self.store.release_active_lease()
+                        raise
+                    self._active_batch_id = recovered.batch_id if recovered is not None else None
+                    if recovered is None:
+                        self.store.release_active_lease()
+                    return recovered
                 return active
         active = self._discover_active_locked(recover=False)
         self._active_batch_id = active.batch_id if active is not None else None
+        if (
+            active is not None
+            and not self.store.active_lease_held
+            and self.store.try_acquire_active_lease()
+        ):
+            try:
+                recovered = self._discover_active_locked(recover=True)
+            except BaseException:
+                self.store.release_active_lease()
+                raise
+            self._active_batch_id = recovered.batch_id if recovered is not None else None
+            if recovered is None:
+                self.store.release_active_lease()
+            return recovered
         return active
 
     async def _acquire_for_new_batch_locked(self) -> None:

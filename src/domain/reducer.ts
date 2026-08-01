@@ -49,6 +49,7 @@ function emptyPod(): PodState {
     errorMessage: null,
     lifecycleSequence: 0,
     createRecovery: null,
+    stopTargetPodId: null,
   };
 }
 
@@ -67,6 +68,7 @@ function readyPod(): PodState {
     errorMessage: null,
     lifecycleSequence: 0,
     createRecovery: null,
+    stopTargetPodId: null,
   };
 }
 
@@ -605,7 +607,16 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case 'SYNC_RUNTIME_POD':
       return {
         ...state,
-        pod: { ...action.pod, lifecycleSequence: state.pod.lifecycleSequence },
+        pod: state.pod.phase === 'stopping' && state.pod.stopTargetPodId !== null && action.pod.podId === state.pod.stopTargetPodId
+          ? {
+              ...action.pod,
+              phase: 'stopping',
+              podId: state.pod.podId,
+              stopTargetPodId: state.pod.stopTargetPodId,
+              statusDetail: 'Terminating the confirmed ImageForge Pod',
+              lifecycleSequence: state.pod.lifecycleSequence,
+            }
+          : { ...action.pod, stopTargetPodId: null, lifecycleSequence: state.pod.lifecycleSequence },
         ...(
           action.pod.phase === 'offline' &&
           state.batch &&
@@ -639,7 +650,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           : {}),
       };
     case 'REQUEST_STOP_POD':
-      return { ...state, dialog: { type: 'stop-pod' } };
+      return state.pod.podId === null
+        ? state
+        : { ...state, dialog: { type: 'stop-pod', podId: state.pod.podId } };
     case 'REQUEST_RESOLVE_CREATE':
       return state.pod.createRecovery
         ? { ...state, dialog: { type: 'resolve-create' } }
@@ -647,10 +660,20 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case 'CONFIRM_RESOLVE_CREATE':
       return { ...state, dialog: null };
     case 'CONFIRM_STOP_POD':
+      if (state.dialog?.type !== 'stop-pod' || state.dialog.podId !== state.pod.podId || state.pod.podId === null) {
+        return {
+          ...state,
+          dialog: null,
+          ...toast(state, 'error', 'Stop confirmation expired', 'The selected Pod changed. Refresh status and confirm the exact current Pod again.'),
+        };
+      }
       return {
         ...state,
         dialog: null,
-        pod: podDetails('stopping', 72, 'Terminating compute after your confirmation', state.pod),
+        pod: {
+          ...podDetails('stopping', 72, 'Terminating compute after your confirmation', state.pod),
+          stopTargetPodId: state.dialog.podId,
+        },
       };
     case 'POD_STOPPED': {
       const interrupted = state.batch && ['running', 'paused', 'validating'].includes(state.batch.phase);

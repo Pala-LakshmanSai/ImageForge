@@ -139,6 +139,18 @@ describe('WorkerBatchCoordinator', () => {
     expect(port.getBatch).not.toHaveBeenCalled();
   });
 
+  it('verifies the local ledger once per connected session, then reuses cached receipts', async () => {
+    const port = fakePort();
+    const coordinator = new WorkerBatchCoordinator(port);
+    await coordinator.create(['A documentary shipyard at dawn'], 700);
+    await coordinator.poll();
+    await coordinator.poll();
+    expect(port.readReceipts).toHaveBeenCalledOnce();
+    coordinator.invalidateReceipts();
+    await coordinator.poll();
+    expect(port.readReceipts).toHaveBeenCalledTimes(2);
+  });
+
   it('coalesces overlapping status polls', async () => {
     let resolve!: (result: WorkerHttpResult) => void;
     const statusPromise = new Promise<WorkerHttpResult>((done) => { resolve = done; });
@@ -154,6 +166,7 @@ describe('WorkerBatchCoordinator', () => {
 
   it('reconciles a terminal manifest after the worker releases its active lease', async () => {
     const port = fakePort({
+      createBatch: vi.fn(async () => ({ status: 201, body: manifest('generating') })),
       status: vi.fn(async () => ({
         status: 200,
         body: { ...status(), active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false } },
@@ -207,6 +220,19 @@ describe('WorkerBatchCoordinator', () => {
     active = false;
     await expect(observer.poll()).resolves.toMatchObject({ type: 'idle' });
     expect(port.getBatch).not.toHaveBeenCalled();
+  });
+
+  it('preserves retryable native transport errors for reconnect polling', async () => {
+    const nativeError = Object.assign(new Error('worker session temporarily unavailable'), {
+      code: 'worker_session_unavailable',
+      retryable: true,
+    });
+    const port = fakePort({ status: vi.fn(async () => { throw nativeError; }) });
+    const coordinator = new WorkerBatchCoordinator(port);
+    const events: unknown[] = [];
+    coordinator.subscribe((event) => events.push(event));
+    await expect(coordinator.poll()).rejects.toMatchObject({ code: 'worker_session_unavailable', retryable: true });
+    expect(events).toEqual([expect.objectContaining({ type: 'error', code: 'worker_session_unavailable', retryable: true })]);
   });
 
   it('fails closed on conflicting receipts and malformed errors', async () => {

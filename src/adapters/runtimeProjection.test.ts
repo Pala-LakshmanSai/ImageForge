@@ -74,7 +74,7 @@ describe('production runtime projection', () => {
     const manifest = workerManifest();
     const none = projectOwnedManifest(manifest, [], {
       name: 'History Brief', destination: '/safe/folder', estimatedSecondsPerImage: 8.4, hourlyRate: 0.5,
-    }, Date.parse('2026-08-01T10:01:00.000Z'));
+    }, Date.parse('2026-08-02T10:01:00.000Z'));
     expect(none.assets).toEqual([]);
     expect(none.batch.prompts[0].status).toBe('ready');
 
@@ -82,7 +82,7 @@ describe('production runtime projection', () => {
       schemaVersion: 1, batchId, index: 1, filename: `batches/${batchId}/000001.jpg`, sha256: 'a'.repeat(64), sizeBytes: 2_048, verifiedAtUnixMs: 1,
     }], {
       name: 'History Brief', destination: '/safe/folder', estimatedSecondsPerImage: 8.4, hourlyRate: 0.5,
-    }, Date.parse('2026-08-01T10:01:00.000Z'));
+    }, Date.parse('2026-08-02T10:01:00.000Z'));
     expect(verified.assets).toHaveLength(1);
     expect(verified.batch.estimatedCost).toBeCloseTo(0.5 / 60);
   });

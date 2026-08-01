@@ -49,12 +49,12 @@ export class WorkerBatchError extends Error {
   readonly status: number;
   readonly retryable: boolean;
 
-  constructor(code: string, message: string, status: number) {
+  constructor(code: string, message: string, status: number, retryableOverride?: boolean) {
     super(message);
     this.name = 'WorkerBatchError';
     this.code = code;
     this.status = status;
-    this.retryable = status === 408 || status === 409 || status === 423 || status === 429 || status >= 500;
+    this.retryable = retryableOverride ?? (status === 408 || status === 409 || status === 423 || status === 429 || status >= 500);
   }
 }
 
@@ -104,6 +104,7 @@ export class WorkerBatchCoordinator {
   #ownedBatchId: string | null = null;
   #observedBusyBatchId: string | null = null;
   #pollPromise: Promise<WorkerBatchEvent> | null = null;
+  #receiptCache = new Map<string, Map<number, LocalDownloadReceipt>>();
 
   constructor(port: WorkerBatchPort, recoveredBatchId: string | null = null) {
     this.#port = port;
@@ -117,6 +118,11 @@ export class WorkerBatchCoordinator {
 
   get batchId(): string | null {
     return this.#ownedBatchId;
+  }
+
+  invalidateReceipts(batchId?: string): void {
+    if (batchId === undefined) this.#receiptCache.clear();
+    else this.#receiptCache.delete(batchId);
   }
 
   async create(prompts: readonly string[], baseSeed: number): Promise<WorkerBatchEvent> {
@@ -201,7 +207,16 @@ export class WorkerBatchCoordinator {
     } catch (error) {
       const safe = error instanceof WorkerBatchError
         ? error
-        : new WorkerBatchError('worker_sync_failed', 'Worker status could not be synchronized.', 0);
+        : typeof error === 'object' && error !== null &&
+            typeof (error as { code?: unknown }).code === 'string' &&
+            typeof (error as { message?: unknown }).message === 'string'
+          ? new WorkerBatchError(
+              (error as { code: string }).code,
+              (error as { message: string }).message,
+              0,
+              (error as { retryable?: unknown }).retryable === true,
+            )
+          : new WorkerBatchError('worker_sync_failed', 'Worker status could not be synchronized.', 0);
       this.#emit({ type: 'error', code: safe.code, message: safe.message, retryable: safe.retryable });
       throw safe;
     }
@@ -209,9 +224,17 @@ export class WorkerBatchCoordinator {
 
   async #synchronizeOwnedManifest(initial: WorkerManifest): Promise<WorkerBatchEvent> {
     let manifest = initial;
-    const rawReceipts = await this.#port.readReceipts(manifest.batchId);
-    let receipts = rawReceipts.map((receipt) => validateReceipt(receipt, manifest.batchId));
-    const byIndex = new Map(receipts.map((receipt) => [receipt.index, receipt] as const));
+    const cached = this.#receiptCache.get(manifest.batchId);
+    const byIndex = cached ?? new Map<number, LocalDownloadReceipt>();
+    if (cached === undefined) {
+      const rawReceipts = await this.#port.readReceipts(manifest.batchId);
+      for (const receipt of rawReceipts) {
+        const valid = validateReceipt(receipt, manifest.batchId);
+        byIndex.set(valid.index, valid);
+      }
+      this.#receiptCache.set(manifest.batchId, byIndex);
+    }
+    let receipts = [...byIndex.values()].sort((left, right) => left.index - right.index);
     let downloaded = false;
 
     for (const image of manifest.images) {
@@ -242,6 +265,7 @@ export class WorkerBatchCoordinator {
         manifest.batchId,
       );
       byIndex.set(receipt.index, receipt);
+      this.#receiptCache.set(manifest.batchId, byIndex);
       receipts = [...byIndex.values()].sort((left, right) => left.index - right.index);
       downloaded = true;
     }

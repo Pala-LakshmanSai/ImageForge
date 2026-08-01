@@ -73,8 +73,9 @@ even if a hand-edited profile asks for one.
 
 There is deliberately no idle timer or automatic termination. If both editors
 press Start simultaneously, every matching Pod is shown as a duplicate-cost
-warning and neither is silently deleted. The shared-volume worker lease still
-prevents two workers from generating or mutating one batch.
+warning and neither is silently deleted. The shared-volume worker lease is a
+defense-in-depth control, not a deployment guarantee, until the exact
+EU-RO-1 two-Pod gate below has passed for the selected volume and image.
 
 ## 6. Release-only paid checks
 
@@ -83,3 +84,20 @@ approved GPU, record actual hourly price, container pull/boot, model load,
 warm-up, 1280x720 seconds per image, peak VRAM, transfer rate, failures, and
 whole-batch cost. Only comparable measurements for the exact software/model
 contract may reorder the default ladder.
+
+Before any production batch, run the isolated cross-Pod volume qualification:
+
+```sh
+IMAGEFORGE_REAL_VOLUME_TEST=1 \
+IMAGEFORGE_GATE_ROOT=/workspace/imageforge-gates/<run-id> \
+python worker/scripts/run_volume_gate.py
+```
+
+Provision two identical EU-RO-1 Secure Pods on the same 50 GB network volume,
+set the Pod endpoints/tokens and exact image digest variables documented by the
+script, and record its JSON evidence. The gate must prove one HTTP-201 winner,
+one immediate HTTP-423 observer, read-only observer mutations, isolated gate
+paths, and survivor recovery after the explicitly confirmed owner stop. Run it
+again with roles reversed and separately verify idle-worker presence/maintenance
+exclusion. A missing, timed-out, or failed gate disqualifies that volume
+configuration; no local-process test can waive it.

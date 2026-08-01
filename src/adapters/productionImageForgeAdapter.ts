@@ -44,6 +44,8 @@ export interface ProductionDesktopPort extends GpuLifecycleNativePort, WorkerBat
   }>;
   resolveCreateMarker(attemptId: string, reconciledPodId: string | null): Promise<void>;
   reconcileReceipts(batchId: string): Promise<unknown>;
+  revealDestination(relativePath?: string): Promise<void>;
+  writeManifest(batchId: string, content: string): Promise<string>;
 }
 
 export type ProductionRuntimeEvent =
@@ -97,6 +99,7 @@ class ProductionRuntime implements ProductionRuntimeFacade {
 
   async refresh(state: AppState): Promise<void> {
     this.#captureState(state);
+    this.#worker.invalidateReceipts();
     let snapshot: RunPodSnapshot;
     try {
       const count = state.batch?.prompts.length || state.draft.prompts.length || 450;
@@ -113,10 +116,7 @@ class ProductionRuntime implements ProductionRuntimeFacade {
     }
     await this.#reconcileCreateMarker(snapshot);
     if (snapshot.phase === 'ready') {
-      if (this.#recoveredBatchId !== null && !this.#reconciledRecoveredBatch) {
-        await this.#port.reconcileReceipts(this.#recoveredBatchId);
-        this.#reconciledRecoveredBatch = true;
-      }
+      if (!await this.#ensureRecoveredReceipts(state)) return;
       // A worker outage must not obscure the still-live billed Pod. The worker
       // coordinator emits a retryable batch event and the UI keeps Stop visible.
       await this.#worker.poll();
@@ -144,14 +144,19 @@ class ProductionRuntime implements ProductionRuntimeFacade {
       this.#emitError('pod', error, 'ImageForge could not start a GPU safely.');
       throw error;
     }
+    if (!await this.#ensureRecoveredReceipts(state)) return;
     await this.#worker.poll();
   }
 
   async stopGpu(state: AppState): Promise<void> {
     this.#captureState(state);
-    if (state.pod.podId === null) throw new Error('No verified ImageForge Pod is selected.');
+    const expectedPodId = state.pod.stopTargetPodId ?? state.pod.podId;
+    if (expectedPodId === null) throw new Error('No verified ImageForge Pod is selected.');
+    if (state.pod.podId !== expectedPodId) {
+      throw new Error('The confirmed Pod changed before termination; refresh RunPod status and confirm again.');
+    }
     try {
-      await this.#gpu.stop(state.pod.podId);
+      await this.#gpu.stop(expectedPodId);
     } catch (error) {
       this.#emitError('pod', error, 'ImageForge could not confirm GPU termination.');
       throw error;
@@ -175,6 +180,7 @@ class ProductionRuntime implements ProductionRuntimeFacade {
 
   async pollBatch(state: AppState): Promise<void> {
     this.#captureState(state);
+    if (!await this.#ensureRecoveredReceipts(state)) return;
     try {
       await this.#worker.poll();
     } catch (error) {
@@ -248,6 +254,27 @@ class ProductionRuntime implements ProductionRuntimeFacade {
       gpuId: metadata.gpuId,
       podId: metadata.podId,
     };
+  }
+
+  async #ensureRecoveredReceipts(state: AppState): Promise<boolean> {
+    if (this.#recoveredBatchId === null || this.#reconciledRecoveredBatch) return true;
+    try {
+      // Restore the native destination before asking it to hash/ack anything;
+      // this closes the startup race between React folder validation and the
+      // first worker poll.
+      await this.#port.validateDestination(state.settings.defaultDestination);
+      await this.#port.reconcileReceipts(this.#recoveredBatchId);
+      this.#reconciledRecoveredBatch = true;
+      return true;
+    } catch (error) {
+      this.#emit({
+        type: 'error',
+        scope: 'batch',
+        message: error instanceof Error ? error.message : 'The recovered local receipts are not ready yet.',
+        retryable: true,
+      });
+      return false;
+    }
   }
 
   async #emitCurrentCreateMarker(): Promise<void> {
@@ -338,6 +365,8 @@ export function createProductionImageForgeAdapter(port: ProductionDesktopPort, r
     async validateDestination(path) {
       return (await port.validateDestination(path)).writable;
     },
+    revealPath: (relativePath) => port.revealDestination(relativePath),
+    writeManifest: (batchId, content) => port.writeManifest(batchId, content),
     credentialMetadata: () => port.credentialMetadata(),
     replaceCredential: (kind, value) => port.replaceCredential(kind, value),
     async validateStudioProfile(profile) {

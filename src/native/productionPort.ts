@@ -12,11 +12,13 @@ import {
   nativeReadReceiptLedger,
   nativeReconcileReceipts,
   nativeReplaceCredential,
+  nativeRevealDestination,
   nativeRestoreDestination,
   nativeResolveRunPodCreateMarker,
   nativeRunPodCreateMarkerMetadata,
   nativeRunPodFetch,
   nativeValidateDestination,
+  nativeWriteManifest,
   nativeWorkerCreateBatch,
   nativeWorkerGetBatch,
   nativeWorkerHealthFetch,
@@ -60,6 +62,8 @@ export function createNativeProductionPort(): ProductionDesktopPort {
       return boundDestination;
     },
     validateDestination,
+    revealDestination: nativeRevealDestination,
+    writeManifest: nativeWriteManifest,
     credentialMetadata: nativeCredentialMetadata,
     replaceCredential: (kind: CredentialKind, value: string): Promise<CredentialMetadata> =>
       nativeReplaceCredential(kind, value),

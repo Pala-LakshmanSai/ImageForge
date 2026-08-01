@@ -68,6 +68,8 @@ export interface ImageForgeAdapter {
   readonly runtime?: ProductionRuntimeFacade;
   chooseDestination(defaultPath: string): Promise<string | null>;
   validateDestination(path: string): Promise<boolean>;
+  revealPath(relativePath?: string): Promise<void>;
+  writeManifest(batchId: string, content: string): Promise<string>;
   credentialMetadata(): Promise<CredentialMetadataMap>;
   replaceCredential(kind: CredentialKind, value: string): Promise<CredentialMetadata>;
   validateStudioProfile(profile: string): Promise<boolean>;
@@ -213,6 +215,13 @@ export function createFakeImageForgeAdapter(initialCredentials?: CredentialMetad
     async validateDestination(path) {
       await new Promise((resolve) => window.setTimeout(resolve, 120));
       return path.trim().length > 0;
+    },
+    async revealPath() {
+      await Promise.resolve();
+    },
+    async writeManifest(batchId) {
+      await Promise.resolve();
+      return `${batchId}/manifest.csv`;
     },
     async credentialMetadata() {
       await Promise.resolve();

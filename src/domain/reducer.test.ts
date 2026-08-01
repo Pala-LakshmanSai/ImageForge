@@ -32,11 +32,32 @@ describe('appReducer', () => {
     expect(state.pod).toMatchObject({ phase: 'ready', health: 'healthy', podId: 'pod-if-next', matchingPodIds: ['pod-if-next'] });
 
     state = appReducer(state, { type: 'REQUEST_STOP_POD' });
-    expect(state.dialog).toEqual({ type: 'stop-pod' });
+    expect(state.dialog).toEqual({ type: 'stop-pod', podId: 'pod-if-next' });
     state = appReducer(state, { type: 'CONFIRM_STOP_POD' });
     expect(state.pod.phase).toBe('stopping');
     state = appReducer(state, { type: 'POD_STOPPED' });
     expect(state.pod).toMatchObject({ phase: 'offline', gpu: null, podId: null });
+  });
+
+  it('refuses a stop confirmation when the authoritative Pod changed', () => {
+    let state = readyDraft(1);
+    state = appReducer(state, { type: 'REQUEST_STOP_POD' });
+    state = appReducer(state, {
+      type: 'SYNC_RUNTIME_POD',
+      pod: { ...state.pod, podId: 'pod-replaced', phase: 'ready' },
+    });
+    const result = appReducer(state, { type: 'CONFIRM_STOP_POD' });
+    expect(result.pod.phase).toBe('ready');
+    expect(result.dialog).toBeNull();
+    expect(result.toast?.title).toBe('Stop confirmation expired');
+  });
+
+  it('clears the bound stop target when the authoritative lifecycle reports the Pod gone', () => {
+    let state = readyDraft(1);
+    state = appReducer(state, { type: 'REQUEST_STOP_POD' });
+    state = appReducer(state, { type: 'CONFIRM_STOP_POD' });
+    state = appReducer(state, { type: 'SYNC_RUNTIME_POD', pod: { ...state.pod, phase: 'offline', podId: null, gpu: null, vram: null, hourlyRate: null } });
+    expect(state.pod).toMatchObject({ phase: 'offline', podId: null, stopTargetPodId: null });
   });
 
   it('guards batch launch until prompts, destination, lock, and ready GPU agree', () => {
@@ -131,6 +152,7 @@ describe('appReducer', () => {
     state = { ...state, settings: { ...state.settings, userName: 'Lakshman' } };
     state = appReducer(state, { type: 'START_BATCH', startedAt: '2026-08-01T10:00:00.000Z' });
     state = appReducer(state, { type: 'BATCH_VALIDATED' });
+    state = appReducer(state, { type: 'REQUEST_STOP_POD' });
     state = appReducer(state, { type: 'CONFIRM_STOP_POD' });
     state = appReducer(state, { type: 'POD_STOPPED' });
     expect(state.batch).toMatchObject({ phase: 'interrupted', owner: 'Lakshman' });

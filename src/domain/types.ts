@@ -115,6 +115,7 @@ export interface PodState {
     gpuId: string | null;
     podId: string | null;
   } | null;
+  stopTargetPodId: string | null;
 }
 
 export interface BatchState {
@@ -188,7 +189,7 @@ export interface SetupState {
 }
 
 export type DialogState =
-  | { type: 'stop-pod' }
+  | { type: 'stop-pod'; podId: string }
   | { type: 'cancel-batch' }
   | { type: 'clear-library' }
   | { type: 'resolve-create' }
