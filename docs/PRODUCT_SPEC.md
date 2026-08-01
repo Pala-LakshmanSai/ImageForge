@@ -28,9 +28,11 @@ application took 30-60 minutes to become usable.
 
 - AC-1: A nontechnical user can start a compatible available RunPod GPU and
   connect to the resulting worker without copying a Pod ID or proxy URL.
-- AC-2: Start selection supports RTX 4090 and RTX 5090 and evaluates availability
-  at creation time through RunPod's ordered fallback. It chooses one GPU, never
-  multiple GPUs.
+- AC-2: Start selection supports the approved NVIDIA 16-32 GB fallback pool,
+  evaluates current catalog availability and price, and resolves the final
+  choice at creation time through RunPod's ordered fallback. It chooses one
+  GPU, never multiple GPUs. Expensive 48 GB emergency types require an explicit
+  user opt-in.
 - AC-3: Stop terminates compute only after an explicit confirmation. No timer,
   background monitor, or completed-job event can terminate a Pod.
 - AC-4: The app parses, previews, and submits 300-450 ordered prompts.

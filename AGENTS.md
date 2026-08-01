@@ -21,7 +21,9 @@ task through opportunistic refactors.
 - Start or stop RunPod only after an explicit user click. Never add idle or
   automatic termination.
 - Discover live GPU inventory on every start. Prefer the lowest measured
-  cost-per-image among approved GPU types, with RTX 4090 as the cold default.
+  cost-per-image among the approved NVIDIA 16-32 GB pool, with RTX 4090 as the
+  cold default. Professional 48 GB GPUs are an explicit emergency tier, never
+  a silent high-cost fallback.
 - Stream/pull completed images to the requesting device while generation
   continues. Persist manifests so downloads and interrupted jobs can resume.
 - Store secrets in the OS credential store or runtime secrets, never source,
