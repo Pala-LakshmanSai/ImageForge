@@ -8,10 +8,12 @@ invokes a real adapter method.
 
 - `refresh()` always queries current catalog inventory and existing managed
   Pods. The v2 catalog is beta and advisory; a catalog failure is surfaced as
-  `inventory_fallback` and does not suppress the authoritative ordered create.
+  `inventory_fallback` and normally uses the authoritative static fallback.
+  A matching dynamic PRO Pod that cannot be reverified fails closed so it
+  cannot disappear from discovery and cause a duplicate create.
 - `startGpu()` requires `{ intent: "start_gpu", source: "foreground_user" }`.
-  It sends one create request per selected cloud lane with `gpuCount: 1`, an
-  ordered list of approved exact catalog IDs, and `gpuTypePriority: "custom"`.
+  It sends exactly one Secure Cloud create request with `gpuCount: 1`, an
+  ordered list of approved catalog IDs, and `gpuTypePriority: "custom"`.
 - Existing Pods are preferred. Local double-clicks share one create operation.
   External races and ambiguous create responses are reconciled by a unique Pod
   name marker. Every duplicate is shown; none is automatically terminated.
@@ -42,7 +44,11 @@ const provider = new RunPodRestProvider({
   apiKeyProvider: () => credentialVault.read("imageforge.runpod"),
 });
 
-const controller = new RunPodLifecycleController({ provider, config });
+const controller = new RunPodLifecycleController({
+  provider,
+  config,
+  workerHealthProbe: new HttpWorkerHealthProbe(),
+});
 const started = await controller.startGpu({
   intent: "start_gpu",
   source: "foreground_user",
@@ -61,13 +67,15 @@ The ordinary cold-start order is RTX 4090, RTX PRO 4500 Blackwell, RTX 5090,
 RTX PRO 4000 Blackwell, L4, RTX A4500, and RTX 4000 Ada. Unknown Blackwell IDs
 are never manufactured: the live catalog display name is allowlisted and its
 exact returned ID is passed to creation. Candidates must be NVIDIA, at least
-16 GB, CUDA 12.8 compatible, Secure Cloud, one-GPU Pod stock in the configured
-network-volume datacenter.
+16 GB, CUDA 13.0 compatible, Secure Cloud, one-GPU Pod stock in EU-RO-1.
 
-RTX 2000 Ada, A40, RTX A6000, L40, and L40S require the explicit
-`allowEmergencyGpuTier` setting. B200 and RTX PRO 6000 variants are not in the
-allowlist. Comparable benchmark profiles must match the pinned model revision,
-BF16, 1280x720, four steps, guidance 1.0, JPEG 95, and the exact software image.
+RTX 2000 Ada is the only slow emergency candidate and requires the explicit
+`allowEmergencyGpuTier` setting. An existing managed RTX 2000 Ada remains
+visible and explicitly stoppable after opt-out, but is never reused. A40, RTX
+A6000, L40, L40S, B200, and RTX PRO 6000 variants are not in the studio
+allowlist. Comparable benchmark profiles
+must match the pinned model revision, BF16, 1280x720, four steps, guidance 1.0,
+JPEG 95, and the exact software image.
 Ranking then uses:
 
 ```text

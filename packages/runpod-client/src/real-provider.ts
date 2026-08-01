@@ -1,10 +1,19 @@
-import { RunPodClientError, asRunPodClientError } from "./errors.js";
-import { approveCatalogGpu } from "./gpu-policy.js";
+import {
+  RunPodClientError,
+  asRunPodClientError,
+  type RunPodOperation,
+} from "./errors.js";
+import {
+  approveCatalogGpu,
+  approveManagedPodGpu,
+  isDynamicGpuDisplayName,
+  staticGpuPolicy,
+} from "./gpu-policy.js";
 import {
   AuthorizedRestClient,
   type ApiKeyProvider,
   type FetchTransport,
-  validateBaseUrl,
+  validateRunPodBaseUrl,
 } from "./http.js";
 import { deriveRunPodProxyUrl } from "./proxy.js";
 import {
@@ -70,9 +79,10 @@ export class RunPodV2InventorySource implements GpuInventorySource {
 
   constructor(options: RunPodV2InventorySourceOptions) {
     this.#client = new AuthorizedRestClient(options.apiKeyProvider, options.fetchTransport);
-    this.#baseUrl = validateBaseUrl(
+    this.#baseUrl = validateRunPodBaseUrl(
       options.baseUrl ?? "https://api.runpod.io/v2",
       "inventoryBaseUrl",
+      "inventory",
     );
     this.#clock = options.clock ?? { now: () => Date.now() };
   }
@@ -81,9 +91,22 @@ export class RunPodV2InventorySource implements GpuInventorySource {
     request: GpuInventoryRequest,
     signal?: AbortSignal,
   ): Promise<readonly GpuOffer[]> {
+    if (
+      request.gpuCount !== 1 ||
+      request.dataCenterId !== "EU-RO-1" ||
+      request.cloudLanes.length !== 1 ||
+      request.cloudLanes[0] !== "secure"
+    ) {
+      throw new RunPodClientError({
+        code: "configuration_invalid",
+        message: "GPU inventory requires one Secure Cloud GPU in EU-RO-1.",
+        operation: "configuration",
+        details: { field: "inventoryRequest" },
+      });
+    }
     try {
       const dataCenterPromise = this.#client.requestJson(
-        `${this.#baseUrl}/catalog/datacenters?include=GPU_AVAILABILITY`,
+        `${this.#baseUrl}/catalog/datacenters`,
         {
           method: "GET",
           operation: "inventory",
@@ -92,32 +115,32 @@ export class RunPodV2InventorySource implements GpuInventorySource {
         },
       );
       const lanePromises = request.cloudLanes.map(async (cloud) => {
-          const query = new URLSearchParams({
-            include: "AVAILABILITY",
-            product: "POD",
-            count: String(request.gpuCount),
-            cloud: cloud.toUpperCase(),
-            minCudaVersion: "12.8",
-          });
-          const raw = await this.#client.requestJson(`${this.#baseUrl}/catalog/gpus?${query}`, {
-            method: "GET",
-            operation: "inventory",
-            expectedStatuses: [200],
-            ...(signal === undefined ? {} : { signal }),
-          });
-          return { cloud, raw } as const;
+        const query = new URLSearchParams({
+          include: "AVAILABILITY",
+          product: "POD",
+          count: String(request.gpuCount),
+          cloud: cloud.toUpperCase(),
+          minCudaVersion: "13.0",
         });
+        const raw = await this.#client.requestJson(`${this.#baseUrl}/catalog/gpus?${query}`, {
+          method: "GET",
+          operation: "inventory",
+          expectedStatuses: [200],
+          ...(signal === undefined ? {} : { signal }),
+        });
+        return { cloud, raw } as const;
+      });
       const [dataCenterRaw, ...laneResponses] = await Promise.all([
         dataCenterPromise,
         ...lanePromises,
       ]);
-      const dataCenterAvailability = this.#parseDataCenterAvailability(
+      const dataCenterSupportsNetworkVolumes = this.#parseDataCenterSupport(
         dataCenterRaw,
         request.dataCenterId,
       );
       return Object.freeze(
         laneResponses.flatMap(({ cloud, raw }) =>
-          this.#parseLane(raw, cloud, request, dataCenterAvailability),
+          this.#parseLane(raw, cloud, request, dataCenterSupportsNetworkVolumes),
         ),
       );
     } catch (error) {
@@ -134,7 +157,7 @@ export class RunPodV2InventorySource implements GpuInventorySource {
     raw: unknown,
     cloud: CloudLane,
     request: GpuInventoryRequest,
-    dataCenterAvailability: ReadonlyMap<string, AvailabilityLevel>,
+    dataCenterSupportsNetworkVolumes: boolean,
   ): readonly GpuOffer[] {
     const response = asRecord(raw, "inventory");
     const gpus = asArray(response.gpus, "inventory", "response.gpus");
@@ -152,30 +175,38 @@ export class RunPodV2InventorySource implements GpuInventorySource {
         `${field}.manufacturer`,
       );
       const memoryGb = asNumber(gpu.memory, "inventory", `${field}.memory`);
-      asBoolean(gpu.secure, "inventory", `${field}.secure`);
-      asBoolean(gpu.community, "inventory", `${field}.community`);
+      const laneSupported = asBoolean(gpu[cloud], "inventory", `${field}.${cloud}`);
       const price = asRecord(gpu.price, "inventory", `${field}.price`);
-      const securePrice = asNumber(price.secure, "inventory", `${field}.price.secure`);
-      const communityPrice = asNumber(
-        price.community,
-        "inventory",
-        `${field}.price.community`,
-      );
+      const hourlyPriceUsd = asNumber(price[cloud], "inventory", `${field}.price.${cloud}`);
       const maxCount = asRecord(gpu.maxCount, "inventory", `${field}.maxCount`);
-      asNumber(maxCount.secure, "inventory", `${field}.maxCount.secure`);
-      asNumber(maxCount.community, "inventory", `${field}.maxCount.community`);
-      parseAvailability(
-        gpu.availability,
-        `${field}.availability`,
+      const laneMaxCount = asNumber(
+        maxCount[cloud],
+        "inventory",
+        `${field}.maxCount.${cloud}`,
       );
-      if (gpu.dataCenters !== undefined) {
-        const dataCenters = asArray(gpu.dataCenters, "inventory", `${field}.dataCenters`);
-        for (const [dataCenterIndex, dataCenterEntry] of dataCenters.entries()) {
-          const dataCenterField = `${field}.dataCenters[${dataCenterIndex}]`;
-          const dataCenter = asRecord(dataCenterEntry, "inventory", dataCenterField);
-          asNonEmptyString(dataCenter.id, "inventory", `${dataCenterField}.id`);
-          asNonEmptyString(dataCenter.name, "inventory", `${dataCenterField}.name`);
-          parseAvailability(dataCenter.availability, `${dataCenterField}.availability`);
+      const dataCenters = asArray(gpu.dataCenters, "inventory", `${field}.dataCenters`);
+      let selectedDataCenterAvailability: AvailabilityLevel | null = null;
+      for (const [dataCenterIndex, dataCenterEntry] of dataCenters.entries()) {
+        const dataCenterField = `${field}.dataCenters[${dataCenterIndex}]`;
+        const dataCenter = asRecord(dataCenterEntry, "inventory", dataCenterField);
+        const dataCenterId = asNonEmptyString(
+          dataCenter.id,
+          "inventory",
+          `${dataCenterField}.id`,
+        );
+        if (dataCenterId === request.dataCenterId) {
+          if (selectedDataCenterAvailability !== null) {
+            throw new RunPodClientError({
+              code: "api_response_invalid",
+              message: "RunPod returned duplicate GPU data-center records.",
+              operation: "inventory",
+              details: { field: `${dataCenterField}.id` },
+            });
+          }
+          selectedDataCenterAvailability = parseAvailability(
+            dataCenter.availability,
+            `${dataCenterField}.availability`,
+          );
         }
       }
 
@@ -186,11 +217,12 @@ export class RunPodV2InventorySource implements GpuInventorySource {
       if (approved === null) {
         return;
       }
-      const laneSupported = cloud === "secure" ? gpu.secure === true : gpu.community === true;
-      const selectedDataCenterAvailability = dataCenterAvailability.get(id) ?? null;
-      const volumeCompatible = laneSupported && selectedDataCenterAvailability !== null;
+      const volumeCompatible =
+        dataCenterSupportsNetworkVolumes &&
+        laneSupported &&
+        laneMaxCount >= request.gpuCount &&
+        selectedDataCenterAvailability !== null;
       const availability = volumeCompatible ? (selectedDataCenterAvailability ?? "none") : "none";
-      const hourlyPriceUsd = cloud === "secure" ? securePrice : communityPrice;
       offers.push(
         Object.freeze({
           gpuId: approved.gpuId,
@@ -198,6 +230,8 @@ export class RunPodV2InventorySource implements GpuInventorySource {
           coldPriority: approved.coldPriority,
           emergency: approved.emergency,
           displayName: name,
+          manufacturer,
+          memoryGb,
           cloud,
           hourlyPriceUsd,
           availability,
@@ -211,43 +245,39 @@ export class RunPodV2InventorySource implements GpuInventorySource {
     return Object.freeze(offers);
   }
 
-  #parseDataCenterAvailability(
+  #parseDataCenterSupport(
     raw: unknown,
     requestedDataCenterId: string,
-  ): ReadonlyMap<string, AvailabilityLevel> {
+  ): boolean {
     const response = asRecord(raw, "inventory");
     const dataCenters = asArray(response.dataCenters, "inventory", "response.dataCenters");
-    let selected: Record<string, unknown> | null = null;
+    let selectedNetworkVolumeTypes: readonly unknown[] | null = null;
     for (const [index, entry] of dataCenters.entries()) {
       const field = `response.dataCenters[${index}]`;
       const dataCenter = asRecord(entry, "inventory", field);
       const id = asNonEmptyString(dataCenter.id, "inventory", `${field}.id`);
-      asNonEmptyString(dataCenter.name, "inventory", `${field}.name`);
-      asNonEmptyString(dataCenter.region, "inventory", `${field}.region`);
-      asBoolean(dataCenter.globalNetwork, "inventory", `${field}.globalNetwork`);
-      asArray(dataCenter.networkVolumeTypes, "inventory", `${field}.networkVolumeTypes`);
-      asArray(dataCenter.compliance, "inventory", `${field}.compliance`);
-      if (id === requestedDataCenterId) {
-        selected = dataCenter;
+      if (id !== requestedDataCenterId) {
+        continue;
       }
+      const networkVolumeTypes = asArray(
+        dataCenter.networkVolumeTypes,
+        "inventory",
+        `${field}.networkVolumeTypes`,
+      );
+      networkVolumeTypes.forEach((type, typeIndex) => {
+        asNonEmptyString(type, "inventory", `${field}.networkVolumeTypes[${typeIndex}]`);
+      });
+      if (selectedNetworkVolumeTypes !== null) {
+        throw new RunPodClientError({
+          code: "api_response_invalid",
+          message: "RunPod returned duplicate data-center records.",
+          operation: "inventory",
+          details: { field: `${field}.id` },
+        });
+      }
+      selectedNetworkVolumeTypes = networkVolumeTypes;
     }
-    if (selected === null) {
-      return new Map();
-    }
-    const availabilityEntries = asArray(
-      selected.gpuAvailability,
-      "inventory",
-      "response.dataCenters[].gpuAvailability",
-    );
-    const availability = new Map<string, AvailabilityLevel>();
-    for (const [index, entry] of availabilityEntries.entries()) {
-      const field = `response.dataCenters[].gpuAvailability[${index}]`;
-      const gpu = asRecord(entry, "inventory", field);
-      const id = asNonEmptyString(gpu.id, "inventory", `${field}.id`);
-      asNonEmptyString(gpu.name, "inventory", `${field}.name`);
-      availability.set(id, parseAvailability(gpu.availability, `${field}.availability`));
-    }
-    return availability;
+    return selectedNetworkVolumeTypes !== null && selectedNetworkVolumeTypes.length > 0;
   }
 }
 
@@ -267,6 +297,21 @@ function extractStartRequestId(name: string, prefix: string): string | null {
   }
   const requestId = name.slice(marker.length);
   return requestId.length === 0 ? null : requestId;
+}
+
+function isNormalizedMountPath(value: unknown): value is string {
+  if (typeof value !== "string" || !value.startsWith("/") || value.endsWith("/")) {
+    return false;
+  }
+  return value
+    .slice(1)
+    .split("/")
+    .every(
+      (segment) =>
+        segment !== "." &&
+        segment !== ".." &&
+        /^[A-Za-z0-9._-]+$/.test(segment),
+    );
 }
 
 export function buildManagedPodName(prefix: string, startRequestId: string): string {
@@ -290,6 +335,23 @@ export function buildManagedPodName(prefix: string, startRequestId: string): str
   return name;
 }
 
+function markCreateMayHaveSucceeded(error: unknown): RunPodClientError {
+  const source = asRunPodClientError(error, {
+    code: "api_response_invalid",
+    message: "RunPod returned an invalid Pod creation response.",
+    operation: "create_pod",
+  });
+  return new RunPodClientError({
+    code: source.code,
+    message: source.message,
+    operation: "create_pod",
+    retryable: source.retryable,
+    mayHaveSucceeded: true,
+    ...(source.httpStatus === null ? {} : { httpStatus: source.httpStatus }),
+    details: source.details,
+  });
+}
+
 function parsePodStatus(rawStatus: string, createResponse: boolean): PodStatus {
   switch (rawStatus.toUpperCase()) {
     case "RUNNING":
@@ -311,15 +373,18 @@ function parsePodStatus(rawStatus: string, createResponse: boolean): PodStatus {
 }
 
 export class RunPodRestProvider implements RunPodProvider {
+  readonly requiresWorkerHealthProbe = true;
   readonly #client: AuthorizedRestClient;
   readonly #baseUrl: string;
   readonly #inventorySource: GpuInventorySource;
+  #catalogApprovedGpuPolicies = new Map<ApprovedGpuId, string>();
 
   constructor(options: RunPodRestProviderOptions) {
     this.#client = new AuthorizedRestClient(options.apiKeyProvider, options.fetchTransport);
-    this.#baseUrl = validateBaseUrl(
+    this.#baseUrl = validateRunPodBaseUrl(
       options.lifecycleBaseUrl ?? "https://rest.runpod.io/v1",
       "lifecycleBaseUrl",
+      "lifecycle",
     );
     this.#inventorySource =
       options.inventorySource ??
@@ -333,11 +398,59 @@ export class RunPodRestProvider implements RunPodProvider {
       });
   }
 
-  listGpuInventory(
+  async listGpuInventory(
     request: GpuInventoryRequest,
     signal?: AbortSignal,
   ): Promise<readonly GpuOffer[]> {
-    return this.#inventorySource.listGpuInventory(request, signal);
+    if (
+      request.gpuCount !== 1 ||
+      request.dataCenterId !== "EU-RO-1" ||
+      request.cloudLanes.length !== 1 ||
+      request.cloudLanes[0] !== "secure"
+    ) {
+      throw new RunPodClientError({
+        code: "configuration_invalid",
+        message: "GPU inventory requires one Secure Cloud GPU in EU-RO-1.",
+        operation: "configuration",
+        details: { field: "inventoryRequest" },
+      });
+    }
+    this.#catalogApprovedGpuPolicies = new Map();
+    const rawOffers = await this.#inventorySource.listGpuInventory(request, signal);
+    const approvedOffers = rawOffers.flatMap((offer) => {
+      const approved = approveCatalogGpu(
+        {
+          id: offer.gpuId,
+          name: offer.displayName,
+          manufacturer: offer.manufacturer,
+          memoryGb: offer.memoryGb,
+        },
+        request.includeEmergencyTier,
+      );
+      if (
+        approved === null ||
+        offer.cloud !== "secure" ||
+        offer.dataCenterId !== "EU-RO-1" ||
+        (approved.emergency && !request.includeEmergencyTier)
+      ) {
+        return [];
+      }
+      return [
+        Object.freeze({
+          ...offer,
+          gpuId: approved.gpuId,
+          policyKey: approved.policyKey,
+          coldPriority: approved.coldPriority,
+          emergency: approved.emergency,
+          cloud: "secure" as const,
+          dataCenterId: "EU-RO-1",
+        }),
+      ];
+    });
+    this.#catalogApprovedGpuPolicies = new Map(
+      approvedOffers.map((offer) => [offer.gpuId, offer.policyKey] as const),
+    );
+    return Object.freeze(approvedOffers);
   }
 
   async listImageForgePods(
@@ -345,8 +458,16 @@ export class RunPodRestProvider implements RunPodProvider {
     signal?: AbortSignal,
   ): Promise<readonly ManagedPod[]> {
     try {
+      const query = new URLSearchParams({
+        computeType: "GPU",
+        includeMachine: "true",
+        includeNetworkVolume: "true",
+        templateId: criteria.templateId,
+        networkVolumeId: criteria.networkVolumeId,
+        dataCenterId: criteria.dataCenterId,
+      });
       const raw = await this.#client.requestJson(
-        `${this.#baseUrl}/pods?computeType=GPU&includeMachine=true&includeNetworkVolume=true`,
+        `${this.#baseUrl}/pods?${query}`,
         {
           method: "GET",
           operation: "list_pods",
@@ -356,7 +477,7 @@ export class RunPodRestProvider implements RunPodProvider {
       );
       const entries = asArray(raw, "list_pods", "response");
       const pods = entries.map((entry, index) =>
-        this.#parsePod(entry, criteria, false, `response[${index}]`),
+        this.#parsePod(entry, criteria, false, "list_pods", `response[${index}]`),
       );
       return Object.freeze(pods.filter((pod): pod is ManagedPod => pod !== null));
     } catch (error) {
@@ -373,14 +494,64 @@ export class RunPodRestProvider implements RunPodProvider {
     request: CreatePodFromTemplateRequest,
     signal?: AbortSignal,
   ): Promise<ManagedPod> {
+    const cudaVersions = request.constraints.allowedCudaVersions;
+    const minRamPerGpuGb = request.constraints.minRamPerGpuGb;
+    const requestMarker = `-${request.startRequestId}`;
+    const podNamePrefix = request.name.endsWith(requestMarker)
+      ? request.name.slice(0, -requestMarker.length)
+      : "";
+    const staticPolicies = new Map(
+      staticGpuPolicy(true).map((entry) => [entry.gpuId, entry] as const),
+    );
+    const numericConstraints = [
+      request.constraints.minDiskBandwidthMbps,
+      request.constraints.minDownloadMbps,
+      request.constraints.minUploadMbps,
+    ];
     if (
+      !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(request.startRequestId) ||
+      !/^[a-z0-9][a-z0-9-]{0,47}$/.test(podNamePrefix) ||
+      request.name.length > 191 ||
+      request.gpuCount !== 1 ||
+      request.cloud !== "secure" ||
+      request.networkVolumeDataCenterId !== "EU-RO-1" ||
+      request.workerPort !== 8000 ||
+      request.gpuTypePriority !== "custom" ||
+      request.interruptible !== false ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,190}$/.test(request.templateId) ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,190}$/.test(request.networkVolumeId) ||
+      !isNormalizedMountPath(request.networkVolumeMountPath) ||
+      cudaVersions === undefined ||
+      cudaVersions.length !== 1 ||
+      cudaVersions[0] !== "13.0" ||
+      minRamPerGpuGb === undefined ||
+      !Number.isInteger(minRamPerGpuGb) ||
+      minRamPerGpuGb < 16 ||
+      minRamPerGpuGb > 32 ||
       request.gpuTypeIds.length === 0 ||
       new Set(request.gpuTypeIds).size !== request.gpuTypeIds.length ||
-      request.gpuTypeIds.some((gpuId) => !/^[A-Za-z0-9][A-Za-z0-9 ._+-]{0,190}$/.test(gpuId))
+      request.gpuTypeIds.some(
+        (gpuId) => {
+          const staticPolicy = staticPolicies.get(gpuId);
+          return (
+            !/^[A-Za-z0-9][A-Za-z0-9 ._+-]{0,190}$/.test(gpuId) ||
+            (staticPolicy === undefined
+              ? !this.#catalogApprovedGpuPolicies.has(gpuId)
+              : staticPolicy.emergency && !request.allowEmergencyGpuTier)
+          );
+        },
+      ) ||
+      typeof request.allowEmergencyGpuTier !== "boolean" ||
+      numericConstraints.some(
+        (value) =>
+          value !== undefined &&
+          (typeof value !== "number" || !Number.isFinite(value) || value <= 0),
+      )
     ) {
       throw new RunPodClientError({
         code: "configuration_invalid",
-        message: "Pod creation requires a non-empty unique list of approved GPU candidates.",
+        message:
+          "Pod creation requires one Secure Cloud GPU in EU-RO-1 and a non-empty unique candidate list.",
         operation: "configuration",
         details: { field: "gpuTypeIds" },
       });
@@ -417,29 +588,64 @@ export class RunPodRestProvider implements RunPodProvider {
       body.minUploadMbps = constraints.minUploadMbps;
     }
 
-    const raw = await this.#client.requestJson(`${this.#baseUrl}/pods`, {
-      method: "POST",
-      operation: "create_pod",
-      expectedStatuses: [200, 201],
-      body,
-      ...(signal === undefined ? {} : { signal }),
-    });
+    let raw: unknown;
+    try {
+      raw = await this.#client.requestJson(`${this.#baseUrl}/pods`, {
+        method: "POST",
+        operation: "create_pod",
+        expectedStatuses: [201],
+        body,
+        ...(signal === undefined ? {} : { signal }),
+      });
+    } catch (error) {
+      const source = asRunPodClientError(error, {
+        code: "api_request_failed",
+        message: "RunPod could not create the ImageForge Pod.",
+        operation: "create_pod",
+      });
+      if (
+        source.httpStatus !== null &&
+        source.httpStatus >= 200 &&
+        source.httpStatus < 300
+      ) {
+        throw markCreateMayHaveSucceeded(source);
+      }
+      throw source;
+    }
     const criteria: PodDiscoveryCriteria = {
-      podNamePrefix: request.name.slice(0, -(request.startRequestId.length + 1)),
+      podNamePrefix,
       templateId: request.templateId,
       networkVolumeId: request.networkVolumeId,
+      networkVolumeMountPath: request.networkVolumeMountPath,
       workerPort: request.workerPort,
+      dataCenterId: request.networkVolumeDataCenterId,
+      cloud: request.cloud,
+      gpuCount: request.gpuCount,
+      interruptible: request.interruptible,
+      includeEmergencyGpuTier: request.allowEmergencyGpuTier,
     };
-    const pod = this.#parsePod(raw, criteria, true, "response");
-    if (pod === null || pod.gpuId === null) {
-      throw new RunPodClientError({
-        code: "api_response_invalid",
-        message: "RunPod created a Pod but did not return its approved GPU details.",
-        operation: "create_pod",
-        mayHaveSucceeded: true,
-      });
+    try {
+      const pod = this.#parsePod(raw, criteria, true, "create_pod", "response");
+      if (
+        pod === null ||
+        pod.name !== request.name ||
+        pod.startRequestId !== request.startRequestId ||
+        pod.gpuId === null ||
+        !request.gpuTypeIds.includes(pod.gpuId) ||
+        pod.gpuCount !== request.gpuCount ||
+        pod.cloud !== request.cloud ||
+        pod.dataCenterId !== request.networkVolumeDataCenterId
+      ) {
+        throw new RunPodClientError({
+          code: "api_response_invalid",
+          message: "RunPod created a Pod with unexpected GPU or placement details.",
+          operation: "create_pod",
+        });
+      }
+      return pod;
+    } catch (error) {
+      throw markCreateMayHaveSucceeded(error);
     }
-    return pod;
   }
 
   async getPod(
@@ -470,14 +676,23 @@ export class RunPodRestProvider implements RunPodProvider {
         cause: error,
       });
     }
-    return this.#parsePod(raw, criteria, false, "response");
+    const pod = this.#parsePod(raw, criteria, false, "get_pod", "response");
+    if (pod !== null && pod.id !== podId) {
+      throw new RunPodClientError({
+        code: "api_response_invalid",
+        message: "RunPod returned a different Pod than requested.",
+        operation: "get_pod",
+        details: { field: "response.id" },
+      });
+    }
+    return pod;
   }
 
   async terminatePod(podId: string, signal?: AbortSignal): Promise<void> {
     await this.#client.request(`${this.#baseUrl}/pods/${encodeURIComponent(podId)}`, {
       method: "DELETE",
       operation: "terminate_pod",
-      expectedStatuses: [200, 204],
+      expectedStatuses: [204],
       ...(signal === undefined ? {} : { signal }),
     });
   }
@@ -486,10 +701,10 @@ export class RunPodRestProvider implements RunPodProvider {
     raw: unknown,
     criteria: PodDiscoveryCriteria,
     createResponse: boolean,
+    operation: RunPodOperation,
     field: string,
   ): ManagedPod | null {
-    const pod = asRecord(raw, createResponse ? "create_pod" : "list_pods", field);
-    const operation = createResponse ? "create_pod" : "list_pods";
+    const pod = asRecord(raw, operation, field);
     const id = asNonEmptyString(pod.id, operation, `${field}.id`);
     const name = asNonEmptyString(pod.name, operation, `${field}.name`);
     const desiredStatus = asNonEmptyString(
@@ -498,42 +713,110 @@ export class RunPodRestProvider implements RunPodProvider {
       `${field}.desiredStatus`,
     );
     const templateId = asNullableString(pod.templateId, operation, `${field}.templateId`);
+    const networkVolumeMountPath = asNullableString(
+      pod.volumeMountPath,
+      operation,
+      `${field}.volumeMountPath`,
+    );
+    const interruptible = asBoolean(
+      pod.interruptible,
+      operation,
+      `${field}.interruptible`,
+    );
     const networkVolumeRaw = pod.networkVolume;
-    const networkVolumeId =
-      networkVolumeRaw === null || networkVolumeRaw === undefined
-        ? null
-        : asNonEmptyString(
-            asRecord(networkVolumeRaw, operation, `${field}.networkVolume`).id,
-            operation,
-            `${field}.networkVolume.id`,
-          );
 
     const managedName = name === criteria.podNamePrefix || name.startsWith(`${criteria.podNamePrefix}-`);
-    const templateMatches = templateId === null || templateId === criteria.templateId;
-    const volumeMatches = networkVolumeId === null || networkVolumeId === criteria.networkVolumeId;
-    if (!managedName || !templateMatches || !volumeMatches) {
+    if (
+      !managedName ||
+      templateId !== criteria.templateId ||
+      networkVolumeMountPath !== criteria.networkVolumeMountPath ||
+      interruptible !== criteria.interruptible
+    ) {
+      return null;
+    }
+
+    if (networkVolumeRaw === null || networkVolumeRaw === undefined) {
+      return null;
+    }
+    const networkVolume = asRecord(networkVolumeRaw, operation, `${field}.networkVolume`);
+    const networkVolumeId = asNonEmptyString(
+      networkVolume.id,
+      operation,
+      `${field}.networkVolume.id`,
+    );
+    const networkVolumeDataCenterId = asNonEmptyString(
+      networkVolume.dataCenterId,
+      operation,
+      `${field}.networkVolume.dataCenterId`,
+    );
+    if (
+      networkVolumeId !== criteria.networkVolumeId ||
+      networkVolumeDataCenterId !== criteria.dataCenterId
+    ) {
       return null;
     }
 
     let gpuId: ApprovedGpuId | null = null;
+    let gpuDisplayName: string | null = null;
+    let gpuCount: number | null = null;
     const gpuRaw = pod.gpu;
     if (gpuRaw !== null && gpuRaw !== undefined) {
-      const value = asNonEmptyString(
-        asRecord(gpuRaw, operation, `${field}.gpu`).id,
+      const gpu = asRecord(gpuRaw, operation, `${field}.gpu`);
+      const value = asNonEmptyString(gpu.id, operation, `${field}.gpu.id`);
+      const displayName = asNonEmptyString(
+        gpu.displayName,
         operation,
-        `${field}.gpu.id`,
+        `${field}.gpu.displayName`,
       );
-      gpuId = value;
+      const count = asNumber(gpu.count, operation, `${field}.gpu.count`);
+      const approved = approveManagedPodGpu(
+        value,
+        displayName,
+        this.#catalogApprovedGpuPolicies,
+        createResponse ? criteria.includeEmergencyGpuTier : true,
+      );
+      if (approved === null && isDynamicGpuDisplayName(displayName)) {
+        throw new RunPodClientError({
+          code: "api_response_invalid",
+          message:
+            "A matching ImageForge Pod has a dynamic GPU identity that could not be verified against live inventory.",
+          operation,
+          retryable: true,
+          details: { field: `${field}.gpu.id` },
+        });
+      }
+      if (approved === null || !Number.isInteger(count) || count !== criteria.gpuCount) {
+        return null;
+      }
+      gpuId = approved.gpuId;
+      gpuDisplayName = displayName;
+      gpuCount = count;
+    } else {
+      return null;
     }
     let cloud: CloudLane | null = null;
+    let dataCenterId: string | null = null;
     const machineRaw = pod.machine;
     if (machineRaw !== null && machineRaw !== undefined) {
-      const secureCloud = asBoolean(
-        asRecord(machineRaw, operation, `${field}.machine`).secureCloud,
+      const machine = asRecord(machineRaw, operation, `${field}.machine`);
+      const secureCloud = asBoolean(machine.secureCloud, operation, `${field}.machine.secureCloud`);
+      dataCenterId = asNonEmptyString(
+        machine.dataCenterId,
         operation,
-        `${field}.machine.secureCloud`,
+        `${field}.machine.dataCenterId`,
       );
       cloud = secureCloud ? "secure" : "community";
+      if (cloud !== criteria.cloud || dataCenterId !== criteria.dataCenterId) {
+        return null;
+      }
+    } else {
+      return null;
+    }
+    const ports = asArray(pod.ports, operation, `${field}.ports`).map((port, index) =>
+      asNonEmptyString(port, operation, `${field}.ports[${index}]`),
+    );
+    if (!ports.includes(`${criteria.workerPort}/http`)) {
+      return null;
     }
     const adjustedCost = asNullableFiniteNumber(
       pod.adjustedCostPerHr,
@@ -556,9 +839,14 @@ export class RunPodRestProvider implements RunPodProvider {
       name,
       status: parsePodStatus(desiredStatus, createResponse),
       gpuId,
+      gpuDisplayName,
+      gpuCount,
       cloud,
+      dataCenterId,
       templateId,
       networkVolumeId,
+      networkVolumeMountPath,
+      interruptible,
       hourlyPriceUsd: adjustedCost ?? regularCost,
       createdAt,
       startRequestId: extractStartRequestId(name, criteria.podNamePrefix),

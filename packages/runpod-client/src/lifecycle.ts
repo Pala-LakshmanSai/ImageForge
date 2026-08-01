@@ -1,6 +1,6 @@
 import { createRunPodClientConfig, type RunPodClientConfigInput } from "./config.js";
 import { RunPodClientError, asRunPodClientError } from "./errors.js";
-import { staticGpuPolicy } from "./gpu-policy.js";
+import { approveCatalogGpu, isEmergencyGpuId, staticGpuPolicy } from "./gpu-policy.js";
 import { buildManagedPodName } from "./real-provider.js";
 import { rankGpuOffers } from "./ranking.js";
 import {
@@ -59,6 +59,12 @@ const ACTIVE_POD_STATUSES = new Set<ManagedPod["status"]>([
   "error",
 ]);
 
+const REUSABLE_POD_STATUSES = new Set<ManagedPod["status"]>([
+  "provisioning",
+  "starting",
+  "running",
+]);
+
 function defaultSleep(milliseconds: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted === true) {
@@ -102,6 +108,10 @@ function isActivePod(pod: ManagedPod): boolean {
   return ACTIVE_POD_STATUSES.has(pod.status);
 }
 
+function isReusablePod(pod: ManagedPod): boolean {
+  return REUSABLE_POD_STATUSES.has(pod.status);
+}
+
 function workerPhaseToLifecycle(health: WorkerHealth): LifecyclePhase {
   switch (health.phase) {
     case "process":
@@ -110,10 +120,12 @@ function workerPhaseToLifecycle(health: WorkerHealth): LifecyclePhase {
     case "weights":
     case "gpu_load":
       return "loading";
-    case "warm_up":
+    case "warmup":
       return "warming";
     case "ready":
       return "ready";
+    case "error":
+      return "error";
   }
 }
 
@@ -129,17 +141,6 @@ function validateExpectedImageCount(value: number): number {
   return value;
 }
 
-function looksLikeValidatedConfig(
-  config: RunPodClientConfig | RunPodClientConfigInput,
-): config is RunPodClientConfig {
-  return (
-    "workerPort" in config &&
-    "networkVolumeMountPath" in config &&
-    "stopConfirmationTtlMs" in config &&
-    "allowEmergencyGpuTier" in config
-  );
-}
-
 export class RunPodLifecycleController {
   readonly #provider: RunPodProvider;
   readonly #config: RunPodClientConfig;
@@ -150,14 +151,20 @@ export class RunPodLifecycleController {
   readonly #listeners = new Set<SnapshotListener>();
   readonly #confirmations = new Map<string, PendingConfirmation>();
   #snapshot: RunPodSnapshot;
-  #refreshSequence = 0;
   #startPromise: Promise<StartGpuResult> | null = null;
+  #mutationTail: Promise<void> = Promise.resolve();
 
   constructor(options: RunPodLifecycleControllerOptions) {
     this.#provider = options.provider;
-    this.#config = looksLikeValidatedConfig(options.config)
-      ? options.config
-      : createRunPodClientConfig(options.config);
+    this.#config = createRunPodClientConfig(options.config);
+    if (options.provider.requiresWorkerHealthProbe === true && options.workerHealthProbe === undefined) {
+      throw new RunPodClientError({
+        code: "configuration_invalid",
+        message: "The real RunPod provider requires a worker health probe.",
+        operation: "configuration",
+        details: { field: "workerHealthProbe" },
+      });
+    }
     this.#workerHealthProbe = options.workerHealthProbe ?? null;
     this.#clock = options.clock ?? { now: () => Date.now() };
     this.#sleep = options.sleep ?? defaultSleep;
@@ -191,11 +198,14 @@ export class RunPodLifecycleController {
     return () => this.#listeners.delete(listener);
   }
 
-  async refresh(options: RefreshOptions = {}): Promise<RunPodSnapshot> {
+  refresh(options: RefreshOptions = {}): Promise<RunPodSnapshot> {
+    return this.#enqueueMutation(() => this.#refresh(options));
+  }
+
+  async #refresh(options: RefreshOptions = {}): Promise<RunPodSnapshot> {
     const expectedImageCount = validateExpectedImageCount(
       options.expectedImageCount ?? this.#snapshot.expectedImageCount,
     );
-    const sequence = ++this.#refreshSequence;
     this.#publish({
       ...this.#snapshot,
       phase: "selecting",
@@ -207,25 +217,15 @@ export class RunPodLifecycleController {
       gpuIds: this.#enabledGpuIds(),
       includeEmergencyTier: this.#config.allowEmergencyGpuTier,
       cloudLanes: this.#config.cloudLanes,
-      gpuCount: 1 as const,
+      gpuCount: this.#config.gpuCount,
       dataCenterId: this.#config.networkVolumeDataCenterId,
     };
-    const inventoryPromise = this.#provider.listGpuInventory(
-      inventoryRequest,
-      options.signal,
-    );
-    const podsPromise = this.#provider.listImageForgePods(
-      this.#discoveryCriteria(),
-      options.signal,
-    );
-    const [inventoryResult, podsResult] = await Promise.allSettled([
-      inventoryPromise,
-      podsPromise,
+    const [inventoryResult] = await Promise.allSettled([
+      this.#provider.listGpuInventory(inventoryRequest, options.signal),
     ]);
-
-    if (sequence !== this.#refreshSequence) {
-      return this.#snapshot;
-    }
+    const [podsResult] = await Promise.allSettled([
+      this.#provider.listImageForgePods(this.#discoveryCriteria(), options.signal),
+    ]);
 
     try {
       if (podsResult.status === "rejected") {
@@ -240,7 +240,7 @@ export class RunPodLifecycleController {
       let inventory: readonly GpuOffer[];
       const warnings: SnapshotWarning[] = [];
       if (inventoryResult.status === "fulfilled") {
-        inventory = inventoryResult.value;
+        inventory = this.#validatedInventory(inventoryResult.value);
       } else {
         const inventoryError = asRunPodClientError(inventoryResult.reason, {
           code: "inventory_unavailable",
@@ -287,13 +287,11 @@ export class RunPodLifecycleController {
         operation: "list_pods",
         retryable: true,
       });
-      if (sequence === this.#refreshSequence) {
-        this.#publish({
-          ...this.#snapshot,
-          phase: "error",
-          error: safeErrorSummary(runPodError),
-        });
-      }
+      this.#publish({
+        ...this.#snapshot,
+        phase: "error",
+        error: safeErrorSummary(runPodError),
+      });
       throw runPodError;
     }
   }
@@ -312,7 +310,7 @@ export class RunPodLifecycleController {
       return this.#startPromise;
     }
 
-    const promise = this.#startGpu(intent).finally(() => {
+    const promise = this.#enqueueMutation(() => this.#startGpu(intent)).finally(() => {
       if (this.#startPromise === promise) {
         this.#startPromise = null;
       }
@@ -418,7 +416,11 @@ export class RunPodLifecycleController {
     });
   }
 
-  async stopGpu(intent: ConfirmedStopIntent, signal?: AbortSignal): Promise<StopGpuResult> {
+  stopGpu(intent: ConfirmedStopIntent, signal?: AbortSignal): Promise<StopGpuResult> {
+    return this.#enqueueMutation(() => this.#stopGpu(intent, signal));
+  }
+
+  async #stopGpu(intent: ConfirmedStopIntent, signal?: AbortSignal): Promise<StopGpuResult> {
     if (intent.intent !== "confirm_stop_gpu" || intent.source !== "foreground_user") {
       throw new RunPodClientError({
         code: "termination_confirmation_required",
@@ -443,7 +445,7 @@ export class RunPodLifecycleController {
         details: { podId: intent.podId },
       });
     }
-    if (this.#clock.now() > confirmation.expiresAtMs) {
+    if (this.#clock.now() >= confirmation.expiresAtMs) {
       throw new RunPodClientError({
         code: "termination_confirmation_expired",
         message: "The Stop GPU confirmation expired. Confirm the current Pod again.",
@@ -460,12 +462,42 @@ export class RunPodLifecycleController {
       });
     }
 
+    let currentPod: ManagedPod | null;
+    try {
+      currentPod = await this.#provider.getPod(
+        intent.podId,
+        this.#discoveryCriteria(),
+        signal,
+      );
+    } catch (error) {
+      const discoveryError = asRunPodClientError(error, {
+        code: "pod_discovery_failed",
+        message: "The selected Pod could not be revalidated before termination.",
+        operation: "get_pod",
+        retryable: true,
+      });
+      this.#publish({
+        ...this.#snapshot,
+        phase: "error",
+        error: safeErrorSummary(discoveryError),
+      });
+      throw discoveryError;
+    }
+    if (currentPod === null || !isActivePod(currentPod)) {
+      throw new RunPodClientError({
+        code: "pod_not_found",
+        message:
+          "The confirmed Pod no longer matches the managed ImageForge profile. Refresh before stopping.",
+        operation: "terminate_pod",
+        details: { podId: intent.podId },
+      });
+    }
+
     this.#publish({
       ...this.#snapshot,
       phase: "stopping",
       selectedPodId: intent.podId,
-      proxyUrl:
-        this.#snapshot.pods.find((pod) => pod.id === intent.podId)?.proxyUrl ?? null,
+      proxyUrl: currentPod.proxyUrl,
       error: null,
     });
     try {
@@ -522,15 +554,26 @@ export class RunPodLifecycleController {
     const podName = buildManagedPodName(this.#config.podNamePrefix, startRequestId);
 
     try {
-      const refreshed = await this.refresh({
+      const refreshed = await this.#refresh({
         expectedImageCount,
       });
-      const existing = this.#selectedActivePod(refreshed.pods);
+      const existing = this.#selectedReusablePod(refreshed.pods);
       if (existing !== null) {
         return Object.freeze({
           outcome: "connected_existing",
           pod: existing,
           snapshot: refreshed,
+        });
+      }
+      const nonReusableActive = refreshed.pods.find(isActivePod);
+      if (nonReusableActive !== undefined) {
+        throw new RunPodClientError({
+          code: "operation_in_progress",
+          message:
+            "An existing ImageForge Pod is not healthy enough to reuse. Refresh or explicitly stop that Pod before starting another.",
+          operation: "create_pod",
+          retryable: true,
+          details: { podId: nonReusableActive.id, status: nonReusableActive.status },
         });
       }
       if (refreshed.rankedCandidates.length === 0) {
@@ -542,84 +585,69 @@ export class RunPodLifecycleController {
         });
       }
 
-      const laneOrder = Array.from(
-        new Set(refreshed.rankedCandidates.map((candidate) => candidate.cloud)),
+      const gpuTypeIds = Array.from(
+        new Set(refreshed.rankedCandidates.map((candidate) => candidate.gpuId)),
       );
-      let lastUnavailable: RunPodClientError | null = null;
-      for (const cloud of laneOrder) {
-        const gpuTypeIds = Array.from(
-          new Set(
-            refreshed.rankedCandidates
-              .filter((candidate) => candidate.cloud === cloud)
-              .map((candidate) => candidate.gpuId),
-          ),
-        );
-        const request: CreatePodFromTemplateRequest = Object.freeze({
-          name: podName,
-          startRequestId,
-          templateId: this.#config.templateId,
-          networkVolumeId: this.#config.networkVolumeId,
-          networkVolumeDataCenterId: this.#config.networkVolumeDataCenterId,
-          networkVolumeMountPath: this.#config.networkVolumeMountPath,
-          workerPort: this.#config.workerPort,
-          cloud,
-          gpuTypeIds: Object.freeze(gpuTypeIds),
-          gpuCount: 1,
-          gpuTypePriority: "custom",
-          interruptible: false,
-          constraints: this.#config.constraints,
-        });
+      const request: CreatePodFromTemplateRequest = Object.freeze({
+        name: podName,
+        startRequestId,
+        templateId: this.#config.templateId,
+        networkVolumeId: this.#config.networkVolumeId,
+        networkVolumeDataCenterId: this.#config.networkVolumeDataCenterId,
+        networkVolumeMountPath: this.#config.networkVolumeMountPath,
+        workerPort: this.#config.workerPort,
+        cloud: "secure",
+        gpuTypeIds: Object.freeze(gpuTypeIds),
+        gpuCount: this.#config.gpuCount,
+        gpuTypePriority: "custom",
+        interruptible: false,
+        allowEmergencyGpuTier: this.#config.allowEmergencyGpuTier,
+        constraints: this.#config.constraints,
+      });
 
-        try {
-          const created = await this.#provider.createPodFromTemplate(request);
-          return await this.#finishSuccessfulCreate(
-            created,
+      try {
+        const created = await this.#provider.createPodFromTemplate(request);
+        return await this.#finishSuccessfulCreate(
+          created,
+          expectedImageCount,
+          "created",
+        );
+      } catch (error) {
+        const createError = asRunPodClientError(error, {
+          code: "api_request_failed",
+          message: "RunPod could not create the ImageForge Pod.",
+          operation: "create_pod",
+          retryable: true,
+          mayHaveSucceeded: true,
+        });
+        if (createError.mayHaveSucceeded) {
+          const reconciled = await this.#reconcileAmbiguousCreate(
             startRequestId,
             expectedImageCount,
-            "created",
           );
-        } catch (error) {
-          const createError = asRunPodClientError(error, {
-            code: "api_request_failed",
-            message: "RunPod could not create the ImageForge Pod.",
+          if (reconciled !== null) {
+            return reconciled;
+          }
+          throw new RunPodClientError({
+            code: "pod_create_ambiguous",
+            message:
+              "RunPod may have created a Pod, but the result could not be confirmed. Refresh before starting again.",
             operation: "create_pod",
             retryable: true,
             mayHaveSucceeded: true,
+            details: { requestId: startRequestId },
           });
-          if (createError.mayHaveSucceeded) {
-            const reconciled = await this.#reconcileAmbiguousCreate(
-              startRequestId,
-              expectedImageCount,
-            );
-            if (reconciled !== null) {
-              return reconciled;
-            }
-            throw new RunPodClientError({
-              code: "pod_create_ambiguous",
-              message:
-                "RunPod may have created a Pod, but the result could not be confirmed. Refresh before starting again.",
-              operation: "create_pod",
-              retryable: true,
-              mayHaveSucceeded: true,
-              details: { requestId: startRequestId },
-              cause: createError,
-            });
-          }
-          if (createError.code === "gpu_unavailable") {
-            lastUnavailable = createError;
-            continue;
-          }
-          throw createError;
         }
+        if (createError.code === "gpu_unavailable") {
+          throw new RunPodClientError({
+            code: "no_gpu_available",
+            message: "Approved RunPod GPU capacity changed before the Pod could be created.",
+            operation: "create_pod",
+            retryable: true,
+          });
+        }
+        throw createError;
       }
-
-      throw new RunPodClientError({
-        code: "no_gpu_available",
-        message: "Approved RunPod GPU capacity changed before the Pod could be created.",
-        operation: "create_pod",
-        retryable: true,
-        cause: lastUnavailable ?? undefined,
-      });
     } catch (error) {
       const runPodError = asRunPodClientError(error, {
         code: "api_request_failed",
@@ -638,35 +666,46 @@ export class RunPodLifecycleController {
 
   async #finishSuccessfulCreate(
     created: ManagedPod,
-    startRequestId: string,
     expectedImageCount: number,
     outcome: StartGpuResult["outcome"],
   ): Promise<StartGpuResult> {
     try {
       const pods = await this.#provider.listImageForgePods(this.#discoveryCriteria());
       const enriched = await this.#enrichPods(pods);
-      const views = enriched.views.some((pod) => pod.id === created.id)
+      const discoveredCreated = enriched.views.find((pod) => pod.id === created.id);
+      const createdView = this.#podView(created, null, null);
+      const discoveryWarnings = discoveredCreated === undefined
+        ? [
+            Object.freeze({
+              code: "post_create_discovery_failed" as const,
+              message:
+                "The Pod was created, but its exact ID was not present in immediate discovery. Refresh before another Start GPU action.",
+              podIds: Object.freeze([created.id]),
+            }),
+          ]
+        : [];
+      const views = discoveredCreated !== undefined
         ? enriched.views
         : Object.freeze([
             ...enriched.views,
-            this.#podView(created, null, null, "provisioning"),
+            createdView,
           ]);
       const snapshot = this.#snapshotForViews(
         this.#snapshot.inventory,
         this.#snapshot.rankedCandidates,
         views,
         expectedImageCount,
-        [...this.#snapshot.warnings, ...enriched.warnings],
+        [...this.#snapshot.warnings, ...enriched.warnings, ...discoveryWarnings],
         new Date(this.#clock.now()).toISOString(),
       );
       this.#publish(snapshot);
       const current =
-        this.#snapshot.pods.find((pod) => pod.startRequestId === startRequestId) ??
+        discoveredCreated ??
         this.#snapshot.pods.find((pod) => pod.id === created.id) ??
-        this.#podView(created, null, null, "provisioning");
+        createdView;
       return Object.freeze({ outcome, pod: current, snapshot: this.#snapshot });
     } catch {
-      const createdView = this.#podView(created, null, null, "provisioning");
+      const createdView = this.#podView(created, null, null);
       const existingViews = this.#snapshot.pods.filter((pod) => pod.id !== created.id);
       const warning: SnapshotWarning = Object.freeze({
         code: "post_create_discovery_failed",
@@ -693,13 +732,14 @@ export class RunPodLifecycleController {
   ): Promise<StartGpuResult | null> {
     try {
       const pods = await this.#provider.listImageForgePods(this.#discoveryCriteria());
-      const matching = pods.find((pod) => pod.startRequestId === startRequestId);
-      if (matching === undefined) {
+      const matching = pods.filter(
+        (pod) => pod.startRequestId === startRequestId && isActivePod(pod),
+      );
+      if (matching.length !== 1 || matching[0] === undefined) {
         return null;
       }
       return this.#finishSuccessfulCreate(
-        matching,
-        startRequestId,
+        matching[0],
         expectedImageCount,
         "reconciled_ambiguous_create",
       );
@@ -807,7 +847,14 @@ export class RunPodLifecycleController {
       expectedImageCount,
       refreshedAt,
       warnings: Object.freeze(warnings),
-      error: null,
+      error:
+        selected?.workerHealth?.phase === "error"
+          ? Object.freeze({
+              code: "worker_boot_failed",
+              message: "The ImageForge worker could not become ready.",
+              retryable: false,
+            })
+          : null,
     };
   }
 
@@ -833,9 +880,14 @@ export class RunPodLifecycleController {
       if (phaseDifference !== 0) {
         return phaseDifference;
       }
-      const leftTime = left.createdAt === null ? Number.POSITIVE_INFINITY : Date.parse(left.createdAt);
-      const rightTime =
-        right.createdAt === null ? Number.POSITIVE_INFINITY : Date.parse(right.createdAt);
+      const parsedLeftTime = left.createdAt === null ? Number.NaN : Date.parse(left.createdAt);
+      const parsedRightTime = right.createdAt === null ? Number.NaN : Date.parse(right.createdAt);
+      const leftTime = Number.isFinite(parsedLeftTime)
+        ? parsedLeftTime
+        : Number.POSITIVE_INFINITY;
+      const rightTime = Number.isFinite(parsedRightTime)
+        ? parsedRightTime
+        : Number.POSITIVE_INFINITY;
       if (leftTime !== rightTime) {
         return leftTime - rightTime;
       }
@@ -843,13 +895,70 @@ export class RunPodLifecycleController {
     })[0] ?? null;
   }
 
+  #selectedReusablePod(pods: readonly PodView[]): PodView | null {
+    return this.#selectedActivePod(
+      pods.filter(
+        (pod) =>
+          isReusablePod(pod) &&
+          pod.lifecyclePhase !== "error" &&
+          pod.gpuId !== null &&
+          (this.#config.allowEmergencyGpuTier || !isEmergencyGpuId(pod.gpuId)),
+      ),
+    );
+  }
+
   #discoveryCriteria(): PodDiscoveryCriteria {
     return Object.freeze({
       podNamePrefix: this.#config.podNamePrefix,
       templateId: this.#config.templateId,
       networkVolumeId: this.#config.networkVolumeId,
+      networkVolumeMountPath: this.#config.networkVolumeMountPath,
       workerPort: this.#config.workerPort,
+      dataCenterId: this.#config.networkVolumeDataCenterId,
+      cloud: "secure",
+      gpuCount: this.#config.gpuCount,
+      interruptible: false,
+      includeEmergencyGpuTier: this.#config.allowEmergencyGpuTier,
     });
+  }
+
+  #validatedInventory(inventory: readonly GpuOffer[]): readonly GpuOffer[] {
+    return Object.freeze(
+      inventory.flatMap((offer) => {
+        if (
+          offer.cloud !== "secure" ||
+          offer.dataCenterId !== this.#config.networkVolumeDataCenterId
+        ) {
+          return [];
+        }
+        const approved = approveCatalogGpu(
+          {
+            id: offer.gpuId,
+            name: offer.displayName,
+            manufacturer: offer.manufacturer,
+            memoryGb: offer.memoryGb,
+          },
+          this.#config.allowEmergencyGpuTier,
+        );
+        if (
+          approved === null ||
+          (approved.emergency && !this.#config.allowEmergencyGpuTier)
+        ) {
+          return [];
+        }
+        return [
+          Object.freeze({
+            ...offer,
+            gpuId: approved.gpuId,
+            policyKey: approved.policyKey,
+            coldPriority: approved.coldPriority,
+            emergency: approved.emergency,
+            cloud: "secure" as const,
+            dataCenterId: this.#config.networkVolumeDataCenterId,
+          }),
+        ];
+      }),
+    );
   }
 
   #enabledGpuIds(): readonly string[] {
@@ -869,6 +978,8 @@ export class RunPodLifecycleController {
             coldPriority: policy.coldPriority,
             emergency: policy.emergency,
             displayName: policy.catalogNames[0] ?? policy.gpuId,
+            manufacturer: "NVIDIA",
+            memoryGb: policy.expectedMemoryGb,
             cloud,
             hourlyPriceUsd: null,
             availability: "unknown" as const,
@@ -887,7 +998,20 @@ export class RunPodLifecycleController {
       revision: this.#snapshot.revision + 1,
     });
     for (const listener of this.#listeners) {
-      listener(this.#snapshot);
+      try {
+        listener(this.#snapshot);
+      } catch {
+        // Presentation listeners cannot invalidate a completed infrastructure mutation.
+      }
     }
+  }
+
+  #enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.#mutationTail.then(operation, operation);
+    this.#mutationTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 }

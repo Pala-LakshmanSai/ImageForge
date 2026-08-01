@@ -1,6 +1,7 @@
 import { RunPodClientError } from "./errors.js";
 
-const POD_ID = /^[A-Za-z0-9][A-Za-z0-9-]{0,190}$/;
+// `<pod-id>-8000` must remain one valid DNS label (63 bytes maximum).
+const POD_ID = /^[A-Za-z0-9][A-Za-z0-9-]{0,57}$/;
 
 export function deriveRunPodProxyUrl(podId: string, internalPort = 8000): string {
   if (!POD_ID.test(podId)) {

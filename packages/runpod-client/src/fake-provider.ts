@@ -1,4 +1,9 @@
 import { RunPodClientError } from "./errors.js";
+import {
+  approveCatalogGpu,
+  approveManagedPodGpu,
+  isDynamicGpuDisplayName,
+} from "./gpu-policy.js";
 import { deriveRunPodProxyUrl } from "./proxy.js";
 import type {
   ApprovedGpuId,
@@ -33,6 +38,11 @@ type CreateHook = (
   provider: FakeRunPodProvider,
 ) => Promise<ManagedPod | undefined> | ManagedPod | undefined;
 
+type TerminateHook = (
+  podId: string,
+  provider: FakeRunPodProvider,
+) => Promise<void> | void;
+
 export class FakeRunPodProvider implements RunPodProvider {
   readonly calls: FakeProviderCalls = {
     inventory: [],
@@ -48,7 +58,9 @@ export class FakeRunPodProvider implements RunPodProvider {
   #idFactory: () => string;
   #nextId = 1;
   #createHook: CreateHook | null = null;
+  #terminateHook: TerminateHook | null = null;
   #nextActualGpuId: ApprovedGpuId | null = null;
+  #catalogApprovedGpuPolicies = new Map<ApprovedGpuId, string>();
 
   constructor(options: FakeRunPodProviderOptions = {}) {
     this.#inventory = [...(options.inventory ?? [])];
@@ -90,6 +102,10 @@ export class FakeRunPodProvider implements RunPodProvider {
     this.#createHook = hook;
   }
 
+  onTerminate(hook: TerminateHook | null): void {
+    this.#terminateHook = hook;
+  }
+
   useActualGpuForNextCreate(gpuId: ApprovedGpuId): void {
     this.#nextActualGpuId = gpuId;
   }
@@ -99,8 +115,38 @@ export class FakeRunPodProvider implements RunPodProvider {
     _signal?: AbortSignal,
   ): Promise<readonly GpuOffer[]> {
     this.calls.inventory.push(Object.freeze({ ...request }));
+    this.#catalogApprovedGpuPolicies = new Map();
     this.#throwFailure("inventory");
-    return Object.freeze(this.#inventory.map((offer) => Object.freeze({ ...offer })));
+    const offers = this.#inventory.flatMap((offer) => {
+      const approved = approveCatalogGpu(
+        {
+          id: offer.gpuId,
+          name: offer.displayName,
+          manufacturer: offer.manufacturer,
+          memoryGb: offer.memoryGb,
+        },
+        request.includeEmergencyTier,
+      );
+      if (
+        request.gpuCount !== 1 ||
+        offer.cloud !== request.cloudLanes[0] ||
+        offer.dataCenterId !== request.dataCenterId ||
+        approved === null
+      ) {
+        return [];
+      }
+      return [Object.freeze({
+        ...offer,
+        gpuId: approved.gpuId,
+        policyKey: approved.policyKey,
+        coldPriority: approved.coldPriority,
+        emergency: approved.emergency,
+      })];
+    });
+    this.#catalogApprovedGpuPolicies = new Map(
+      offers.map((offer) => [offer.gpuId, offer.policyKey] as const),
+    );
+    return Object.freeze(offers);
   }
 
   async listImageForgePods(
@@ -111,14 +157,7 @@ export class FakeRunPodProvider implements RunPodProvider {
     this.#throwFailure("list");
     return Object.freeze(
       this.#pods
-        .filter(
-          (pod) =>
-            (pod.name === criteria.podNamePrefix ||
-              pod.name.startsWith(`${criteria.podNamePrefix}-`)) &&
-            (pod.templateId === null || pod.templateId === criteria.templateId) &&
-            (pod.networkVolumeId === null ||
-              pod.networkVolumeId === criteria.networkVolumeId),
-        )
+        .filter((pod) => this.#matchesCriteria(pod, criteria))
         .map((pod) => Object.freeze({ ...pod })),
     );
   }
@@ -157,9 +196,15 @@ export class FakeRunPodProvider implements RunPodProvider {
       name: request.name,
       status: "provisioning",
       gpuId: actualGpuId,
+      gpuDisplayName:
+        this.#inventory.find((offer) => offer.gpuId === actualGpuId)?.displayName ?? actualGpuId,
+      gpuCount: request.gpuCount,
       cloud: request.cloud,
+      dataCenterId: request.networkVolumeDataCenterId,
       templateId: request.templateId,
       networkVolumeId: request.networkVolumeId,
+      networkVolumeMountPath: request.networkVolumeMountPath,
+      interruptible: request.interruptible,
       hourlyPriceUsd: null,
       createdAt: new Date(0).toISOString(),
       startRequestId: request.startRequestId,
@@ -176,13 +221,16 @@ export class FakeRunPodProvider implements RunPodProvider {
   ): Promise<ManagedPod | null> {
     this.calls.get.push(Object.freeze({ podId, criteria: Object.freeze({ ...criteria }) }));
     this.#throwFailure("get");
-    const pod = this.#pods.find((candidate) => candidate.id === podId);
+    const pod = this.#pods.find(
+      (candidate) => candidate.id === podId && this.#matchesCriteria(candidate, criteria),
+    );
     return pod === undefined ? null : Object.freeze({ ...pod });
   }
 
   async terminatePod(podId: string, _signal?: AbortSignal): Promise<void> {
     this.calls.terminate.push(podId);
     this.#throwFailure("terminate");
+    await this.#terminateHook?.(podId, this);
     const index = this.#pods.findIndex((pod) => pod.id === podId);
     if (index === -1) {
       throw new RunPodClientError({
@@ -200,6 +248,41 @@ export class FakeRunPodProvider implements RunPodProvider {
       return;
     }
     throw failures.shift();
+  }
+
+  #matchesCriteria(pod: ManagedPod, criteria: PodDiscoveryCriteria): boolean {
+    const identityMatches =
+      (pod.name === criteria.podNamePrefix ||
+        pod.name.startsWith(`${criteria.podNamePrefix}-`)) &&
+      pod.templateId === criteria.templateId &&
+      pod.networkVolumeId === criteria.networkVolumeId &&
+      pod.networkVolumeMountPath === criteria.networkVolumeMountPath &&
+      pod.interruptible === criteria.interruptible &&
+      pod.dataCenterId === criteria.dataCenterId &&
+      pod.cloud === criteria.cloud &&
+      pod.gpuCount === criteria.gpuCount &&
+      pod.gpuId !== null &&
+      pod.gpuDisplayName !== null;
+    if (!identityMatches || pod.gpuId === null || pod.gpuDisplayName === null) {
+      return false;
+    }
+    const approved = approveManagedPodGpu(
+      pod.gpuId,
+      pod.gpuDisplayName,
+      this.#catalogApprovedGpuPolicies,
+      true,
+    );
+    if (approved === null && isDynamicGpuDisplayName(pod.gpuDisplayName)) {
+      throw new RunPodClientError({
+        code: "api_response_invalid",
+        message:
+          "A matching ImageForge Pod has a dynamic GPU identity that could not be verified against live inventory.",
+        operation: "list_pods",
+        retryable: true,
+        details: { field: "pod.gpu.id" },
+      });
+    }
+    return approved !== null;
   }
 }
 

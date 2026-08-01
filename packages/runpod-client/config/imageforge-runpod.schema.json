@@ -9,6 +9,10 @@
     "templateId",
     "networkVolumeId",
     "networkVolumeDataCenterId",
+    "workerPort",
+    "gpuCount",
+    "cloudLanes",
+    "constraints",
     "benchmarkContract"
   ],
   "properties": {
@@ -16,13 +20,12 @@
     "templateId": { "$ref": "#/$defs/runpodId" },
     "networkVolumeId": { "$ref": "#/$defs/runpodId" },
     "networkVolumeDataCenterId": {
-      "type": "string",
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,190}$",
+      "const": "EU-RO-1",
       "default": "EU-RO-1"
     },
     "networkVolumeMountPath": {
       "type": "string",
-      "pattern": "^/(?!.*\\.\\.).+$",
+      "pattern": "^/(?!\\.\\.?(?:/|$))(?!.*\\/\\.\\.?(?:/|$))[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$",
       "default": "/workspace"
     },
     "podNamePrefix": {
@@ -31,10 +34,12 @@
       "default": "imageforge"
     },
     "workerPort": {
-      "type": "integer",
-      "minimum": 1,
-      "maximum": 65535,
+      "const": 8000,
       "default": 8000
+    },
+    "gpuCount": {
+      "const": 1,
+      "default": 1
     },
     "cloudLanes": {
       "type": "array",
@@ -88,15 +93,22 @@
     "constraints": {
       "type": "object",
       "additionalProperties": false,
+      "required": ["allowedCudaVersions", "minRamPerGpuGb"],
       "properties": {
         "allowedCudaVersions": {
           "type": "array",
-          "items": { "type": "string", "pattern": "^\\d{2}(?:\\.\\d)?$" },
+          "items": { "const": "13.0" },
           "minItems": 1,
+          "maxItems": 1,
           "uniqueItems": true,
-          "default": ["12.8"]
+          "default": ["13.0"]
         },
-        "minRamPerGpuGb": { "type": "number", "exclusiveMinimum": 0, "default": 16 },
+        "minRamPerGpuGb": {
+          "type": "integer",
+          "minimum": 16,
+          "maximum": 32,
+          "default": 16
+        },
         "minDiskBandwidthMbps": { "type": "number", "exclusiveMinimum": 0 },
         "minDownloadMbps": { "type": "number", "exclusiveMinimum": 0 },
         "minUploadMbps": { "type": "number", "exclusiveMinimum": 0 }

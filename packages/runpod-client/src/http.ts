@@ -42,6 +42,29 @@ export function validateBaseUrl(value: string, field: string): string {
   return url.toString().replace(/\/$/, "");
 }
 
+export type RunPodApiSurface = "lifecycle" | "inventory";
+
+/** Pins bearer credentials to the two reviewed RunPod API surfaces. */
+export function validateRunPodBaseUrl(
+  value: string,
+  field: string,
+  surface: RunPodApiSurface,
+): string {
+  const normalized = validateBaseUrl(value, field);
+  const url = new URL(normalized);
+  const expectedHost = surface === "lifecycle" ? "rest.runpod.io" : "api.runpod.io";
+  const expectedPath = surface === "lifecycle" ? "/v1" : "/v2";
+  if (url.hostname !== expectedHost || url.port !== "" || url.pathname !== expectedPath) {
+    throw new RunPodClientError({
+      code: "configuration_invalid",
+      message: `${field} must use the official RunPod ${surface} endpoint.`,
+      operation: "configuration",
+      details: { field },
+    });
+  }
+  return normalized;
+}
+
 function errorForHttpStatus(
   status: number,
   operation: RunPodOperation,
@@ -163,6 +186,7 @@ export class AuthorizedRestClient {
       response = await this.#fetch(url, {
         method: options.method,
         headers,
+        redirect: "error",
         ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       });

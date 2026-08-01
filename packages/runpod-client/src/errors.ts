@@ -58,7 +58,10 @@ export class RunPodClientError extends Error {
   readonly details: Readonly<Record<string, string | number | boolean | null>>;
 
   constructor(options: RunPodClientErrorOptions) {
-    super(options.message, options.cause === undefined ? undefined : { cause: options.cause });
+    // Never retain an upstream exception. Fetch/JSON errors can embed request
+    // headers or response snippets in their message and ordinary error
+    // inspection includes Error.cause even when JSON serialization does not.
+    super(options.message);
     this.name = "RunPodClientError";
     this.code = options.code;
     this.operation = options.operation;

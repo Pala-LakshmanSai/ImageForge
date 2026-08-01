@@ -122,6 +122,9 @@ export function rankGpuOffers(input: RankGpuOffersInput): readonly RankedGpuOffe
   });
 
   estimated.sort((left, right) => {
+    if (left.emergency !== right.emergency) {
+      return left.emergency ? 1 : -1;
+    }
     if (left.estimatedJobCostUsd !== null && right.estimatedJobCostUsd !== null) {
       const costDifference = left.estimatedJobCostUsd - right.estimatedJobCostUsd;
       if (costDifference !== 0) {

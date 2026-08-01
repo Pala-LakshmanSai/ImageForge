@@ -6,19 +6,25 @@ export interface GpuPolicyEntry {
   readonly exactIds: readonly string[];
   readonly coldPriority: number;
   readonly emergency: boolean;
+  readonly minimumMemoryGb: number;
+  readonly maximumMemoryGb: number;
+  readonly expectedMemoryGb: number;
 }
 
 /**
  * EU-RO-1 studio policy. Display-name matches are exact after case/whitespace
  * normalization. The returned catalog ID is always passed through unchanged.
  */
-export const GPU_POLICY: readonly GpuPolicyEntry[] = Object.freeze([
+const GPU_POLICY_DEFINITIONS: readonly GpuPolicyEntry[] = [
   {
     key: "rtx_4090",
     catalogNames: ["RTX 4090"],
     exactIds: ["NVIDIA GeForce RTX 4090"],
     coldPriority: 0,
     emergency: false,
+    minimumMemoryGb: 16,
+    maximumMemoryGb: 32,
+    expectedMemoryGb: 24,
   },
   {
     key: "rtx_pro_4500_blackwell",
@@ -26,6 +32,9 @@ export const GPU_POLICY: readonly GpuPolicyEntry[] = Object.freeze([
     exactIds: [],
     coldPriority: 1,
     emergency: false,
+    minimumMemoryGb: 16,
+    maximumMemoryGb: 32,
+    expectedMemoryGb: 32,
   },
   {
     key: "rtx_5090",
@@ -33,6 +42,9 @@ export const GPU_POLICY: readonly GpuPolicyEntry[] = Object.freeze([
     exactIds: ["NVIDIA GeForce RTX 5090"],
     coldPriority: 2,
     emergency: false,
+    minimumMemoryGb: 16,
+    maximumMemoryGb: 32,
+    expectedMemoryGb: 32,
   },
   {
     key: "rtx_pro_4000_blackwell",
@@ -40,6 +52,9 @@ export const GPU_POLICY: readonly GpuPolicyEntry[] = Object.freeze([
     exactIds: [],
     coldPriority: 3,
     emergency: false,
+    minimumMemoryGb: 16,
+    maximumMemoryGb: 32,
+    expectedMemoryGb: 24,
   },
   {
     key: "l4",
@@ -47,6 +62,9 @@ export const GPU_POLICY: readonly GpuPolicyEntry[] = Object.freeze([
     exactIds: ["NVIDIA L4"],
     coldPriority: 4,
     emergency: false,
+    minimumMemoryGb: 16,
+    maximumMemoryGb: 32,
+    expectedMemoryGb: 24,
   },
   {
     key: "rtx_a4500",
@@ -54,6 +72,9 @@ export const GPU_POLICY: readonly GpuPolicyEntry[] = Object.freeze([
     exactIds: ["NVIDIA RTX A4500"],
     coldPriority: 5,
     emergency: false,
+    minimumMemoryGb: 16,
+    maximumMemoryGb: 32,
+    expectedMemoryGb: 20,
   },
   {
     key: "rtx_4000_ada",
@@ -61,6 +82,9 @@ export const GPU_POLICY: readonly GpuPolicyEntry[] = Object.freeze([
     exactIds: ["NVIDIA RTX 4000 Ada Generation"],
     coldPriority: 6,
     emergency: false,
+    minimumMemoryGb: 16,
+    maximumMemoryGb: 32,
+    expectedMemoryGb: 20,
   },
   {
     key: "rtx_2000_ada",
@@ -68,39 +92,52 @@ export const GPU_POLICY: readonly GpuPolicyEntry[] = Object.freeze([
     exactIds: ["NVIDIA RTX 2000 Ada Generation"],
     coldPriority: 100,
     emergency: true,
+    minimumMemoryGb: 16,
+    maximumMemoryGb: 32,
+    expectedMemoryGb: 16,
   },
-  {
-    key: "a40",
-    catalogNames: ["A40"],
-    exactIds: ["NVIDIA A40"],
-    coldPriority: 101,
-    emergency: true,
-  },
-  {
-    key: "rtx_a6000",
-    catalogNames: ["RTX A6000"],
-    exactIds: ["NVIDIA RTX A6000"],
-    coldPriority: 102,
-    emergency: true,
-  },
-  {
-    key: "l40",
-    catalogNames: ["L40"],
-    exactIds: ["NVIDIA L40"],
-    coldPriority: 103,
-    emergency: true,
-  },
-  {
-    key: "l40s",
-    catalogNames: ["L40S"],
-    exactIds: ["NVIDIA L40S"],
-    coldPriority: 104,
-    emergency: true,
-  },
-]);
+];
+
+export const GPU_POLICY: readonly GpuPolicyEntry[] = Object.freeze(
+  GPU_POLICY_DEFINITIONS.map((entry) =>
+    Object.freeze({
+      ...entry,
+      catalogNames: Object.freeze([...entry.catalogNames]),
+      exactIds: Object.freeze([...entry.exactIds]),
+    }),
+  ),
+);
 
 function normalizeCatalogName(value: string): string {
   return value.trim().replace(/\s+/g, " ").toUpperCase();
+}
+
+export function isDynamicGpuDisplayName(displayName: string): boolean {
+  const normalizedName = normalizeCatalogName(displayName);
+  return GPU_POLICY.some(
+    (entry) =>
+      entry.exactIds.length === 0 &&
+      entry.catalogNames.some((name) => normalizeCatalogName(name) === normalizedName),
+  );
+}
+
+export function isEmergencyGpuId(gpuId: string): boolean {
+  return GPU_POLICY.some(
+    (entry) => entry.emergency && entry.exactIds.includes(gpuId),
+  );
+}
+
+const REMOVED_GPU_IDS = new Set([
+  "NVIDIA A40",
+  "NVIDIA RTX A6000",
+  "NVIDIA L40",
+  "NVIDIA L40S",
+  "NVIDIA B200",
+].map(normalizeCatalogName));
+
+function isExplicitlyRemovedGpuId(value: string): boolean {
+  const normalized = normalizeCatalogName(value);
+  return REMOVED_GPU_IDS.has(normalized) || normalized.includes("RTX PRO 6000");
 }
 
 export interface CatalogGpuIdentity {
@@ -121,21 +158,67 @@ export function approveCatalogGpu(
   gpu: CatalogGpuIdentity,
   includeEmergencyTier: boolean,
 ): ApprovedCatalogGpu | null {
-  if (normalizeCatalogName(gpu.manufacturer) !== "NVIDIA" || gpu.memoryGb < 16) {
+  if (
+    normalizeCatalogName(gpu.manufacturer) !== "NVIDIA" ||
+    !Number.isFinite(gpu.memoryGb) ||
+    isExplicitlyRemovedGpuId(gpu.id)
+  ) {
     return null;
   }
   const normalizedName = normalizeCatalogName(gpu.name);
   const policy = GPU_POLICY.find(
-    (entry) =>
-      (entry.exactIds.includes(gpu.id) ||
-        entry.catalogNames.some((name) => normalizeCatalogName(name) === normalizedName)) &&
-      (!entry.emergency || includeEmergencyTier),
+    (entry) => {
+      const identityMatches =
+        entry.exactIds.length > 0
+          ? entry.exactIds.includes(gpu.id)
+          : entry.catalogNames.some((name) => normalizeCatalogName(name) === normalizedName);
+      return (
+        identityMatches &&
+        gpu.memoryGb >= entry.minimumMemoryGb &&
+        gpu.memoryGb <= entry.maximumMemoryGb &&
+        (!entry.emergency || includeEmergencyTier)
+      );
+    },
   );
   if (policy === undefined) {
     return null;
   }
   return Object.freeze({
     gpuId: gpu.id,
+    policyKey: policy.key,
+    coldPriority: policy.coldPriority,
+    emergency: policy.emergency,
+  });
+}
+
+/**
+ * Validates identity fields available on the Pod API. Static types require the
+ * documented exact ID. Only the two Blackwell types may use an exact catalog
+ * ID discovered from their canonical display name.
+ */
+export function approveManagedPodGpu(
+  gpuId: string,
+  displayName: string,
+  catalogApprovedGpuPolicies: ReadonlyMap<string, string> = new Map(),
+  includeEmergencyTier = false,
+): ApprovedCatalogGpu | null {
+  if (isExplicitlyRemovedGpuId(gpuId)) {
+    return null;
+  }
+  const normalizedName = normalizeCatalogName(displayName);
+  const policy = GPU_POLICY.find(
+    (entry) =>
+      (!entry.emergency || includeEmergencyTier) &&
+      (entry.exactIds.length > 0
+        ? entry.exactIds.includes(gpuId)
+        : catalogApprovedGpuPolicies.get(gpuId) === entry.key &&
+          entry.catalogNames.some((name) => normalizeCatalogName(name) === normalizedName)),
+  );
+  if (policy === undefined) {
+    return null;
+  }
+  return Object.freeze({
+    gpuId,
     policyKey: policy.key,
     coldPriority: policy.coldPriority,
     emergency: policy.emergency,
@@ -151,7 +234,7 @@ export function staticGpuPolicy(includeEmergencyTier: boolean): ReadonlyArray<
         return [];
       }
       const gpuId = entry.exactIds[0];
-      return gpuId === undefined ? [] : [{ ...entry, gpuId }];
+      return gpuId === undefined ? [] : [Object.freeze({ ...entry, gpuId })];
     }),
   );
 }

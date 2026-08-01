@@ -6,6 +6,7 @@
   "networkVolumeMountPath": "/workspace",
   "podNamePrefix": "imageforge",
   "workerPort": 8000,
+  "gpuCount": 1,
   "cloudLanes": ["secure"],
   "allowEmergencyGpuTier": false,
   "defaultImageCount": 450,
@@ -13,7 +14,7 @@
   "provisioningTimeoutMs": 1200000,
   "stopConfirmationTtlMs": 120000,
   "constraints": {
-    "allowedCudaVersions": ["12.8"],
+    "allowedCudaVersions": ["13.0"],
     "minRamPerGpuGb": 16
   },
   "benchmarkContract": {

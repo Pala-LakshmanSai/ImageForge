@@ -7,10 +7,6 @@ export const PRIMARY_APPROVED_GPU_IDS = [
 ] as const;
 
 export const EMERGENCY_GPU_IDS = [
-  "NVIDIA A40",
-  "NVIDIA RTX A6000",
-  "NVIDIA L40",
-  "NVIDIA L40S",
   "NVIDIA RTX 2000 Ada Generation",
 ] as const;
 
@@ -44,8 +40,9 @@ export const WORKER_PHASES = [
   "storage",
   "weights",
   "gpu_load",
-  "warm_up",
+  "warmup",
   "ready",
+  "error",
 ] as const;
 export type WorkerPhase = (typeof WORKER_PHASES)[number];
 
@@ -66,9 +63,9 @@ export type LifecyclePhase = (typeof LIFECYCLE_PHASES)[number];
 export interface GpuInventoryRequest {
   readonly gpuIds: readonly ApprovedGpuId[];
   readonly includeEmergencyTier: boolean;
-  readonly cloudLanes: readonly CloudLane[];
+  readonly cloudLanes: readonly ["secure"];
   readonly gpuCount: 1;
-  readonly dataCenterId: string;
+  readonly dataCenterId: "EU-RO-1";
 }
 
 export interface GpuOffer {
@@ -77,6 +74,8 @@ export interface GpuOffer {
   readonly coldPriority: number;
   readonly emergency: boolean;
   readonly displayName: string;
+  readonly manufacturer: string;
+  readonly memoryGb: number;
   readonly cloud: CloudLane;
   readonly hourlyPriceUsd: number | null;
   readonly availability: AvailabilityLevel;
@@ -116,9 +115,17 @@ export interface RankedGpuOffer extends GpuOffer {
   readonly estimatedJobCostPerImageUsd: number | null;
 }
 
-export interface PodConstraints {
-  readonly allowedCudaVersions?: readonly string[];
+export interface PodConstraintInput {
+  readonly allowedCudaVersions?: readonly ["13.0"];
   readonly minRamPerGpuGb?: number;
+  readonly minDiskBandwidthMbps?: number;
+  readonly minDownloadMbps?: number;
+  readonly minUploadMbps?: number;
+}
+
+export interface PodConstraints {
+  readonly allowedCudaVersions: readonly ["13.0"];
+  readonly minRamPerGpuGb: number;
   readonly minDiskBandwidthMbps?: number;
   readonly minDownloadMbps?: number;
   readonly minUploadMbps?: number;
@@ -127,11 +134,12 @@ export interface PodConstraints {
 export interface RunPodClientConfig {
   readonly templateId: string;
   readonly networkVolumeId: string;
-  readonly networkVolumeDataCenterId: string;
+  readonly networkVolumeDataCenterId: "EU-RO-1";
   readonly networkVolumeMountPath: string;
   readonly podNamePrefix: string;
-  readonly workerPort: number;
-  readonly cloudLanes: readonly CloudLane[];
+  readonly workerPort: 8000;
+  readonly gpuCount: 1;
+  readonly cloudLanes: readonly ["secure"];
   readonly allowEmergencyGpuTier: boolean;
   readonly defaultImageCount: number;
   readonly refreshIntervalMs: number;
@@ -146,7 +154,13 @@ export interface PodDiscoveryCriteria {
   readonly podNamePrefix: string;
   readonly templateId: string;
   readonly networkVolumeId: string;
-  readonly workerPort: number;
+  readonly networkVolumeMountPath: string;
+  readonly workerPort: 8000;
+  readonly dataCenterId: "EU-RO-1";
+  readonly cloud: "secure";
+  readonly gpuCount: 1;
+  readonly interruptible: false;
+  readonly includeEmergencyGpuTier: boolean;
 }
 
 export interface ManagedPod {
@@ -154,9 +168,14 @@ export interface ManagedPod {
   readonly name: string;
   readonly status: PodStatus;
   readonly gpuId: ApprovedGpuId | null;
+  readonly gpuDisplayName: string | null;
+  readonly gpuCount: number | null;
   readonly cloud: CloudLane | null;
+  readonly dataCenterId: string | null;
   readonly templateId: string | null;
   readonly networkVolumeId: string | null;
+  readonly networkVolumeMountPath: string | null;
+  readonly interruptible: boolean | null;
   readonly hourlyPriceUsd: number | null;
   readonly createdAt: string | null;
   readonly startRequestId: string | null;
@@ -168,18 +187,21 @@ export interface CreatePodFromTemplateRequest {
   readonly startRequestId: string;
   readonly templateId: string;
   readonly networkVolumeId: string;
-  readonly networkVolumeDataCenterId: string;
+  readonly networkVolumeDataCenterId: "EU-RO-1";
   readonly networkVolumeMountPath: string;
-  readonly workerPort: number;
-  readonly cloud: CloudLane;
+  readonly workerPort: 8000;
+  readonly cloud: "secure";
   readonly gpuTypeIds: readonly ApprovedGpuId[];
   readonly gpuCount: 1;
   readonly gpuTypePriority: "custom";
   readonly interruptible: false;
+  readonly allowEmergencyGpuTier: boolean;
   readonly constraints: PodConstraints;
 }
 
 export interface RunPodProvider {
+  readonly requiresWorkerHealthProbe?: boolean;
+
   listGpuInventory(
     request: GpuInventoryRequest,
     signal?: AbortSignal,

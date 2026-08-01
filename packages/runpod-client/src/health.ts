@@ -3,7 +3,7 @@ import type { FetchTransport } from "./http.js";
 import { WORKER_PHASES, type WorkerHealth, type WorkerHealthProbe } from "./types.js";
 import { asNumber, asRecord, asString } from "./validation.js";
 
-const RUNPOD_PROXY_HOST = /^[A-Za-z0-9][A-Za-z0-9-]*-\d+\.proxy\.runpod\.net$/;
+const RUNPOD_PROXY_HOST = /^[A-Za-z0-9][A-Za-z0-9-]{0,57}-8000\.proxy\.runpod\.net$/;
 
 export interface HttpWorkerHealthProbeOptions {
   readonly fetchTransport?: FetchTransport;
@@ -30,8 +30,10 @@ export class HttpWorkerHealthProbe implements WorkerHealthProbe {
     if (
       endpoint.protocol !== "https:" ||
       !RUNPOD_PROXY_HOST.test(endpoint.hostname) ||
+      endpoint.port !== "" ||
       endpoint.username !== "" ||
       endpoint.password !== "" ||
+      endpoint.pathname !== "/" ||
       endpoint.search !== "" ||
       endpoint.hash !== ""
     ) {
@@ -47,6 +49,7 @@ export class HttpWorkerHealthProbe implements WorkerHealthProbe {
       const response = await this.#fetch(endpoint.toString(), {
         method: "GET",
         headers: { Accept: "application/json" },
+        redirect: "error",
         ...(signal === undefined ? {} : { signal }),
       });
       if (!response.ok) {
