@@ -20,6 +20,7 @@ MAX_PROMPT_UTF8_BYTES: Final = 4096
 MAX_GENERATION_ATTEMPTS: Final = 3
 
 MIN_GPU_MEMORY_BYTES: Final = 16 * 1024**3
+MIN_CUDA_VERSION: Final = (13, 0)
 
 # The root single-file checkpoint duplicates transformer/ and is deliberately excluded.
 MODEL_ALLOW_PATTERNS: Final = (

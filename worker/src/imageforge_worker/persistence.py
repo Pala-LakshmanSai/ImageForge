@@ -1,20 +1,39 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 import hashlib
 import json
 import os
 import shutil
 import tempfile
 import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
-from .domain import BatchManifest, ImageRecord
+from .domain import LOCK_HOLDING_STATES, BatchManifest, ImageRecord, ImageState
+
+MINIMUM_RETENTION = timedelta(hours=24)
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupResult:
+    images_deleted: int = 0
+    files_deleted: int = 0
+    bytes_deleted: int = 0
 
 
 class ManifestStore(Protocol):
     def initialize(self) -> None: ...
+
+    @property
+    def active_lease_held(self) -> bool: ...
+
+    def try_acquire_active_lease(self) -> bool: ...
+
+    def release_active_lease(self) -> None: ...
 
     def list_batch_ids(self) -> list[str]: ...
 
@@ -34,6 +53,10 @@ class ManifestStore(Protocol):
 
     def quarantine_artifacts(self, batch_id: str, index: int) -> None: ...
 
+    def cleanup_acknowledged_artifacts(
+        self, *, now: datetime, minimum_age: timedelta = MINIMUM_RETENTION
+    ) -> CleanupResult: ...
+
 
 class FileManifestStore:
     """Crash-safe JSON manifests and server-named immutable artifacts."""
@@ -42,6 +65,11 @@ class FileManifestStore:
         self.root = root
         self.batches_root = root / "batches"
         self.fsync_writes = fsync_writes
+        self._active_lease_descriptor: int | None = None
+
+    @property
+    def active_lease_held(self) -> bool:
+        return self._active_lease_descriptor is not None
 
     def initialize(self) -> None:
         self.batches_root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -49,6 +77,34 @@ class FileManifestStore:
         self._atomic_write(probe, b"imageforge-storage-probe\n")
         probe.unlink(missing_ok=True)
         self._fsync_directory(self.root)
+
+    def try_acquire_active_lease(self) -> bool:
+        if self._active_lease_descriptor is not None:
+            return True
+        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        flags = os.O_RDWR | os.O_CREAT
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        descriptor = os.open(self.root / ".active-batch.lock", flags, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            os.close(descriptor)
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                return False
+            raise
+        self._active_lease_descriptor = descriptor
+        return True
+
+    def release_active_lease(self) -> None:
+        descriptor = self._active_lease_descriptor
+        self._active_lease_descriptor = None
+        if descriptor is None:
+            return
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
     def list_batch_ids(self) -> list[str]:
         if not self.batches_root.exists():
@@ -64,6 +120,7 @@ class FileManifestStore:
         return sorted(result)
 
     def create(self, manifest: BatchManifest) -> None:
+        self._require_active_lease()
         batch_dir = self._batch_dir(manifest.batch_id)
         batch_dir.mkdir(mode=0o700, parents=False, exist_ok=False)
         (batch_dir / "artifacts").mkdir(mode=0o700)
@@ -81,6 +138,7 @@ class FileManifestStore:
         return BatchManifest.model_validate_json(payload)
 
     def save(self, manifest: BatchManifest) -> None:
+        self._require_active_lease()
         manifest.recalculate_progress()
         payload = json.dumps(
             manifest.model_dump(mode="json"),
@@ -96,6 +154,7 @@ class FileManifestStore:
     def write_artifacts(
         self, batch_id: str, index: int, jpeg: bytes, preview: bytes
     ) -> tuple[str, str]:
+        self._require_active_lease()
         full_name = f"artifacts/{index:06d}.jpg"
         preview_name = f"previews/{index:06d}.webp"
         self._write_immutable(self.artifact_path(batch_id, full_name), jpeg)
@@ -128,6 +187,7 @@ class FileManifestStore:
         )
 
     def quarantine_artifacts(self, batch_id: str, index: int) -> None:
+        self._require_active_lease()
         batch_dir = self._batch_dir(batch_id)
         quarantine_dir = batch_dir / "quarantine"
         quarantine_dir.mkdir(mode=0o700, exist_ok=True)
@@ -143,9 +203,72 @@ class FileManifestStore:
         self._fsync_directory(batch_dir / "artifacts")
         self._fsync_directory(batch_dir / "previews")
 
+    def cleanup_acknowledged_artifacts(
+        self, *, now: datetime, minimum_age: timedelta = MINIMUM_RETENTION
+    ) -> CleanupResult:
+        """Explicitly remove verified artifacts acknowledged at least 24 hours ago.
+
+        ImageForge never calls this automatically. The manifest, checksums, and receipt remain
+        durable so cleanup cannot be mistaken for an incomplete generation after a restart.
+        """
+
+        self._require_active_lease()
+        if now.tzinfo is None:
+            raise ValueError("cleanup time must be timezone-aware")
+        if minimum_age < MINIMUM_RETENTION:
+            raise ValueError("acknowledged artifacts must be retained for at least 24 hours")
+
+        images_deleted = 0
+        files_deleted = 0
+        bytes_deleted = 0
+        deleted_at = now.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        for batch_id in self.list_batch_ids():
+            manifest = self.load(batch_id)
+            if manifest.state in LOCK_HOLDING_STATES:
+                continue
+            changed = False
+            for image in manifest.images:
+                receipt = image.receipt
+                if (
+                    image.status != ImageState.DOWNLOADED
+                    or receipt is None
+                    or receipt.user_id != manifest.owner.user_id
+                    or image.artifacts_deleted_at is not None
+                ):
+                    continue
+                acknowledged_at = _parse_timestamp(receipt.acknowledged_at)
+                if acknowledged_at is None or now.astimezone(UTC) - acknowledged_at < minimum_age:
+                    continue
+                if not self.verify_record_artifacts(batch_id, image):
+                    continue
+                assert image.filename is not None
+                assert image.preview_filename is not None
+                full = self.artifact_path(batch_id, image.filename)
+                preview = self.artifact_path(batch_id, image.preview_filename)
+                bytes_deleted += full.stat().st_size + preview.stat().st_size
+                full.unlink()
+                preview.unlink()
+                self._fsync_directory(full.parent)
+                self._fsync_directory(preview.parent)
+                image.artifacts_deleted_at = deleted_at
+                images_deleted += 1
+                files_deleted += 2
+                changed = True
+            if changed:
+                self.save(manifest)
+        return CleanupResult(
+            images_deleted=images_deleted,
+            files_deleted=files_deleted,
+            bytes_deleted=bytes_deleted,
+        )
+
     def _batch_dir(self, batch_id: str) -> Path:
         normalized = str(uuid.UUID(str(batch_id)))
         return self.batches_root / normalized
+
+    def _require_active_lease(self) -> None:
+        if self._active_lease_descriptor is None:
+            raise RuntimeError("manifest and artifact mutations require the active-volume lease")
 
     def _write_immutable(self, path: Path, payload: bytes) -> None:
         if path.exists():
@@ -202,3 +325,13 @@ class FileManifestStore:
 def clone_store(source: Path, target: Path) -> None:
     """Test helper for simulating a persistent volume attached to a new Pod."""
     shutil.copytree(source, target, dirs_exist_ok=True)
+
+
+def _parse_timestamp(raw: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC)

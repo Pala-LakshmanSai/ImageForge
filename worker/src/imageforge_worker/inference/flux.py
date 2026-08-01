@@ -9,6 +9,7 @@ from typing import Any
 from PIL import Image
 
 from ..constants import (
+    MIN_CUDA_VERSION,
     MIN_GPU_MEMORY_BYTES,
     MODEL_ALLOW_PATTERNS,
     MODEL_ID,
@@ -81,6 +82,10 @@ class FluxInferenceAdapter:
         if torch.cuda.device_count() != 1:
             self._torch = torch
             raise RuntimeError("ImageForge requires exactly one visible CUDA GPU")
+        cuda_version = _parse_cuda_version(torch.version.cuda)
+        if cuda_version < MIN_CUDA_VERSION:
+            self._torch = torch
+            raise RuntimeError("ImageForge requires a PyTorch CUDA runtime of at least 13.0")
         gpu_name = torch.cuda.get_device_name(0)
         total_memory = torch.cuda.get_device_properties(0).total_memory
         self._torch = torch
@@ -192,3 +197,13 @@ class FluxInferenceAdapter:
             "peak_memory_allocated_bytes": torch.cuda.max_memory_allocated(0),
             "peak_memory_reserved_bytes": torch.cuda.max_memory_reserved(0),
         }
+
+
+def _parse_cuda_version(raw: object) -> tuple[int, int]:
+    if not isinstance(raw, str):
+        raise RuntimeError("PyTorch did not report its compiled CUDA runtime")
+    parts = raw.split(".", maxsplit=2)
+    try:
+        return int(parts[0]), int(parts[1])
+    except (IndexError, ValueError) as exc:
+        raise RuntimeError("PyTorch reported an invalid compiled CUDA runtime") from exc

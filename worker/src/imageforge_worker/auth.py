@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from fastapi import Request
 
-from .config import Credential
+from .config import BEARER_TOKEN_PATTERN, Credential
 from .errors import WorkerError
 
 
@@ -27,6 +27,8 @@ class BearerAuthenticator:
             and scheme.casefold() == "bearer"
             and bool(candidate)
             and len(candidate) <= 512
+            and candidate.isascii()
+            and BEARER_TOKEN_PATTERN.fullmatch(candidate) is not None
         )
         candidate_to_compare = candidate if structurally_valid else "\0invalid-credential\0"
 

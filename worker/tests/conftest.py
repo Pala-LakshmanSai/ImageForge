@@ -89,6 +89,7 @@ async def wait_for_batch(
     current_index: int | None = None,
     token: str = TOKEN_A,
     timeout: float = 30,
+    poll_interval: float = 0.005,
 ) -> dict:
     deadline = asyncio.get_running_loop().time() + timeout
     last: dict | None = None
@@ -107,4 +108,4 @@ async def wait_for_batch(
             return last
         if asyncio.get_running_loop().time() >= deadline:
             raise AssertionError(f"batch did not reach requested condition: {last}")
-        await asyncio.sleep(0.005)
+        await asyncio.sleep(poll_interval)

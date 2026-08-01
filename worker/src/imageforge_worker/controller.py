@@ -57,7 +57,7 @@ class _ClaimedAttempt:
 
 
 class GenerationController:
-    """Owns the one process-level generation lease and all manifest transitions."""
+    """Owns the process-local controller and shared-volume generation lease."""
 
     def __init__(
         self,
@@ -86,17 +86,18 @@ class GenerationController:
             if self._initialized:
                 return
             self.store.initialize()
-            active_manifests: list[BatchManifest] = []
-            for batch_id in self.store.list_batch_ids():
-                manifest = self.store.load(batch_id)
-                changed = self._recover_manifest(manifest)
-                if manifest.state in LOCK_HOLDING_STATES:
-                    active_manifests.append(manifest)
-                if changed:
-                    self.store.save(manifest)
-            if len(active_manifests) > 1:
-                raise RuntimeError("persistent volume contains multiple active batch leases")
-            self._active_batch_id = active_manifests[0].batch_id if active_manifests else None
+            if self.store.try_acquire_active_lease():
+                try:
+                    active = self._discover_active_locked(recover=True)
+                except BaseException:
+                    self.store.release_active_lease()
+                    raise
+                self._active_batch_id = active.batch_id if active is not None else None
+                if active is None:
+                    self.store.release_active_lease()
+            else:
+                active = self._discover_active_locked(recover=False)
+                self._active_batch_id = active.batch_id if active is not None else None
             self._initialized = True
 
     def _recover_manifest(self, manifest: BatchManifest) -> bool:
@@ -104,6 +105,12 @@ class GenerationController:
         invalidated_artifact = False
         for image in manifest.images:
             if image.status in {ImageState.READY, ImageState.DOWNLOADED}:
+                if (
+                    image.artifacts_deleted_at is not None
+                    and image.status == ImageState.DOWNLOADED
+                    and image.receipt is not None
+                ):
+                    continue
                 if not self.store.verify_record_artifacts(manifest.batch_id, image):
                     self.store.quarantine_artifacts(manifest.batch_id, image.index)
                     image.status = ImageState.PENDING
@@ -144,27 +151,34 @@ class GenerationController:
             except asyncio.CancelledError:
                 pass
         async with self._lock:
-            if self._active_batch_id is None:
-                return
-            manifest = self.store.load(self._active_batch_id)
-            if manifest.state == BatchState.RUNNING:
-                for image in manifest.images:
-                    if image.status in {ImageState.GENERATING, ImageState.RETRYING}:
-                        self.store.quarantine_artifacts(manifest.batch_id, image.index)
-                        image.status = ImageState.PENDING
-                        image.error = None
-                        image.attempts_in_cycle = 0
-                manifest.state = BatchState.INTERRUPTED
-                manifest.interrupted_at = utc_now()
-                manifest.pause_requested = False
-                self.store.save(manifest)
+            try:
+                if not self.store.active_lease_held or self._active_batch_id is None:
+                    return
+                manifest = self.store.load(self._active_batch_id)
+                if manifest.state == BatchState.RUNNING:
+                    for image in manifest.images:
+                        if image.status in {ImageState.GENERATING, ImageState.RETRYING}:
+                            self.store.quarantine_artifacts(manifest.batch_id, image.index)
+                            image.status = ImageState.PENDING
+                            image.error = None
+                            image.attempts_in_cycle = 0
+                    manifest.state = BatchState.INTERRUPTED
+                    manifest.interrupted_at = utc_now()
+                    manifest.pause_requested = False
+                    self.store.save(manifest)
+            finally:
+                self.store.release_active_lease()
+
+    async def release_lease_after_boot_failure(self) -> None:
+        """Allow a healthy replacement Pod to adopt an interrupted batch."""
+
+        async with self._lock:
+            self.store.release_active_lease()
 
     async def status(self, principal: Principal, *, ready: bool) -> StatusResponse:
         self._ensure_initialized()
         async with self._lock:
-            active: BatchManifest | None = None
-            if self._active_batch_id is not None:
-                active = self.store.load(self._active_batch_id)
+            active = self._refresh_active_observation_locked()
             is_owner = active is not None and active.owner.user_id == principal.user_id
             summary = (
                 BatchSummary(
@@ -183,7 +197,7 @@ class GenerationController:
                 active_batch=summary,
                 permissions=StatusPermissions(
                     can_create=ready and active is None,
-                    can_manage_active=is_owner,
+                    can_manage_active=is_owner and self.store.active_lease_held,
                     is_owner=is_owner,
                 ),
             )
@@ -193,7 +207,10 @@ class GenerationController:
     ) -> BatchManifest:
         self._ensure_initialized()
         async with self._lock:
-            self._raise_if_busy()
+            await self._acquire_for_new_batch_locked()
+            active = self._refresh_active_observation_locked()
+            if active is not None:
+                self._raise_busy(active)
             now = utc_now()
             batch_id = str(uuid.uuid4())
             images = [
@@ -209,7 +226,11 @@ class GenerationController:
                 images=images,
                 progress=BatchProgress(total=len(images)),
             )
-            self.store.create(manifest)
+            try:
+                self.store.create(manifest)
+            except BaseException:
+                self.store.release_active_lease()
+                raise
             self._active_batch_id = batch_id
             self._launch_runner_locked(batch_id)
             return manifest
@@ -225,7 +246,10 @@ class GenerationController:
             manifest = self._load_owned(principal, batch_id)
             if manifest.state == BatchState.PAUSED:
                 return manifest
+            await self._require_mutation_lease_locked()
+            manifest = self._load_owned(principal, batch_id)
             if manifest.state != BatchState.RUNNING:
+                self._release_if_no_active_locked()
                 self._invalid_state(manifest, "pause")
             if any(image.status == ImageState.GENERATING for image in manifest.images):
                 manifest.pause_requested = True
@@ -240,11 +264,23 @@ class GenerationController:
         async with self._lock:
             manifest = self._load_owned(principal, batch_id)
             if manifest.state == BatchState.RUNNING:
-                return manifest
+                if self.store.active_lease_held:
+                    return manifest
+                await self._require_mutation_lease_locked()
+                manifest = self._load_owned(principal, batch_id)
+                if manifest.state == BatchState.RUNNING:
+                    return manifest
             if manifest.state not in {BatchState.PAUSED, BatchState.INTERRUPTED}:
                 self._invalid_state(manifest, "resume")
+            await self._acquire_for_new_batch_locked()
+            manifest = self._load_owned(principal, batch_id)
+            if manifest.state not in {BatchState.PAUSED, BatchState.INTERRUPTED}:
+                self._release_if_no_active_locked()
+                self._invalid_state(manifest, "resume")
             if self._active_batch_id not in {None, batch_id}:
-                self._raise_if_busy()
+                active = self._refresh_active_observation_locked()
+                if active is not None:
+                    self._raise_busy(active)
             for image in manifest.images:
                 if image.status in {ImageState.GENERATING, ImageState.RETRYING}:
                     self.store.quarantine_artifacts(batch_id, image.index)
@@ -265,8 +301,18 @@ class GenerationController:
         async with self._lock:
             manifest = self._load_owned(principal, batch_id)
             if manifest.state == BatchState.CANCELLED:
+                self._release_if_no_active_locked()
                 return manifest
             if manifest.state not in LOCK_HOLDING_STATES:
+                self._release_if_no_active_locked()
+                self._invalid_state(manifest, "cancel")
+            await self._require_mutation_lease_locked()
+            manifest = self._load_owned(principal, batch_id)
+            if manifest.state == BatchState.CANCELLED:
+                self._release_if_no_active_locked()
+                return manifest
+            if manifest.state not in LOCK_HOLDING_STATES:
+                self._release_if_no_active_locked()
                 self._invalid_state(manifest, "cancel")
             if manifest.state == BatchState.RUNNING and any(
                 image.status == ImageState.GENERATING for image in manifest.images
@@ -277,7 +323,7 @@ class GenerationController:
             else:
                 self._finalize_cancel(manifest)
                 self.store.save(manifest)
-                self._release_lease_locked(batch_id)
+                self._release_batch_lease_locked(batch_id)
             return manifest
 
     async def retry_failed(self, principal: Principal, batch_id: str) -> BatchManifest:
@@ -285,6 +331,7 @@ class GenerationController:
         async with self._lock:
             manifest = self._load_owned(principal, batch_id)
             if manifest.state not in {BatchState.COMPLETED, BatchState.FAILED}:
+                self._release_if_no_active_locked()
                 self._invalid_state(manifest, "retry failed images in")
             failed = [image for image in manifest.images if image.status == ImageState.FAILED]
             if not failed:
@@ -293,7 +340,22 @@ class GenerationController:
                     code="no_failed_images",
                     message="This batch has no failed images to retry.",
                 )
-            self._raise_if_busy()
+            await self._acquire_for_new_batch_locked()
+            active = self._refresh_active_observation_locked()
+            if active is not None:
+                self._raise_busy(active)
+            manifest = self._load_owned(principal, batch_id)
+            if manifest.state not in {BatchState.COMPLETED, BatchState.FAILED}:
+                self._release_if_no_active_locked()
+                self._invalid_state(manifest, "retry failed images in")
+            failed = [image for image in manifest.images if image.status == ImageState.FAILED]
+            if not failed:
+                self._release_if_no_active_locked()
+                raise WorkerError(
+                    status_code=409,
+                    code="no_failed_images",
+                    message="This batch has no failed images to retry.",
+                )
             for image in failed:
                 image.status = ImageState.PENDING
                 image.error = None
@@ -315,50 +377,66 @@ class GenerationController:
     ) -> ReceiptResponse:
         self._ensure_initialized()
         async with self._lock:
-            manifest = self._load_owned(principal, batch_id)
-            records: list[tuple[ImageRecord, str, int]] = []
-            for receipt in request.receipts:
-                image = self._find_image(manifest, receipt.index)
-                if image.status not in {ImageState.READY, ImageState.DOWNLOADED}:
-                    raise WorkerError(
-                        status_code=409,
-                        code="artifact_not_ready",
-                        message=f"Image {receipt.index} is not ready for acknowledgement.",
-                    )
-                if image.sha256 is None or image.size_bytes is None:
-                    raise WorkerError(
-                        status_code=409,
-                        code="artifact_not_ready",
-                        message=f"Image {receipt.index} is not ready for acknowledgement.",
-                    )
-                if not secrets.compare_digest(image.sha256, receipt.sha256) or (
-                    image.size_bytes != receipt.size_bytes
-                ):
-                    raise WorkerError(
-                        status_code=409,
-                        code="checksum_mismatch",
-                        message=(
-                            f"Image {receipt.index} did not match the server checksum and size."
-                        ),
-                        details={"index": receipt.index},
-                    )
-                records.append((image, receipt.sha256, receipt.size_bytes))
+            self._load_owned(principal, batch_id)
+            already_held = self.store.active_lease_held
+            await self._require_mutation_lease_locked()
+            try:
+                return self._accept_receipts_locked(principal, batch_id, request)
+            finally:
+                if not already_held:
+                    self._release_if_no_active_locked()
 
-            acknowledged_at = utc_now()
-            for image, sha256, size_bytes in records:
-                image.status = ImageState.DOWNLOADED
-                image.receipt = StoredReceipt(
-                    user_id=principal.user_id,
-                    sha256=sha256,
-                    size_bytes=size_bytes,
-                    acknowledged_at=acknowledged_at,
+    def _accept_receipts_locked(
+        self, principal: Principal, batch_id: str, request: ReceiptRequest
+    ) -> ReceiptResponse:
+        manifest = self._load_owned(principal, batch_id)
+        records: list[tuple[ImageRecord, str, int]] = []
+        for receipt in request.receipts:
+            image = self._find_image(manifest, receipt.index)
+            if image.artifacts_deleted_at is not None:
+                raise WorkerError(
+                    status_code=410,
+                    code="artifact_expired",
+                    message=f"Image {receipt.index} is no longer retained by the worker.",
                 )
-            self.store.save(manifest)
-            return ReceiptResponse(
-                batch_id=batch_id,
-                accepted=[receipt.index for receipt in request.receipts],
-                progress=manifest.progress,
+            if image.status not in {ImageState.READY, ImageState.DOWNLOADED}:
+                raise WorkerError(
+                    status_code=409,
+                    code="artifact_not_ready",
+                    message=f"Image {receipt.index} is not ready for acknowledgement.",
+                )
+            if image.sha256 is None or image.size_bytes is None:
+                raise WorkerError(
+                    status_code=409,
+                    code="artifact_not_ready",
+                    message=f"Image {receipt.index} is not ready for acknowledgement.",
+                )
+            if not secrets.compare_digest(image.sha256, receipt.sha256) or (
+                image.size_bytes != receipt.size_bytes
+            ):
+                raise WorkerError(
+                    status_code=409,
+                    code="checksum_mismatch",
+                    message=f"Image {receipt.index} did not match the server checksum and size.",
+                    details={"index": receipt.index},
+                )
+            records.append((image, receipt.sha256, receipt.size_bytes))
+
+        acknowledged_at = utc_now()
+        for image, sha256, size_bytes in records:
+            image.status = ImageState.DOWNLOADED
+            image.receipt = StoredReceipt(
+                user_id=principal.user_id,
+                sha256=sha256,
+                size_bytes=size_bytes,
+                acknowledged_at=acknowledged_at,
             )
+        self.store.save(manifest)
+        return ReceiptResponse(
+            batch_id=batch_id,
+            accepted=[receipt.index for receipt in request.receipts],
+            progress=manifest.progress,
+        )
 
     async def artifact(
         self, principal: Principal, batch_id: str, index: int, *, preview: bool
@@ -367,6 +445,12 @@ class GenerationController:
         async with self._lock:
             manifest = self._load_owned(principal, batch_id)
             image = self._find_image(manifest, index)
+            if image.artifacts_deleted_at is not None:
+                raise WorkerError(
+                    status_code=410,
+                    code="artifact_expired",
+                    message=f"Image {index} is no longer retained by the worker.",
+                )
             if image.status not in {ImageState.READY, ImageState.DOWNLOADED}:
                 raise WorkerError(
                     status_code=409,
@@ -407,7 +491,7 @@ class GenerationController:
             if manifest.cancel_requested:
                 self._finalize_cancel(manifest)
                 self.store.save(manifest)
-                self._release_lease_locked(batch_id)
+                self._release_batch_lease_locked(batch_id)
                 return None
             if manifest.pause_requested:
                 manifest.state = BatchState.PAUSED
@@ -426,7 +510,7 @@ class GenerationController:
                 manifest.state = BatchState.COMPLETED
                 manifest.completed_at = utc_now()
                 self.store.save(manifest)
-                self._release_lease_locked(batch_id)
+                self._release_batch_lease_locked(batch_id)
                 return None
             image.status = ImageState.GENERATING
             image.attempts += 1
@@ -470,6 +554,7 @@ class GenerationController:
             image.finished_at = finished_at
             image.status = ImageState.READY
             image.error = None
+            image.artifacts_deleted_at = None
             image.attempt_history.append(
                 AttemptRecord(
                     attempt=claimed.attempt,
@@ -572,7 +657,7 @@ class GenerationController:
                 manifest.completed_at = utc_now()
                 self.store.save(manifest)
             finally:
-                self._release_lease_locked(batch_id)
+                self._release_batch_lease_locked(batch_id)
 
     def _launch_runner_locked(self, batch_id: str) -> None:
         if self._closing:
@@ -587,13 +672,85 @@ class GenerationController:
         if self._runner_task is task:
             self._runner_task = None
 
-    def _raise_if_busy(self) -> None:
-        if self._active_batch_id is None:
+    def _discover_active_locked(self, *, recover: bool) -> BatchManifest | None:
+        active_manifests: list[BatchManifest] = []
+        for batch_id in self.store.list_batch_ids():
+            manifest = self.store.load(batch_id)
+            changed = self._recover_manifest(manifest) if recover else False
+            if manifest.state in LOCK_HOLDING_STATES:
+                active_manifests.append(manifest)
+            if changed:
+                self.store.save(manifest)
+        if len(active_manifests) > 1:
+            raise RuntimeError("persistent volume contains multiple active batch leases")
+        return active_manifests[0] if active_manifests else None
+
+    def _refresh_active_observation_locked(self) -> BatchManifest | None:
+        if self._active_batch_id is not None:
+            try:
+                active = self.store.load(self._active_batch_id)
+            except FileNotFoundError:
+                active = None
+            if active is not None and active.state in LOCK_HOLDING_STATES:
+                return active
+        active = self._discover_active_locked(recover=False)
+        self._active_batch_id = active.batch_id if active is not None else None
+        return active
+
+    async def _acquire_for_new_batch_locked(self) -> None:
+        if self.store.active_lease_held:
             return
-        active = self.store.load(self._active_batch_id)
-        if active.state not in LOCK_HOLDING_STATES:
-            self._active_batch_id = None
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while True:
+            if self.store.try_acquire_active_lease():
+                try:
+                    active = self._discover_active_locked(recover=True)
+                except BaseException:
+                    self.store.release_active_lease()
+                    raise
+                self._active_batch_id = active.batch_id if active is not None else None
+                return
+            active = self._discover_active_locked(recover=False)
+            self._active_batch_id = active.batch_id if active is not None else None
+            if active is not None:
+                self._raise_busy(active)
+            if asyncio.get_running_loop().time() >= deadline:
+                raise WorkerError(
+                    status_code=423,
+                    code="worker_volume_locked",
+                    message="Another worker process is updating the shared volume.",
+                )
+            await asyncio.sleep(0.01)
+
+    async def _require_mutation_lease_locked(self) -> None:
+        if self.store.active_lease_held:
             return
+        if self.store.try_acquire_active_lease():
+            try:
+                active = self._discover_active_locked(recover=True)
+            except BaseException:
+                self.store.release_active_lease()
+                raise
+            self._active_batch_id = active.batch_id if active is not None else None
+            return
+        active = self._discover_active_locked(recover=False)
+        self._active_batch_id = active.batch_id if active is not None else None
+        details = None
+        if active is not None:
+            details = {
+                "owner": active.owner.display_name,
+                "completed": active.progress.completed,
+                "total": active.progress.total,
+            }
+        raise WorkerError(
+            status_code=423,
+            code="worker_standby",
+            message="Another worker process owns the active shared-volume lease.",
+            details=details,
+        )
+
+    @staticmethod
+    def _raise_busy(active: BatchManifest) -> None:
         completed = active.progress.completed
         total = active.progress.total
         raise WorkerError(
@@ -607,9 +764,15 @@ class GenerationController:
             },
         )
 
-    def _release_lease_locked(self, batch_id: str) -> None:
+    def _release_batch_lease_locked(self, batch_id: str) -> None:
         if self._active_batch_id == batch_id:
             self._active_batch_id = None
+            self.store.release_active_lease()
+
+    def _release_if_no_active_locked(self) -> None:
+        active = self._refresh_active_observation_locked()
+        if active is None:
+            self.store.release_active_lease()
 
     @staticmethod
     def _finalize_cancel(manifest: BatchManifest) -> None:

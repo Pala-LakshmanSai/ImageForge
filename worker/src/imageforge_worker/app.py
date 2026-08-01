@@ -125,6 +125,7 @@ async def _boot(runtime: WorkerRuntime) -> None:
     except Exception as exc:
         error_id = uuid.uuid4().hex
         logger.error("worker boot failed error_id=%s error_type=%s", error_id, type(exc).__name__)
+        await runtime.controller.release_lease_after_boot_failure()
         await runtime.health.fail(error_id)
 
 

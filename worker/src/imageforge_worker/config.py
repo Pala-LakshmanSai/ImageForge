@@ -11,6 +11,7 @@ from typing import Any
 from .constants import MAX_GENERATION_ATTEMPTS, MODEL_ID, MODEL_REVISION
 
 _USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+BEARER_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9._~+/\-]+=*$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,8 +25,8 @@ class Credential:
             raise ValueError("credential user_id must be a safe 1-64 character identifier")
         if not self.display_name.strip() or len(self.display_name) > 80:
             raise ValueError("credential display_name must contain 1-80 characters")
-        if len(self.token) < 16 or len(self.token) > 512 or self.token.strip() != self.token:
-            raise ValueError("worker bearer credentials must contain 16-512 non-edge-space chars")
+        if not 16 <= len(self.token) <= 512 or not BEARER_TOKEN_PATTERN.fullmatch(self.token):
+            raise ValueError("worker bearer credentials must be 16-512 ASCII bearer-token chars")
 
 
 @dataclass(frozen=True, slots=True)

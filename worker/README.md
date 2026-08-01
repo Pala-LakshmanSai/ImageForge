@@ -1,8 +1,8 @@
 # ImageForge worker
 
 This directory contains the Python 3.11/FastAPI worker for one ImageForge GPU.
-It owns exactly one process-level batch lease, generates images sequentially on
-one approved GPU, and stores crash-safe manifests on the RunPod network volume.
+It owns exactly one shared-volume POSIX batch lease, generates images sequentially
+on one approved GPU, and stores crash-safe manifests on the RunPod network volume.
 It never creates, stops, or terminates a Pod.
 
 ## Runtime contract
@@ -10,13 +10,14 @@ It never creates, stops, or terminates a Pod.
 - API schema: `1`
 - model: `black-forest-labs/FLUX.2-klein-4B`
 - model revision: `e7b7dc27f91deacad38e78976d1f2b499d76a294`
-- precision: BF16, loaded directly onto one NVIDIA CUDA device with at least 16 GiB VRAM
+- precision: BF16, loaded directly onto one NVIDIA CUDA 13.0+ device with at least 16 GiB VRAM
 - output: 1280x720 JPEG quality 95 and 320x180 WebP preview
 - inference: four steps, guidance 1.0
 - retries: one initial attempt and two automatic retries
 - prompts: 1-500, at most 4096 UTF-8 bytes each
 
-The Docker base image, Python minor version, direct dependencies, PyTorch,
+The CUDA 13.0 Docker base supports the approved Ada and Blackwell families. The
+Docker base image, Python minor version, direct dependencies, PyTorch,
 Diffusers, model revision, and schema are pinned. The production adapter uses
 `local_files_only=True` while all Hugging Face offline flags are set. Model
 weights must be provisioned once onto `/workspace/models/huggingface` before a
@@ -30,7 +31,9 @@ python -m imageforge_worker.prepare_model \
   --confirm-download
 ```
 
-The command pins the same model revision and downloads only `model_index.json`
+`--confirm-download` temporarily disables only `HF_HUB_OFFLINE` inside that
+preparation process and restores it afterward. Normal worker boot always remains
+offline. The command pins the same model revision and downloads only `model_index.json`
 plus `scheduler/`, `text_encoder/`, `tokenizer/`, `transformer/`, and `vae/`.
 It intentionally excludes the redundant root `flux-2-klein-4b.safetensors`
 (which duplicates the Diffusers transformer) and repository sample images. The
@@ -46,7 +49,11 @@ peak memory through health. An undersized device fails measured readiness
 instead of attempting CPU offload.
 
 RunPod network-volume Pods are terminated and recreated rather than stopped.
-The new Pod gets a new ID, but `/workspace` persists. Recovery scans
+The new Pod gets a new ID, but `/workspace` persists. A POSIX advisory lock at
+`/workspace/imageforge/.active-batch.lock` is held for the entire running, paused,
+or interrupted lifetime and is released by the operating system after a crash.
+A duplicate live Pod can read owner/progress but cannot mutate the active manifest.
+After the prior process exits, recovery scans
 `/workspace/imageforge/batches`, validates every ready artifact against its
 size and SHA-256, changes a previously running batch to `interrupted`, and
 retains that batch's lease until its owner resumes or cancels it. Manifests do
@@ -64,7 +71,8 @@ a JSON list shaped as follows (values below are descriptive, not credentials):
 ]
 ```
 
-Tokens are compared in constant time. Unknown batch IDs and batches owned by a
+Tokens use the RFC bearer-token ASCII alphabet and are compared in constant time.
+Unknown batch IDs and batches owned by a
 different user intentionally return the same `batch_not_found` response. The
 worker does not log authorization headers or prompt content. OpenAPI and docs
 routes are disabled in the production app.
@@ -84,7 +92,18 @@ TMPDIR=$PWD/.tmp .venv/bin/pytest
 Tests inject the deterministic fake adapter directly and make no RunPod calls.
 The fake emits valid JPEG/WebP files derived from prompt, index, and seed. A
 real-GPU test is excluded unless `IMAGEFORGE_REAL_GPU_TEST=1` is set explicitly;
-running that paid gate also requires the pinned weights and an authorized Pod.
+running that paid gate also requires the pinned weights and an already-authorized
+Pod. The harness never creates or terminates compute. Run it once on representative
+Ada and Blackwell Pods:
+
+```sh
+IMAGEFORGE_REAL_GPU_TEST=1 IMAGEFORGE_REAL_GPU_FAMILY=ada \
+  IMAGEFORGE_MODEL_CACHE_DIR=/workspace/models/huggingface \
+  .venv/bin/pytest -m real_gpu tests/test_real_gpu_smoke.py
+IMAGEFORGE_REAL_GPU_TEST=1 IMAGEFORGE_REAL_GPU_FAMILY=blackwell \
+  IMAGEFORGE_MODEL_CACHE_DIR=/workspace/models/huggingface \
+  .venv/bin/pytest -m real_gpu tests/test_real_gpu_smoke.py
+```
 
 ## API behavior
 
@@ -95,6 +114,27 @@ there is no queue. Pause stops before the next image while retaining the lease.
 Cancel allows the current image to finish, cancels the remainder, and releases
 the lease. `retry-failed` reopens only terminally failed images when no other
 batch owns the GPU.
+A duplicate Pod that does not hold the volume lease returns typed `worker_standby`
+for mutation attempts while continuing to expose authorized read-only status.
+
+## Retention cleanup
+
+Receipts are durable, but the current manifest represents one acknowledgement
+rather than an all-device acknowledgement set. ImageForge therefore never deletes
+artifacts automatically. An operator may explicitly remove only checksum-verified,
+acknowledged artifacts after a minimum 24-hour safety window. Terminate all worker
+Pods before running this maintenance command so it cannot race an active download:
+
+```sh
+python -m imageforge_worker.cleanup_retention \
+  --data-root /workspace/imageforge \
+  --minimum-age-hours 24 \
+  --confirm-cleanup
+```
+
+Unacknowledged, recent, corrupt, or active-batch artifacts are never eligible.
+The durable manifest, receipt, filenames, sizes, and checksums remain after cleanup;
+subsequent artifact requests return the typed `artifact_expired` response.
 
 Artifact responses include `Content-Type`, `Content-Length`, `Digest`, `ETag`,
 `X-ImageForge-SHA256`, and `X-Checksum-SHA256`. A receipt must repeat the full

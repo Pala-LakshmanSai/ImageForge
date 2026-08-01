@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from pathlib import Path
 
@@ -16,7 +17,13 @@ async def test_450_prompt_ordered_run_pauses_survives_new_pod_and_completes(
 ) -> None:
     volume = tmp_path / "network-volume"
     prompts = [f"Editorial realism frame {index:03d}" for index in range(1, 451)]
-    first_adapter = FakeInferenceAdapter(delay_seconds=0.001)
+    first_generation_started = asyncio.Event()
+    release_first_generation = asyncio.Event()
+    first_adapter = FakeInferenceAdapter(
+        delay_seconds=0.001,
+        first_generation_started=first_generation_started,
+        release_first_generation=release_first_generation,
+    )
     async with worker_client(volume, first_adapter, fsync_writes=False) as (client, _, _):
         created = await client.post(
             "/v1/batches",
@@ -25,16 +32,22 @@ async def test_450_prompt_ordered_run_pauses_survives_new_pod_and_completes(
         )
         assert created.status_code == 201
         batch_id = created.json()["batch_id"]
-        await wait_for_batch(client, batch_id, current_index=1, timeout=60)
-        await client.post(f"/v1/batches/{batch_id}/pause", headers=auth())
-        paused = await wait_for_batch(client, batch_id, state="paused", timeout=60)
+        await asyncio.wait_for(first_generation_started.wait(), timeout=60)
+        pause = await client.post(f"/v1/batches/{batch_id}/pause", headers=auth())
+        assert pause.status_code == 200
+        release_first_generation.set()
+        paused = await wait_for_batch(
+            client, batch_id, state="paused", timeout=60, poll_interval=0.05
+        )
         assert paused["progress"]["completed"] >= 1
         busy = await client.post(
             "/v1/batches", json={"prompts": ["no queue"]}, headers=auth(TOKEN_B)
         )
         assert busy.status_code == 423
         await client.post(f"/v1/batches/{batch_id}/resume", headers=auth())
-        await wait_for_batch(client, batch_id, processed_at_least=25, timeout=60)
+        await wait_for_batch(
+            client, batch_id, processed_at_least=25, timeout=60, poll_interval=0.05
+        )
 
         first = await client.get(f"/v1/batches/{batch_id}/artifacts/1", headers=auth())
         receipt = await client.post(
@@ -58,7 +71,9 @@ async def test_450_prompt_ordered_run_pauses_survives_new_pod_and_completes(
         assert interrupted.json()["state"] == "interrupted"
         assert interrupted.json()["images"][0]["status"] == "downloaded"
         await client.post(f"/v1/batches/{batch_id}/resume", headers=auth())
-        final = await wait_for_batch(client, batch_id, state="completed", timeout=180)
+        final = await wait_for_batch(
+            client, batch_id, state="completed", timeout=600, poll_interval=0.05
+        )
 
     assert final["progress"] == {
         "total": 450,

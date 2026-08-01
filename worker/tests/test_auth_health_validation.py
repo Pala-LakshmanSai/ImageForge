@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from conftest import auth, wait_for_health, worker_client
 
-from imageforge_worker.config import WorkerSettings
+from imageforge_worker.config import Credential, WorkerSettings
 from imageforge_worker.constants import MODEL_REVISION
 from imageforge_worker.inference import FakeInferenceAdapter
 
@@ -75,6 +75,24 @@ def test_runtime_secret_parsing_and_repr_redaction(tmp_path: Path) -> None:
     assert settings.credentials[0].token == secret
     assert secret not in repr(settings.credentials[0])
     assert secret not in repr(settings)
+
+
+def test_bearer_credentials_require_ascii_rfc_token_characters() -> None:
+    with pytest.raises(ValueError, match="ASCII bearer-token"):
+        Credential("lakshman", "Lakshman", "é" * 16)
+    with pytest.raises(ValueError, match="ASCII bearer-token"):
+        Credential("lakshman", "Lakshman", "not-valid-token!!!")
+
+
+@pytest.mark.anyio
+async def test_non_ascii_authorization_is_always_a_safe_401(tmp_path: Path) -> None:
+    async with worker_client(tmp_path / "volume") as (client, _, _):
+        response = await client.get(
+            "/v1/status",
+            headers=[(b"authorization", b"Bearer " + b"\xff" * 16)],
+        )
+        assert response.status_code == 401
+        assert response.json()["error"]["code"] == "authentication_required"
 
 
 @pytest.mark.anyio

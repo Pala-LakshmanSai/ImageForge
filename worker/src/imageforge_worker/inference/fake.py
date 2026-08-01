@@ -22,10 +22,14 @@ class FakeInferenceAdapter:
         delay_seconds: float = 0.0,
         startup_delay_seconds: float = 0.0,
         failures_before_success: Mapping[int, int] | None = None,
+        first_generation_started: asyncio.Event | None = None,
+        release_first_generation: asyncio.Event | None = None,
     ) -> None:
         self.delay_seconds = delay_seconds
         self.startup_delay_seconds = startup_delay_seconds
         self.failures_before_success = dict(failures_before_success or {})
+        self.first_generation_started = first_generation_started
+        self.release_first_generation = release_first_generation
         self.calls_by_index: dict[int, int] = {}
         self.generated_indices: list[int] = []
         self.phase_history: list[str] = []
@@ -43,6 +47,10 @@ class FakeInferenceAdapter:
                 await asyncio.sleep(self.startup_delay_seconds)
 
     async def generate(self, job: GenerationJob) -> InferenceResult:
+        if job.index == 1 and self.first_generation_started is not None:
+            self.first_generation_started.set()
+            if self.release_first_generation is not None:
+                await self.release_first_generation.wait()
         if self.delay_seconds:
             await asyncio.sleep(self.delay_seconds)
         call_count = self.calls_by_index.get(job.index, 0) + 1
