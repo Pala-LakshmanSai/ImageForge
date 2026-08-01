@@ -1,0 +1,170 @@
+import { describe, expect, it, vi } from 'vitest';
+import {
+  WorkerBatchCoordinator,
+  WorkerBatchError,
+  type LocalDownloadReceipt,
+  type WorkerBatchPort,
+  type WorkerHttpResult,
+} from './workerBatchCoordinator';
+
+const batchId = '11111111-1111-4111-8111-111111111111';
+const owner = { user_id: 'lakshman', display_name: 'Lakshman' };
+
+function manifest(status: 'ready' | 'downloaded' | 'generating' = 'ready') {
+  const downloaded = status === 'downloaded';
+  return {
+    schema_version: 1,
+    batch_id: batchId,
+    owner,
+    state: downloaded ? 'completed' : 'running',
+    created_at: '2026-08-01T10:00:00.000Z',
+    updated_at: '2026-08-01T10:01:00.000Z',
+    completed_at: downloaded ? '2026-08-01T10:01:00.000Z' : null,
+    interrupted_at: null,
+    pause_requested: false,
+    cancel_requested: false,
+    images: [{
+      index: 1,
+      prompt: 'A documentary shipyard at dawn',
+      seed: 700,
+      status,
+      attempts: 1,
+      retry_rounds: 0,
+      filename: status === 'generating' ? null : 'artifacts/000001.jpg',
+      sha256: status === 'generating' ? null : 'a'.repeat(64),
+      size_bytes: status === 'generating' ? null : 2_048,
+      generation_ms: status === 'generating' ? null : 8_100,
+      error: null,
+      receipt: downloaded
+        ? { sha256: 'a'.repeat(64), size_bytes: 2_048, acknowledged_at: '2026-08-01T10:01:00.000Z' }
+        : null,
+    }],
+    progress: {
+      total: 1,
+      completed: status === 'generating' ? 0 : 1,
+      downloaded: downloaded ? 1 : 0,
+      failed: 0,
+      cancelled: 0,
+      processed: status === 'generating' ? 0 : 1,
+      current_index: status === 'generating' ? 1 : null,
+    },
+  };
+}
+
+function status(isOwner = true) {
+  return {
+    schema_version: 1,
+    ready: true,
+    active_batch: {
+      batch_id: batchId,
+      owner,
+      state: 'running',
+      progress: manifest('generating').progress,
+      pause_requested: false,
+      cancel_requested: false,
+    },
+    permissions: { can_create: false, can_manage_active: isOwner, is_owner: isOwner },
+  };
+}
+
+function receipt(): LocalDownloadReceipt {
+  return {
+    schemaVersion: 1,
+    batchId,
+    index: 1,
+    filename: '000001.jpg',
+    sha256: 'a'.repeat(64),
+    sizeBytes: 2_048,
+    verifiedAtUnixMs: 1_785_579_600_000,
+  };
+}
+
+function fakePort(overrides: Partial<WorkerBatchPort> = {}): WorkerBatchPort {
+  return {
+    status: vi.fn(async () => ({ status: 200, body: status() })),
+    createBatch: vi.fn(async () => ({ status: 201, body: manifest('ready') })),
+    getBatch: vi.fn(async () => ({ status: 200, body: manifest('downloaded') })),
+    pauseBatch: vi.fn(async () => ({ status: 200, body: manifest('generating') })),
+    resumeBatch: vi.fn(async () => ({ status: 200, body: manifest('generating') })),
+    cancelBatch: vi.fn(async () => ({ status: 200, body: manifest('downloaded') })),
+    retryFailed: vi.fn(async () => ({ status: 200, body: manifest('generating') })),
+    readReceipts: vi.fn(async () => []),
+    downloadArtifact: vi.fn(async () => receipt()),
+    ...overrides,
+  };
+}
+
+describe('WorkerBatchCoordinator', () => {
+  it('creates immediately, downloads a ready JPEG, then refetches the acknowledged manifest', async () => {
+    const port = fakePort();
+    const coordinator = new WorkerBatchCoordinator(port);
+    const event = await coordinator.create(['A documentary shipyard at dawn'], 700);
+
+    expect(event.type).toBe('manifest');
+    expect(port.createBatch).toHaveBeenCalledOnce();
+    expect(port.downloadArtifact).toHaveBeenCalledWith({
+      batchId,
+      index: 1,
+      expectedSha256: 'a'.repeat(64),
+      expectedSizeBytes: 2_048,
+    });
+    expect(port.getBatch).toHaveBeenCalledOnce();
+  });
+
+  it('turns 423 into the authoritative foreign-owner lock and never queues or fetches prompts', async () => {
+    const port = fakePort({
+      createBatch: vi.fn(async (): Promise<WorkerHttpResult> => ({
+        status: 423,
+        body: { error: { code: 'batch_busy', message: 'Lakshman is generating.', details: null } },
+      })),
+      status: vi.fn(async () => ({ status: 200, body: status(false) })),
+    });
+    const coordinator = new WorkerBatchCoordinator(port);
+    const event = await coordinator.create(['Another brief'], 900);
+
+    expect(event.type).toBe('busy');
+    if (event.type === 'busy') expect(event.summary.owner.displayName).toBe('Lakshman');
+    expect(port.createBatch).toHaveBeenCalledOnce();
+    expect(port.getBatch).not.toHaveBeenCalled();
+    expect(port.downloadArtifact).not.toHaveBeenCalled();
+  });
+
+  it('reconciles a matching local receipt without downloading again', async () => {
+    const port = fakePort({ readReceipts: vi.fn(async () => [receipt()]) });
+    const coordinator = new WorkerBatchCoordinator(port);
+    const event = await coordinator.create(['A documentary shipyard at dawn'], 700);
+
+    expect(event.type).toBe('manifest');
+    expect(port.downloadArtifact).not.toHaveBeenCalled();
+    expect(port.getBatch).not.toHaveBeenCalled();
+  });
+
+  it('coalesces overlapping status polls', async () => {
+    let resolve!: (result: WorkerHttpResult) => void;
+    const statusPromise = new Promise<WorkerHttpResult>((done) => { resolve = done; });
+    const port = fakePort({ status: vi.fn(() => statusPromise) });
+    const coordinator = new WorkerBatchCoordinator(port);
+    const first = coordinator.poll();
+    const second = coordinator.poll();
+    expect(first).toBe(second);
+    resolve({ status: 200, body: status(false) });
+    await expect(first).resolves.toMatchObject({ type: 'busy' });
+    expect(port.status).toHaveBeenCalledOnce();
+  });
+
+  it('fails closed on conflicting receipts and malformed errors', async () => {
+    const conflict = { ...receipt(), sha256: 'b'.repeat(64) };
+    const port = fakePort({ readReceipts: vi.fn(async () => [conflict]) });
+    const coordinator = new WorkerBatchCoordinator(port);
+    await expect(coordinator.create(['A documentary shipyard at dawn'], 700)).rejects.toMatchObject({
+      code: 'local_receipt_conflict',
+    });
+
+    const malformed = new WorkerBatchCoordinator(fakePort({
+      createBatch: vi.fn(async () => ({ status: 500, body: { traceback: 'unsafe' } })),
+    }));
+    await expect(malformed.create(['A documentary shipyard at dawn'], 700)).rejects.toEqual(
+      expect.objectContaining<Partial<WorkerBatchError>>({ code: 'worker_response_invalid' }),
+    );
+  });
+});
