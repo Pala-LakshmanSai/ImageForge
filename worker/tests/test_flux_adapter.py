@@ -1,0 +1,133 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from imageforge_worker.constants import (
+    MIN_GPU_MEMORY_BYTES,
+    MODEL_ALLOW_PATTERNS,
+    MODEL_ID,
+    MODEL_REVISION,
+    REQUIRED_MODEL_FILES,
+)
+from imageforge_worker.inference.flux import FluxInferenceAdapter
+
+
+class FakeCuda:
+    def __init__(self, *, name: str, total_memory: int, count: int = 1) -> None:
+        self.name = name
+        self.total_memory = total_memory
+        self.count = count
+
+    def is_available(self) -> bool:
+        return True
+
+    def device_count(self) -> int:
+        return self.count
+
+    def get_device_name(self, _: int) -> str:
+        return self.name
+
+    def get_device_properties(self, _: int) -> SimpleNamespace:
+        return SimpleNamespace(total_memory=self.total_memory)
+
+    def memory_allocated(self, _: int) -> int:
+        return 1
+
+    def memory_reserved(self, _: int) -> int:
+        return 2
+
+    def max_memory_allocated(self, _: int) -> int:
+        return 3
+
+    def max_memory_reserved(self, _: int) -> int:
+        return 4
+
+
+def test_flux_adapter_rejects_insufficient_vram_but_surfaces_actual_gpu(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake_torch = SimpleNamespace(cuda=FakeCuda(name="NVIDIA T4", total_memory=15 * 1024**3))
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "diffusers", SimpleNamespace(Flux2KleinPipeline=object()))
+    adapter = FluxInferenceAdapter(tmp_path)
+    with pytest.raises(RuntimeError, match="less than 16 GiB"):
+        adapter._load_pipeline(str(tmp_path))
+    snapshot = adapter.gpu_snapshot()
+    assert snapshot["name"] == "NVIDIA T4"
+    assert snapshot["total_memory_bytes"] == 15 * 1024**3
+    assert snapshot["approved"] is False
+
+
+def test_flux_adapter_is_family_generic_and_loads_bf16_directly_on_cuda(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bfloat16 = object()
+    cuda = FakeCuda(name="NVIDIA RTX A5000", total_memory=24 * 1024**3)
+    fake_torch = SimpleNamespace(cuda=cuda, bfloat16=bfloat16)
+    captured: dict = {}
+
+    class Parameter:
+        device = SimpleNamespace(type="cuda")
+        dtype = bfloat16
+
+    class Pipeline:
+        transformer = SimpleNamespace(parameters=lambda: iter([Parameter()]))
+
+        def set_progress_bar_config(self, *, disable: bool) -> None:
+            captured["progress_disabled"] = disable
+
+    class FakePipelineType:
+        @classmethod
+        def from_pretrained(cls, path: str, **kwargs):
+            captured["path"] = path
+            captured.update(kwargs)
+            return Pipeline()
+
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(
+        sys.modules,
+        "diffusers",
+        SimpleNamespace(Flux2KleinPipeline=FakePipelineType),
+    )
+    adapter = FluxInferenceAdapter(tmp_path)
+    adapter._load_pipeline(str(tmp_path / "snapshot"))
+    assert captured["device_map"] == "cuda"
+    assert captured["torch_dtype"] is bfloat16
+    assert captured["local_files_only"] is True
+    assert captured["progress_disabled"] is True
+    assert adapter.gpu_snapshot()["approved"] is True
+
+
+def test_model_snapshot_resolution_is_pinned_and_offline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict = {}
+    snapshot = tmp_path / "snapshot"
+    for relative_name in REQUIRED_MODEL_FILES:
+        path = snapshot / relative_name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+
+    def snapshot_download(**kwargs) -> str:
+        captured.update(kwargs)
+        return str(snapshot)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(snapshot_download=snapshot_download),
+    )
+    adapter = FluxInferenceAdapter(tmp_path / "cache")
+    assert adapter._resolve_local_snapshot() == str(tmp_path / "snapshot")
+    assert captured == {
+        "repo_id": MODEL_ID,
+        "revision": MODEL_REVISION,
+        "cache_dir": str(tmp_path / "cache"),
+        "local_files_only": True,
+        "allow_patterns": list(MODEL_ALLOW_PATTERNS),
+    }
+    assert MIN_GPU_MEMORY_BYTES == 16 * 1024**3
