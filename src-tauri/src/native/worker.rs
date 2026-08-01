@@ -13,7 +13,7 @@ use uuid::Uuid;
 const MAX_JSON_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PREVIEW_BYTES: usize = 4 * 1024 * 1024;
 const MAX_BATCH_REFERENCES: usize = 8;
-const MAX_REFERENCE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_REFERENCE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REFERENCE_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -110,15 +110,10 @@ impl WorkerApi {
 
     pub async fn create_batch(&self, input: CreateBatchInput) -> NativeResult<WorkerHttpResponse> {
         validate_create_batch(&input)?;
-        let references = input.references.iter().map(|reference| json!({
-            "name": reference.name,
-            "mime_type": reference.mime_type,
-            "data_hex": hex::encode(&reference.bytes),
-        })).collect::<Vec<_>>();
         self.request_json(
             Method::POST,
             "/v1/batches",
-            Some(json!({"prompts": input.prompts, "base_seed": input.base_seed, "references": references})),
+            Some(create_batch_payload(&input)),
             true,
             WorkerOperation::Manifest,
         )
@@ -281,7 +276,7 @@ impl WorkerApi {
         &self,
         pin: &WorkerSessionPin,
         batch_id: Uuid,
-        index: u16,
+        index: u64,
         sha256: &str,
         size_bytes: u64,
     ) -> NativeResult<WorkerHttpResponse> {
@@ -436,8 +431,16 @@ fn validate_create_batch(input: &CreateBatchInput) -> NativeResult<()> {
         ));
     }
     if input.references.len() > MAX_BATCH_REFERENCES
-        || input.references.iter().map(|reference| reference.bytes.len()).sum::<usize>() > MAX_REFERENCE_TOTAL_BYTES
-        || input.references.iter().any(|reference| !validate_reference(reference))
+        || input
+            .references
+            .iter()
+            .map(|reference| reference.bytes.len())
+            .sum::<usize>()
+            > MAX_REFERENCE_TOTAL_BYTES
+        || input
+            .references
+            .iter()
+            .any(|reference| !validate_reference(reference))
     {
         return Err(NativeError::new(
             "batch_reference_invalid",
@@ -445,6 +448,25 @@ fn validate_create_batch(input: &CreateBatchInput) -> NativeResult<()> {
         ));
     }
     Ok(())
+}
+
+fn create_batch_payload(input: &CreateBatchInput) -> Value {
+    let references = input
+        .references
+        .iter()
+        .map(|reference| {
+            json!({
+                "name": reference.name,
+                "mime_type": reference.mime_type,
+                "data_hex": hex::encode(&reference.bytes),
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "prompts": input.prompts,
+        "base_seed": input.base_seed,
+        "references": references,
+    })
 }
 
 fn validate_reference(reference: &ReferenceInput) -> bool {
@@ -665,7 +687,10 @@ fn project_manifest(body: &Value) -> NativeResult<Value> {
 }
 
 fn project_reference(value: &Value) -> NativeResult<Value> {
-    project_object(value, &["name", "mime_type", "size_bytes", "sha256", "filename"])
+    Ok(Value::Object(project_object(
+        value,
+        &["name", "mime_type", "size_bytes", "sha256", "filename"],
+    )?))
 }
 
 fn project_image(value: &Value) -> NativeResult<Value> {
@@ -864,14 +889,48 @@ mod tests {
     #[test]
     fn reference_validation_requires_supported_decodable_headers_and_safe_names() {
         let png = vec![
-            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-            0, 0, 0, 13, b'I', b'H', b'D', b'R',
-            0, 0, 0, 1, 0, 0, 0, 1,
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, b'I', b'H', b'D', b'R', 0,
+            0, 0, 1, 0, 0, 0, 1,
         ];
-        assert!(validate_reference(&ReferenceInput { name: "anchor.png".into(), mime_type: "image/png".into(), bytes: png }));
-        assert!(!validate_reference(&ReferenceInput { name: "anchor.svg".into(), mime_type: "image/svg+xml".into(), bytes: b"<svg/>".to_vec() }));
-        assert!(!validate_reference(&ReferenceInput { name: "../secret.png".into(), mime_type: "image/png".into(), bytes: vec![1; 24] }));
-        assert!(!validate_reference(&ReferenceInput { name: "empty.png".into(), mime_type: "image/png".into(), bytes: vec![] }));
+        assert!(validate_reference(&ReferenceInput {
+            name: "anchor.png".into(),
+            mime_type: "image/png".into(),
+            bytes: png
+        }));
+        assert!(!validate_reference(&ReferenceInput {
+            name: "anchor.svg".into(),
+            mime_type: "image/svg+xml".into(),
+            bytes: b"<svg/>".to_vec()
+        }));
+        assert!(!validate_reference(&ReferenceInput {
+            name: "../secret.png".into(),
+            mime_type: "image/png".into(),
+            bytes: vec![1; 24]
+        }));
+        assert!(!validate_reference(&ReferenceInput {
+            name: "empty.png".into(),
+            mime_type: "image/png".into(),
+            bytes: vec![]
+        }));
+    }
+
+    #[test]
+    fn native_batch_payload_uses_worker_reference_contract_without_paths_or_secrets() {
+        let payload = create_batch_payload(&CreateBatchInput {
+            prompts: vec!["guided frame".into()],
+            base_seed: 17,
+            references: vec![ReferenceInput {
+                name: "anchor.png".into(),
+                mime_type: "image/png".into(),
+                bytes: vec![0x89, 0x50, 0x4e, 0x47],
+            }],
+        });
+        assert_eq!(payload["prompts"][0], "guided frame");
+        assert_eq!(payload["base_seed"], 17);
+        assert_eq!(payload["references"][0]["name"], "anchor.png");
+        assert_eq!(payload["references"][0]["mime_type"], "image/png");
+        assert_eq!(payload["references"][0]["data_hex"], "89504e47");
+        assert!(payload["references"][0].get("bytes").is_none());
     }
 
     #[test]

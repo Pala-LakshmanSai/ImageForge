@@ -1,7 +1,7 @@
 import type { ReferenceMimeType } from './types';
 
 export const MAX_BATCH_REFERENCES = 8;
-export const MAX_REFERENCE_BYTES = 10 * 1024 * 1024;
+export const MAX_REFERENCE_BYTES = 8 * 1024 * 1024;
 export const MAX_REFERENCE_TOTAL_BYTES = 32 * 1024 * 1024;
 
 export function isReferenceMimeType(value: string): value is ReferenceMimeType {

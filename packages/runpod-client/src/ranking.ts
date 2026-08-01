@@ -70,13 +70,12 @@ export interface RankGpuOffersInput {
  */
 export function rankGpuOffers(input: RankGpuOffersInput): readonly RankedGpuOffer[] {
   if (
-    !Number.isInteger(input.expectedImageCount) ||
-    input.expectedImageCount < 1 ||
-    input.expectedImageCount > 500
+    !Number.isSafeInteger(input.expectedImageCount) ||
+    input.expectedImageCount < 1
   ) {
     throw new RunPodClientError({
       code: "configuration_invalid",
-      message: "Expected image count must be an integer from 1 to 500.",
+      message: "Expected image count must be a positive safe integer.",
       operation: "configuration",
       details: { field: "expectedImageCount" },
     });

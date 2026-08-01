@@ -204,10 +204,10 @@ function workerPhaseToLifecycle(health: WorkerHealth): LifecyclePhase {
 }
 
 function validateExpectedImageCount(value: number): number {
-  if (!Number.isInteger(value) || value < 1 || value > 500) {
+  if (!Number.isSafeInteger(value) || value < 1) {
     throw new RunPodClientError({
       code: "configuration_invalid",
-      message: "Expected image count must be an integer from 1 to 500.",
+      message: "Expected image count must be a positive safe integer.",
       operation: "configuration",
       details: { field: "expectedImageCount" },
     });

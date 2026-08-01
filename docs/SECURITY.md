@@ -16,7 +16,10 @@
 - Accept TLS traffic through the RunPod HTTPS proxy only.
 - Require a per-user bearer credential on every endpoint except minimal health.
 - Compare credentials in constant time and never log the Authorization header.
-- Cap requests at 500 prompts and a documented per-prompt UTF-8 size.
+- Reject malformed or empty prompt entries, while allowing any finite prompt
+  list size that the connected worker, disk, transport, and GPU can safely
+  process. Product code must not impose an arbitrary prompt-count or
+  per-prompt character ceiling.
 - Generate all server paths and filenames; reject path components from clients.
 - Return safe error messages and opaque internal error IDs.
 - Keep prompt logging disabled by default.

@@ -4,6 +4,7 @@ import {
   type RunPodOperation,
 } from "./errors.js";
 import {
+  GPU_POLICY,
   approveCatalogGpu,
   approveManagedPodGpu,
   isDynamicGpuDisplayName,
@@ -762,67 +763,84 @@ export class RunPodRestProvider implements RunPodProvider {
       return null;
     }
 
+    const machineRaw = pod.machine;
+    if (machineRaw === null || machineRaw === undefined) {
+      return null;
+    }
+    const machine = asRecord(machineRaw, operation, `${field}.machine`);
+    const secureCloud = asBoolean(machine.secureCloud, operation, `${field}.machine.secureCloud`);
+    const dataCenterId = asNonEmptyString(
+      machine.dataCenterId,
+      operation,
+      `${field}.machine.dataCenterId`,
+    );
+    const cloud: CloudLane = secureCloud ? "secure" : "community";
+    if (cloud !== criteria.cloud || dataCenterId !== criteria.dataCenterId) {
+      return null;
+    }
+
     let gpuId: ApprovedGpuId | null = null;
     let gpuDisplayName: string | null = null;
     let gpuCount: number | null = null;
     const gpuRaw = pod.gpu;
+    let value: string;
+    let displayName: string;
+    let count: number;
     if (gpuRaw !== null && gpuRaw !== undefined) {
       const gpu = asRecord(gpuRaw, operation, `${field}.gpu`);
-      const value = asNonEmptyString(gpu.id, operation, `${field}.gpu.id`);
-      const displayName = asNonEmptyString(
+      value = asNonEmptyString(gpu.id, operation, `${field}.gpu.id`);
+      displayName = asNonEmptyString(
         gpu.displayName,
         operation,
         `${field}.gpu.displayName`,
       );
-      const count = asNumber(gpu.count, operation, `${field}.gpu.count`);
-      const podApprovedPolicies = new Map(this.#catalogApprovedGpuPolicies);
-      const verified = this.#verifiedManagedGpuPolicies.get(id);
-      if (verified !== undefined && verified.gpuId === value) {
-        podApprovedPolicies.set(value, verified.policyKey);
-      }
-      const approved = approveManagedPodGpu(
-        value,
-        displayName,
-        podApprovedPolicies,
-        createResponse ? criteria.includeEmergencyGpuTier : true,
-      );
-      if (approved === null && isDynamicGpuDisplayName(displayName)) {
-        throw new RunPodClientError({
-          code: "api_response_invalid",
-          message:
-            "A matching ImageForge Pod has a dynamic GPU identity that could not be verified against live inventory.",
-          operation,
-          retryable: true,
-          details: { field: `${field}.gpu.id` },
-        });
-      }
-      if (approved === null || !Number.isInteger(count) || count !== criteria.gpuCount) {
-        return null;
-      }
-      gpuId = approved.gpuId;
-      gpuDisplayName = displayName;
-      gpuCount = count;
+      count = asNumber(gpu.count, operation, `${field}.gpu.count`);
     } else {
-      return null;
+      // The REST API's includeMachine response exposes the GPU as
+      // machine.gpuTypeId (and gpuCount at the Pod root), not as a gpu object.
+      // Normalize that documented/live shape into the same identity checks used
+      // for the older gpu:{id,displayName,count} shape.
+      value = asNonEmptyString(machine.gpuTypeId, operation, `${field}.machine.gpuTypeId`);
+      displayName = value;
+      const staticPolicy = staticGpuPolicy(true).find((entry) => entry.gpuId === value);
+      const dynamicPolicyKey = this.#catalogApprovedGpuPolicies.get(value)
+        ?? this.#verifiedManagedGpuPolicies.get(id)?.policyKey;
+      const policy = staticPolicy
+        ?? GPU_POLICY.find((entry) => entry.key === dynamicPolicyKey);
+      if (policy !== undefined) {
+        displayName = policy.catalogNames[0] ?? value;
+      }
+      count = pod.gpuCount === undefined
+        ? criteria.gpuCount
+        : asNumber(pod.gpuCount, operation, `${field}.gpuCount`);
     }
-    let cloud: CloudLane | null = null;
-    let dataCenterId: string | null = null;
-    const machineRaw = pod.machine;
-    if (machineRaw !== null && machineRaw !== undefined) {
-      const machine = asRecord(machineRaw, operation, `${field}.machine`);
-      const secureCloud = asBoolean(machine.secureCloud, operation, `${field}.machine.secureCloud`);
-      dataCenterId = asNonEmptyString(
-        machine.dataCenterId,
+    const podApprovedPolicies = new Map(this.#catalogApprovedGpuPolicies);
+    const verified = this.#verifiedManagedGpuPolicies.get(id);
+    if (verified !== undefined && verified.gpuId === value) {
+      podApprovedPolicies.set(value, verified.policyKey);
+    }
+    const approved = approveManagedPodGpu(
+      value,
+      displayName,
+      podApprovedPolicies,
+      createResponse ? criteria.includeEmergencyGpuTier : true,
+    );
+    if (approved === null && isDynamicGpuDisplayName(displayName)) {
+      throw new RunPodClientError({
+        code: "api_response_invalid",
+        message:
+          "A matching ImageForge Pod has a dynamic GPU identity that could not be verified against live inventory.",
         operation,
-        `${field}.machine.dataCenterId`,
-      );
-      cloud = secureCloud ? "secure" : "community";
-      if (cloud !== criteria.cloud || dataCenterId !== criteria.dataCenterId) {
-        return null;
-      }
-    } else {
+        retryable: true,
+        details: { field: `${field}.gpu.id` },
+      });
+    }
+    if (approved === null || !Number.isInteger(count) || count !== criteria.gpuCount) {
       return null;
     }
+    gpuId = approved.gpuId;
+    gpuDisplayName = displayName;
+    gpuCount = count;
     const ports = asArray(pod.ports, operation, `${field}.ports`).map((port, index) =>
       asNonEmptyString(port, operation, `${field}.ports[${index}]`),
     );

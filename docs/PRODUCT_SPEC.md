@@ -2,7 +2,7 @@
 
 ## Problem
 
-Two YouTube editors need 300-450 realistic 16:9 still images per video. Existing
+Two YouTube editors usually need 300-450 realistic 16:9 still images per video. Existing
 hosted frontier APIs are too expensive, and the previous multi-model RunPod
 application took 30-60 minutes to become usable.
 
@@ -58,7 +58,9 @@ application took 30-60 minutes to become usable.
 
 ## Non-goals for the first release
 
-- Multiple image models, LoRAs, image editing, video generation, or an LLM.
+- Multiple image models, LoRAs, video generation, or an LLM. Optional FLUX.2
+  Klein reference images are supported as a batch-level input; this does not
+  add another model or a prompt-rewriting step.
 - More than one simultaneous batch or a waiting batch queue.
 - Automatic Pod termination.
 - Accounts, billing, subscriptions, public SaaS hosting, or team administration.

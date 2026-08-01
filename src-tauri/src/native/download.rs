@@ -19,7 +19,7 @@ const MAX_JPEG_BYTES: u64 = 32 * 1024 * 1024;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DownloadRequest {
     pub batch_id: Uuid,
-    pub index: u16,
+    pub index: u64,
     pub expected_sha256: String,
     pub expected_size_bytes: u64,
 }
@@ -29,7 +29,7 @@ pub struct DownloadRequest {
 pub struct DownloadReceipt {
     pub schema_version: u8,
     pub batch_id: Uuid,
-    pub index: u16,
+    pub index: u64,
     pub filename: String,
     pub sha256: String,
     pub size_bytes: u64,

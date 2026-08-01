@@ -164,7 +164,7 @@ function requireIntegerInRange(
 ): number {
   if (
     typeof value !== "number" ||
-    !Number.isInteger(value) ||
+    !Number.isSafeInteger(value) ||
     value < minimum ||
     value > maximum
   ) {
@@ -428,7 +428,7 @@ export function createRunPodClientConfig(input: RunPodClientConfigInput): RunPod
     defaultImageCount: requireIntegerInRange(
       raw.defaultImageCount === undefined ? 450 : raw.defaultImageCount,
       1,
-      500,
+      Number.MAX_SAFE_INTEGER,
       "defaultImageCount",
     ),
     refreshIntervalMs: requireIntegerInRange(

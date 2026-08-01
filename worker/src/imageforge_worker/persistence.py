@@ -13,7 +13,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
-from .domain import LOCK_HOLDING_STATES, BatchManifest, ImageRecord, ImageState
+from .domain import (
+    LOCK_HOLDING_STATES,
+    SUCCESS_STATES,
+    BatchManifest,
+    BatchState,
+    ImageRecord,
+    ImageState,
+)
 
 MINIMUM_RETENTION = timedelta(hours=24)
 
@@ -348,6 +355,26 @@ class FileManifestStore:
                 # restart preserve metadata, and the next explicit run saves completion.
                 self.save(manifest)
                 images_deleted += 1
+            # Reference inputs are batch-scoped working data. Once a batch is
+            # fully completed they are no longer needed for resume/retry, so
+            # remove the raw files while retaining checksums and names in the
+            # manifest for reproducibility. Interrupted/failed batches keep
+            # references because they may still be resumed or retried.
+            if (
+                manifest.state == BatchState.COMPLETED
+                and manifest.references
+                and all(image.status in SUCCESS_STATES for image in manifest.images)
+            ):
+                for reference in manifest.references:
+                    path = self.artifact_path(batch_id, reference.filename)
+                    try:
+                        size = path.stat().st_size
+                    except FileNotFoundError:
+                        continue
+                    path.unlink()
+                    self._fsync_directory(path.parent)
+                    files_deleted += 1
+                    bytes_deleted += size
         return CleanupResult(
             images_deleted=images_deleted,
             files_deleted=files_deleted,

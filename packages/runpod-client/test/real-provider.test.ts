@@ -428,6 +428,33 @@ describe("RunPodRestProvider", () => {
     assert.equal(url.searchParams.get("dataCenterId"), "EU-RO-1");
   });
 
+  it("normalizes RunPod's live includeMachine GPU shape", async () => {
+    const provider = new RunPodRestProvider({
+      apiKeyProvider: () => "test-key",
+      fetchTransport: (async () =>
+        jsonResponse([
+          validPodResponse({
+            gpu: null,
+            gpuCount: 1,
+            machine: {
+              secureCloud: true,
+              dataCenterId: "EU-RO-1",
+              gpuTypeId: "NVIDIA GeForce RTX 4090",
+            },
+          }),
+        ])) as FetchTransport,
+      inventorySource: unusedInventory,
+    });
+
+    const pods = await provider.listImageForgePods(discoveryCriteria);
+
+    assert.equal(pods.length, 1);
+    assert.equal(pods[0]?.gpuId, "NVIDIA GeForce RTX 4090");
+    assert.equal(pods[0]?.gpuDisplayName, "RTX 4090");
+    assert.equal(pods[0]?.gpuCount, 1);
+    assert.equal(pods[0]?.dataCenterId, "EU-RO-1");
+  });
+
   it("fails closed when a matching dynamic Pod cannot be correlated to live catalog identity", async () => {
     const provider = new RunPodRestProvider({
       apiKeyProvider: () => "test-key",

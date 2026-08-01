@@ -428,7 +428,7 @@ async fn worker_retry_failed(
 async fn worker_fetch_preview(
     state: State<'_, NativeState>,
     batch_id: String,
-    index: u16,
+    index: u64,
 ) -> NativeResult<WorkerPreviewResponse> {
     state
         .worker
