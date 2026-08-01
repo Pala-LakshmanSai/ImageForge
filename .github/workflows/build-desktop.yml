@@ -47,6 +47,78 @@ jobs:
       - name: Build Windows NSIS installer
         run: npm run tauri:build -- --target x86_64-pc-windows-msvc --bundles nsis
 
+      # Exercise the artifact on the same native Windows runner that produced
+      # it.  The install root is disposable and explicit so this cannot touch
+      # a runner-wide installation or leave an app process behind.
+      - name: Install, launch, and clean up Windows artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundleDir = Join-Path $env:GITHUB_WORKSPACE 'src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis'
+          $installer = @(Get-ChildItem -LiteralPath $bundleDir -Filter '*-setup.exe' -File)
+          if ($installer.Count -ne 1) {
+            throw "Expected exactly one NSIS installer in $bundleDir; found $($installer.Count)."
+          }
+
+          $buildDir = Join-Path $env:GITHUB_WORKSPACE 'src-tauri/target/x86_64-pc-windows-msvc/release'
+          $builtBinary = @(Get-ChildItem -LiteralPath $buildDir -Filter '*.exe' -File |
+            Where-Object { $_.Name -notmatch '(?i)(setup|uninstall)' })
+          if ($builtBinary.Count -ne 1) {
+            throw "Expected exactly one built application executable in $buildDir; found $($builtBinary.Count)."
+          }
+
+          $installRoot = Join-Path $env:RUNNER_TEMP 'imageforge-native-smoke'
+          $appProcess = $null
+          try {
+            if (Test-Path -LiteralPath $installRoot) {
+              Remove-Item -LiteralPath $installRoot -Recurse -Force
+            }
+            New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
+
+            # NSIS requires /D=... to be the final installer argument.
+            $installResult = Start-Process -FilePath $installer[0].FullName `
+              -ArgumentList @('/S', "/D=$installRoot") -Wait -PassThru
+            if ($installResult.ExitCode -ne 0) {
+              throw "NSIS install failed with exit code $($installResult.ExitCode)."
+            }
+
+            $installedExe = Join-Path $installRoot $builtBinary[0].Name
+            if (-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) {
+              Write-Host 'Installed tree:'
+              Get-ChildItem -LiteralPath $installRoot -Recurse -Force |
+                Select-Object FullName, Length | Format-Table -AutoSize | Out-String | Write-Host
+              throw "Installed application executable was not found at $installedExe."
+            }
+
+            $uninstaller = Join-Path $installRoot 'uninstall.exe'
+            if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
+              throw "NSIS uninstaller was not found at $uninstaller."
+            }
+
+            $appProcess = Start-Process -FilePath $installedExe -WorkingDirectory $installRoot -PassThru
+            Start-Sleep -Seconds 5
+            if ($appProcess.HasExited) {
+              throw "ImageForge exited during the native launch smoke (exit code $($appProcess.ExitCode))."
+            }
+            Write-Host "Native Windows launch smoke passed (PID $($appProcess.Id), alive after 5 seconds)."
+          }
+          finally {
+            if ($null -ne $appProcess -and -not $appProcess.HasExited) {
+              Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
+              $appProcess.WaitForExit(5000)
+            }
+            if (Test-Path -LiteralPath $installRoot) {
+              $uninstaller = Join-Path $installRoot 'uninstall.exe'
+              if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
+                $uninstallResult = Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait -PassThru
+                if ($uninstallResult.ExitCode -ne 0) {
+                  Write-Warning "NSIS uninstall returned exit code $($uninstallResult.ExitCode)."
+                }
+              }
+              Remove-Item -LiteralPath $installRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+          }
+
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:
