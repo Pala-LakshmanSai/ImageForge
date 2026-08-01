@@ -1,6 +1,7 @@
 import { AlertTriangle, CheckCircle2, Info, X, XCircle } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
 import { createFakeImageForgeAdapter, type ImageForgeAdapter } from './adapters/imageForgeAdapter';
+import { persistSafePreferences } from './adapters/safePreferences';
 import { BottomNav, TopBar } from './components/AppChrome';
 import { DialogPortal } from './components/DialogPortal';
 import { SetupAssistant } from './components/SetupAssistant';
@@ -54,9 +55,32 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
   }, [adapter]);
 
   useEffect(() => {
+    if (adapter.mode !== 'production' || !state.setup.completed) return;
+    let active = true;
+    void adapter.validateDestination(state.settings.defaultDestination).then(
+      (validated) => {
+        if (active) dispatch({ type: 'SET_DESTINATION_VALIDATED', validated });
+      },
+      () => {
+        if (active) dispatch({ type: 'SET_DESTINATION_VALIDATED', validated: false });
+      },
+    );
+    return () => { active = false; };
+  }, [adapter, state.settings.defaultDestination, state.setup.completed]);
+
+  useEffect(() => {
     document.documentElement.dataset.theme = state.settings.theme;
     document.documentElement.dataset.density = state.settings.density;
   }, [state.settings.density, state.settings.theme]);
+
+  useEffect(() => {
+    if (adapter.mode !== 'production' || !state.setup.completed) return;
+    try {
+      persistSafePreferences(state, window.localStorage);
+    } catch {
+      // A storage failure must never affect GPU or batch control.
+    }
+  }, [adapter.mode, state.settings, state.setup.completed, state.setup.studioProfile]);
 
   useEffect(() => {
     if (state.pod.lifecycleSequence === 0 || state.pod.phase !== 'selecting') return;

@@ -5,6 +5,7 @@ const STORAGE_KEY = 'imageforge.safe-preferences.v1';
 
 interface SafePreferencesV1 {
   version: 1;
+  setupCompleted: true;
   userName: string;
   defaultDestination: string;
   editorialSuffixEnabled: boolean;
@@ -24,6 +25,7 @@ function parse(value: unknown): SafePreferencesV1 | null {
   const item = value as Record<string, unknown>;
   const allowed = new Set([
     'version',
+    'setupCompleted',
     'userName',
     'defaultDestination',
     'editorialSuffixEnabled',
@@ -33,7 +35,11 @@ function parse(value: unknown): SafePreferencesV1 | null {
     'gpuPreference',
     'studioProfile',
   ]);
-  if (Object.keys(item).some((key) => !allowed.has(key)) || item.version !== 1) return null;
+  if (
+    Object.keys(item).some((key) => !allowed.has(key)) ||
+    item.version !== 1 ||
+    item.setupCompleted !== true
+  ) return null;
   const userName = boundedString(item.userName, 80);
   const destination = boundedString(item.defaultDestination, 2_048);
   const suffix = boundedString(item.editorialSuffix, 2_000);
@@ -51,6 +57,7 @@ function parse(value: unknown): SafePreferencesV1 | null {
   ) return null;
   return {
     version: 1,
+    setupCompleted: true,
     userName,
     defaultDestination: destination,
     editorialSuffixEnabled: item.editorialSuffixEnabled,
@@ -89,7 +96,7 @@ export function hydrateSafePreferences(base: AppState, storage: Pick<Storage, 'g
     setup: {
       ...base.setup,
       studioProfile: persisted.studioProfile,
-      completed: false,
+      completed: true,
       destinationValidated: false,
     },
     draft: {
@@ -102,6 +109,7 @@ export function hydrateSafePreferences(base: AppState, storage: Pick<Storage, 'g
 export function persistSafePreferences(state: AppState, storage: Pick<Storage, 'setItem'>): void {
   const preferences: SafePreferencesV1 = {
     version: 1,
+    setupCompleted: true,
     userName: state.settings.userName.slice(0, 80),
     defaultDestination: state.settings.defaultDestination.slice(0, 2_048),
     editorialSuffixEnabled: state.settings.editorialSuffixEnabled,

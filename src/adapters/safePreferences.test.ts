@@ -8,9 +8,10 @@ import {
 import { createConfiguredInitialState, createInitialState } from '../domain/reducer';
 
 describe('safe preference persistence', () => {
-  it('hydrates only non-secret preferences and forces setup revalidation', () => {
+  it('hydrates only non-secret preferences without repeating first-run setup', () => {
     const stored = {
       version: 1,
+      setupCompleted: true,
       userName: 'Sujal',
       defaultDestination: 'D:\\ImageForge',
       editorialSuffixEnabled: false,
@@ -25,7 +26,7 @@ describe('safe preference persistence', () => {
     });
     expect(hydrated.settings.userName).toBe('Sujal');
     expect(hydrated.settings.slowEmergencyGpuEnabled).toBe(false);
-    expect(hydrated.setup.completed).toBe(false);
+    expect(hydrated.setup.completed).toBe(true);
     expect(hydrated.setup.destinationValidated).toBe(false);
     expect(hydrated.setup.credentials.runpodApiKey.configured).toBe(true);
   });
@@ -37,6 +38,7 @@ describe('safe preference persistence', () => {
       hydrateSafePreferences(base, {
         getItem: () => JSON.stringify({
           version: 1,
+          setupCompleted: true,
           userName: '',
           defaultDestination: '',
           editorialSuffixEnabled: true,
