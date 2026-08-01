@@ -109,3 +109,12 @@ covered by tests.
 - Run the explicitly authorized real-GPU smoke and EU-RO-1 two-Pod volume gate.
 - Build and smoke-test the Windows x64 NSIS installer on a Windows runner.
 - Perform the final packaged-app keyboard/folder-reveal pass on the target OSes.
+
+## RunPod create-payload repair — `0da1cb0`
+
+The first live EU-RO-1 create attempt returned a RunPod validation error because
+the v1 create body did not include the immutable worker image, even though the
+template ID was present. The lifecycle request now carries the exact
+`benchmarkContract.softwareImage` digest as `imageName`; the provider validates
+it and sends it on every create. The provider and lifecycle regression suites
+assert the field, and the RunPod client suite passes 91/91.
