@@ -169,6 +169,34 @@ async fn restore_destination(
 }
 
 #[tauri::command]
+async fn reveal_destination(
+    state: State<'_, NativeState>,
+    relative_path: Option<String>,
+) -> NativeResult<()> {
+    let destination = state.destination.clone();
+    tauri::async_runtime::spawn_blocking(move || destination.reveal(relative_path.as_deref()))
+        .await
+        .map_err(|_| {
+            NativeError::new(
+                "native_task_failed",
+                "The destination could not be revealed.",
+            )
+        })?
+}
+
+#[tauri::command]
+async fn write_manifest(
+    state: State<'_, NativeState>,
+    batch_id: String,
+    content: String,
+) -> NativeResult<String> {
+    let destination = state.destination.clone();
+    tauri::async_runtime::spawn_blocking(move || destination.write_manifest(&batch_id, &content))
+        .await
+        .map_err(|_| NativeError::new("native_task_failed", "The manifest could not be written."))?
+}
+
+#[tauri::command]
 async fn bind_worker_session(state: State<'_, NativeState>, pod_id: String) -> NativeResult<Value> {
     let _control = state.control_gate.lock().await;
     state.runpod.assert_verified_pod(&pod_id)?;
@@ -451,6 +479,8 @@ pub fn run() {
             choose_destination,
             validate_destination,
             restore_destination,
+            reveal_destination,
+            write_manifest,
             bind_worker_session,
             clear_worker_session,
             bind_runpod_profile,

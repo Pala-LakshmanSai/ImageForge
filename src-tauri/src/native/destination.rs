@@ -206,6 +206,123 @@ impl DestinationStore {
         let root = self.current()?;
         Ok(root.join(relative))
     }
+
+    pub fn reveal(&self, relative: Option<&str>) -> NativeResult<()> {
+        let root = self.current()?;
+        let target = match relative {
+            Some(relative) if !relative.is_empty() => self.confine(Path::new(relative))?,
+            _ => root.clone(),
+        };
+        reject_reparse_or_symlink(&target)?;
+        if !target.exists() {
+            return Err(NativeError::new(
+                "destination_missing",
+                "The requested ImageForge file is not present on this device.",
+            ));
+        }
+        let canonical_target = target.canonicalize().map_err(|_| {
+            NativeError::new(
+                "destination_missing",
+                "The requested ImageForge file is not present on this device.",
+            )
+        })?;
+        if !canonical_target.starts_with(&root) {
+            return Err(NativeError::new(
+                "destination_path_rejected",
+                "The requested reveal path is outside the ImageForge destination.",
+            ));
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let mut command = std::process::Command::new("open");
+            if canonical_target.is_file() {
+                command.arg("-R");
+            }
+            command.arg(&canonical_target);
+            command
+                .status()
+                .map_err(|_| destination_reveal_error())?
+                .success()
+                .then_some(())
+                .ok_or_else(destination_reveal_error)
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let mut command = std::process::Command::new("explorer.exe");
+            if canonical_target.is_file() {
+                command.arg(format!("/select,{}", canonical_target.display()));
+            } else {
+                command.arg(&canonical_target);
+            }
+            command
+                .status()
+                .map_err(|_| destination_reveal_error())?
+                .success()
+                .then_some(())
+                .ok_or_else(destination_reveal_error)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = canonical_target;
+            Err(NativeError::new(
+                "platform_unsupported",
+                "Reveal is available in the macOS and Windows apps.",
+            ))
+        }
+    }
+
+    pub fn write_manifest(&self, batch_id: &str, content: &str) -> NativeResult<String> {
+        if content.is_empty() || content.len() > 2 * 1024 * 1024 {
+            return Err(NativeError::new(
+                "manifest_rejected",
+                "The manifest is empty or larger than the safe export limit.",
+            ));
+        }
+        let batch_id = Uuid::parse_str(batch_id).map_err(|_| {
+            NativeError::new(
+                "batch_id_invalid",
+                "The ImageForge batch identifier is invalid.",
+            )
+        })?;
+        let batches = self.confine(Path::new("batches"))?;
+        if batches.exists() {
+            reject_reparse_or_symlink(&batches)?;
+        } else {
+            std::fs::create_dir(&batches).map_err(|_| destination_write_error())?;
+        }
+        let batch_directory = batches.join(batch_id.to_string());
+        if batch_directory.exists() {
+            reject_reparse_or_symlink(&batch_directory)?;
+        } else {
+            std::fs::create_dir(&batch_directory).map_err(|_| destination_write_error())?;
+        }
+        let destination = batch_directory.join("manifest.csv");
+        if destination.exists() {
+            reject_reparse_or_symlink(&destination)?;
+        }
+        let root = self.current()?;
+        let temporary = batch_directory.join(format!(".manifest.{}.part", Uuid::new_v4()));
+        let result = (|| -> std::io::Result<()> {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temporary)?;
+            file.write_all(content.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            replace_file_atomic(&temporary, &destination)?;
+            sync_directory(&batch_directory)?;
+            sync_directory(&batches)?;
+            sync_directory(&root)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(destination_write_error());
+        }
+        Ok(destination.to_string_lossy().into_owned())
+    }
 }
 
 fn persist_destination_record(
@@ -433,6 +550,13 @@ fn destination_grant_invalid() -> NativeError {
     )
 }
 
+fn destination_reveal_error() -> NativeError {
+    NativeError::new(
+        "destination_reveal_failed",
+        "The operating system could not reveal the ImageForge destination.",
+    )
+}
+
 fn destination_root_replaced() -> NativeError {
     NativeError::new(
         "destination_root_replaced",
@@ -539,6 +663,49 @@ mod tests {
         assert_eq!(
             replaced.restore().unwrap_err().code,
             "destination_root_replaced"
+        );
+    }
+
+    #[test]
+    fn manifest_export_is_atomic_and_confined_to_the_bound_destination() {
+        let temporary = tempfile::tempdir().unwrap();
+        let destination = temporary.path().join("downloads");
+        std::fs::create_dir(&destination).unwrap();
+        let store = DestinationStore::new_for_test(temporary.path().join("state.json"));
+        store.validate_and_bind(&destination).unwrap();
+
+        let batch_id = "11111111-1111-4111-8111-111111111111";
+        let path = store
+            .write_manifest(batch_id, "index,prompt,status\n1,hello,complete\n")
+            .unwrap();
+        let path = PathBuf::from(path);
+        assert_eq!(
+            path.parent().unwrap(),
+            destination.join("batches").join(batch_id)
+        );
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "index,prompt,status\n1,hello,complete\n"
+        );
+        assert_eq!(
+            store.write_manifest(batch_id, "").unwrap_err().code,
+            "manifest_rejected"
+        );
+        let second_id = "22222222-2222-4222-8222-222222222222";
+        store.write_manifest(second_id, "second\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(
+                destination
+                    .join("batches")
+                    .join(batch_id)
+                    .join("manifest.csv")
+            )
+            .unwrap(),
+            "index,prompt,status\n1,hello,complete\n"
+        );
+        assert_eq!(
+            store.reveal(Some("../outside")).unwrap_err().code,
+            "destination_path_rejected"
         );
     }
 }
