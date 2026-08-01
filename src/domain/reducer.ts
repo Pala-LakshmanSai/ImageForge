@@ -318,8 +318,9 @@ export function batchCounts(batch: BatchState | null) {
   }
   const completed = batch.prompts.filter((prompt) => prompt.status === 'downloaded').length;
   const failed = batch.prompts.filter((prompt) => prompt.status === 'failed').length;
-  const pending = batch.prompts.length - completed - failed;
-  const settled = completed + failed;
+  const cancelled = batch.prompts.filter((prompt) => prompt.status === 'cancelled').length;
+  const pending = batch.prompts.length - completed - failed - cancelled;
+  const settled = completed + failed + cancelled;
   return {
     total: batch.prompts.length,
     completed,
@@ -593,6 +594,11 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           ? toast(state, 'success', 'GPU ready', 'FLUX.2 Klein 4B is warm and ready for one batch.')
           : {}),
       };
+    case 'SYNC_RUNTIME_POD':
+      return {
+        ...state,
+        pod: { ...action.pod, lifecycleSequence: state.pod.lifecycleSequence },
+      };
     case 'REQUEST_STOP_POD':
       return { ...state, dialog: { type: 'stop-pod' } };
     case 'CONFIRM_STOP_POD':
@@ -686,6 +692,54 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     }
     case 'BATCH_TICK':
       return reduceBatchTick(state);
+    case 'SYNC_RUNTIME_BATCH': {
+      const library = action.assets.reduce(upsertLibraryAsset, state.library);
+      const terminal = ['complete', 'partial_failure', 'cancelled'].includes(action.batch.phase);
+      const usageId = `usage-${action.batch.id}`;
+      const usage = terminal && !state.usage.some((item) => item.id === usageId)
+        ? [finishUsage(action.batch, state.pod), ...state.usage]
+        : state.usage;
+      return {
+        ...state,
+        activeView: state.batch?.phase === 'validating' ? 'progress' : state.activeView,
+        batch: action.batch,
+        library,
+        usage,
+      };
+    }
+    case 'SYNC_RUNTIME_BUSY':
+      return {
+        ...state,
+        activeView: 'progress',
+        batch: action.batch,
+        ...toast(
+          state,
+          'warning',
+          `${action.batch.owner} is using ImageForge`,
+          'This batch is blocked immediately and was not queued.',
+        ),
+      };
+    case 'RUNTIME_BATCH_IDLE':
+      return state.batch?.phase === 'locked'
+        ? {
+            ...state,
+            activeView: 'create',
+            batch: null,
+            ...toast(state, 'success', 'ImageForge is available', 'The other batch released the shared worker lock.'),
+          }
+        : state;
+    case 'RUNTIME_ERROR':
+      return action.scope === 'pod'
+        ? {
+            ...state,
+            pod: podDetails('error', 100, action.message, state.pod),
+            ...toast(state, 'error', 'GPU operation needs attention', action.message),
+          }
+        : {
+            ...state,
+            batch: state.batch ? { ...state.batch, phase: 'error', statusMessage: action.message } : null,
+            ...toast(state, 'error', 'Batch operation needs attention', action.message),
+          };
     case 'TOGGLE_BATCH_PAUSE': {
       if (!state.batch || !['running', 'paused'].includes(state.batch.phase)) return state;
       const isPausing = state.batch.phase === 'running';

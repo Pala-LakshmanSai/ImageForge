@@ -215,6 +215,7 @@ export type AppAction =
   | { type: 'SET_DESTINATION'; path: string }
   | { type: 'START_POD' }
   | { type: 'SET_POD_PHASE'; phase: PodPhase; progress: number; detail: string; podId?: string; gpu?: string; vram?: string; hourlyRate?: number }
+  | { type: 'SYNC_RUNTIME_POD'; pod: PodState }
   | { type: 'REQUEST_STOP_POD' }
   | { type: 'CONFIRM_STOP_POD' }
   | { type: 'POD_STOPPED' }
@@ -222,6 +223,10 @@ export type AppAction =
   | { type: 'START_BATCH'; startedAt: string }
   | { type: 'BATCH_VALIDATED' }
   | { type: 'BATCH_TICK' }
+  | { type: 'SYNC_RUNTIME_BATCH'; batch: BatchState; assets: LibraryAsset[] }
+  | { type: 'SYNC_RUNTIME_BUSY'; batch: BatchState }
+  | { type: 'RUNTIME_BATCH_IDLE' }
+  | { type: 'RUNTIME_ERROR'; scope: 'pod' | 'batch'; message: string }
   | { type: 'TOGGLE_BATCH_PAUSE' }
   | { type: 'REQUEST_CANCEL_BATCH' }
   | { type: 'CONFIRM_CANCEL_BATCH' }

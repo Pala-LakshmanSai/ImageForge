@@ -168,4 +168,47 @@ describe('appReducer', () => {
     state = appReducer(state, { type: 'PREVIEW_SCENARIO', scenario: 'complete' });
     expect(batchCounts(state.batch).progress).toBe(100);
   });
+
+  it('applies authoritative runtime Pod, busy, owned batch, and lock-release events', () => {
+    let state = createInitialState();
+    state = appReducer(state, {
+      type: 'SYNC_RUNTIME_POD',
+      pod: {
+        ...state.pod,
+        phase: 'ready',
+        phaseProgress: 100,
+        statusDetail: 'Model warm',
+        gpu: 'RTX 4090',
+        vram: '24 GB',
+        hourlyRate: 0.5,
+        health: 'healthy',
+        podId: 'verifiedpod1',
+        matchingPodIds: ['verifiedpod1'],
+      },
+    });
+    expect(state.pod).toMatchObject({ phase: 'ready', podId: 'verifiedpod1' });
+
+    const lockedBatch = {
+      id: 'busy-batch',
+      name: 'Sujal’s active batch',
+      owner: 'Sujal',
+      phase: 'locked' as const,
+      prompts: [],
+      destination: 'Owner’s selected computer',
+      startedAt: '2026-08-01T10:00:00.000Z',
+      elapsedSeconds: 0,
+      estimatedSecondsPerImage: 8.4,
+      estimatedCost: 0,
+      lockMessage: '17 of 400 images are generated.',
+      statusMessage: 'Sujal is generating 17 of 400',
+      reportedProgress: { total: 400, completed: 17, failed: 0, cancelled: 0, currentIndex: 18 },
+    };
+    state = appReducer(state, { type: 'SYNC_RUNTIME_BUSY', batch: lockedBatch });
+    expect(batchCounts(state.batch)).toMatchObject({ total: 400, completed: 17, pending: 383 });
+    expect(state.activeView).toBe('progress');
+
+    state = appReducer(state, { type: 'RUNTIME_BATCH_IDLE' });
+    expect(state.batch).toBeNull();
+    expect(state.activeView).toBe('create');
+  });
 });
