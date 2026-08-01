@@ -144,3 +144,21 @@ warmup/generation smoke before the template is considered production-ready.
 
 The cross-Pod shared-volume lease gate, Windows installer smoke, and final
 packaged-app keyboard/folder-reveal checks remain separate release gates.
+
+## Removable-disk release evidence — `81d0faa`
+
+- Fresh macOS Apple-silicon DMG built from the production worktree:
+  `/Volumes/ImageForgeBuild/cargo-target/release/bundle/dmg/ImageForge_0.1.0_aarch64.dmg`
+  SHA-256 `706b6fc895f32730ae725220a2a2f16316b67219f11e2f6af3c515bd37154229`.
+- The DMG was mounted, its embedded ImageForge app launched from the mounted
+  volume, the process was observed, and the volume was detached afterward.
+  The artifact is ad-hoc/unsigned for beta distribution; it is not presented
+  as Apple-signed.
+- A private GitHub repository now contains the source and a native
+  `windows-latest` NSIS workflow at `.github/workflows/build-desktop.yml`.
+  The first Windows run exposed the macOS-authored TypeScript 7 optional
+  package omission; the workflow now installs the Windows compiler companion
+  explicitly before tests and packaging.
+- Direct macOS Windows cross-build remains intentionally unsupported: the
+  target fails in `aws-lc-sys` without `windows.h`, `stdlib.h`, and an MSVC/Windows
+  SDK. The native Windows workflow is the authoritative installer path.
