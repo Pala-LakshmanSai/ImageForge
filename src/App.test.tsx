@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import type { ImageForgeAdapter } from './adapters/imageForgeAdapter';
+import type { ProductionRuntimeFacade } from './adapters/productionImageForgeAdapter';
 import { DEFAULT_STUDIO_PROFILE } from './adapters/imageForgeAdapter';
 import { appReducer, createConfiguredInitialState, createDemoState, createInitialState } from './domain/reducer';
 import type { CredentialMetadataMap } from './domain/types';
@@ -44,11 +45,66 @@ function immediateAdapter(configured = true): ImageForgeAdapter {
   };
 }
 
+function productionAdapter() {
+  const listeners = new Set<Parameters<ProductionRuntimeFacade['subscribe']>[0]>();
+  const runtime: ProductionRuntimeFacade = {
+    subscribe: vi.fn((listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    }),
+    refresh: vi.fn(async () => undefined),
+    startGpu: vi.fn(async () => undefined),
+    stopGpu: vi.fn(async () => undefined),
+    startBatch: vi.fn(async () => undefined),
+    pollBatch: vi.fn(async () => undefined),
+    controlBatch: vi.fn(async () => undefined),
+    resolveAmbiguousStart: vi.fn(),
+    dispose: vi.fn(),
+  };
+  const fake = immediateAdapter();
+  const adapter: ImageForgeAdapter = {
+    ...fake,
+    mode: 'production',
+    runtime,
+    runPodLifecycle: vi.fn(() => () => undefined),
+    finishPodStop: vi.fn(() => () => undefined),
+    validateBatch: vi.fn(() => () => undefined),
+    runBatchClock: vi.fn(() => () => undefined),
+  };
+  return { adapter, runtime, listeners };
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
 
 describe('ImageForge shell', () => {
+  it('refreshes production read-only on launch and starts compute only after a foreground click', async () => {
+    const user = userEvent.setup();
+    const production = productionAdapter();
+    render(<App initialState={createConfiguredInitialState()} adapter={production.adapter} />);
+
+    await waitFor(() => expect(production.runtime.refresh).toHaveBeenCalledOnce());
+    expect(production.runtime.startGpu).not.toHaveBeenCalled();
+    expect(production.adapter.runPodLifecycle).not.toHaveBeenCalled();
+
+    await user.click(screen.getAllByRole('button', { name: 'Start GPU' })[0]);
+    await waitFor(() => expect(production.runtime.startGpu).toHaveBeenCalledOnce());
+    expect(production.adapter.runPodLifecycle).not.toHaveBeenCalled();
+  });
+
+  it('routes production batch controls to the authoritative runtime without optimistic fake state', async () => {
+    const user = userEvent.setup();
+    const production = productionAdapter();
+    const state = createDemoState();
+    render(<App initialState={state} adapter={production.adapter} />);
+
+    await user.click(screen.getByRole('button', { name: 'Pause after frame' }));
+    expect(production.runtime.controlBatch).toHaveBeenCalledWith('pause', expect.objectContaining({ batch: expect.objectContaining({ phase: 'running' }) }));
+    expect(screen.getByRole('button', { name: 'Pause after frame' })).toBeVisible();
+    expect(production.adapter.runBatchClock).not.toHaveBeenCalled();
+  });
+
   it('navigates all five real destinations', async () => {
     const user = userEvent.setup();
     render(<App initialState={createConfiguredInitialState()} adapter={immediateAdapter()} />);
