@@ -28,7 +28,7 @@ function formatDate(value: string) {
   return new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(value));
 }
 
-export function UsageScreen({ state, dispatch }: ScreenProps) {
+export function UsageScreen({ state, dispatch, adapter }: ScreenProps) {
   const currentCounts = batchCounts(state.batch);
   const currentRun: UsageRun | null = state.batch
     ? {
@@ -72,7 +72,7 @@ export function UsageScreen({ state, dispatch }: ScreenProps) {
       {chartRuns.length ? (
         <div className="usage-layout">
           <section className="panel usage-chart-panel">
-            <header className="panel-heading"><div><Eyebrow>Session cost</Eyebrow><h2>Cost follows useful output</h2></div><span className="source-chip"><Activity size={14} /> deterministic simulation</span></header>
+            <header className="panel-heading"><div><Eyebrow>Session cost</Eyebrow><h2>Cost follows useful output</h2></div><span className="source-chip"><Activity size={14} /> {adapter.mode === 'production' ? 'verified runtime ledger' : 'deterministic simulation'}</span></header>
             <div className="cost-chart" role="img" aria-label="Cost by recent production batch">
               <div className="cost-chart__scale"><span>${maxCost.toFixed(2)}</span><span>${(maxCost / 2).toFixed(2)}</span><span>$0</span></div>
               <div className="cost-chart__bars">
@@ -108,7 +108,7 @@ export function UsageScreen({ state, dispatch }: ScreenProps) {
           </aside>
         </div>
       ) : (
-        <section className="panel"><EmptyState icon={Activity} title="Usage begins with a verified frame" copy="Run a simulated batch to populate measured timing and cost history." action={<Button tone="primary" onClick={() => dispatch({ type: 'NAVIGATE', view: 'create' })}>Open Create</Button>} /></section>
+        <section className="panel"><EmptyState icon={Activity} title="Usage begins with a verified frame" copy={adapter.mode === 'production' ? 'Complete a batch to populate measured timing and cost history.' : 'Run a simulated batch to populate measured timing and cost history.'} action={<Button tone="primary" onClick={() => dispatch({ type: 'NAVIGATE', view: 'create' })}>Open Create</Button>} /></section>
       )}
 
       <section className="panel usage-table-panel">

@@ -103,7 +103,7 @@ function NoBatch({ state, dispatch }: Pick<ScreenProps, 'state' | 'dispatch'>) {
   );
 }
 
-export function ProgressScreen({ state, dispatch }: ScreenProps) {
+export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
   const batch = state.batch;
   const [selectedId, setSelectedId] = useState<string | undefined>();
 
@@ -246,6 +246,12 @@ export function ProgressScreen({ state, dispatch }: ScreenProps) {
                   <div className="preview-frame__failed"><CircleOff size={31} /><strong>Preview unavailable</strong><span>{selectedPrompt.failureReason}</span></div>
                 ) : selectedPrompt.status === 'pending' ? (
                   <div className="preview-frame__waiting"><Clock3 size={29} /><strong>Ordered slot waiting</strong><span>Generation begins after earlier prompts settle.</span></div>
+                ) : adapter.mode === 'production' ? (
+                  <div className="preview-frame__waiting">
+                    <ShieldCheck size={29} />
+                    <strong>{selectedPrompt.status === 'downloaded' ? 'JPEG verified locally' : 'Secure preview pending'}</strong>
+                    <span>{selectedPrompt.status === 'downloaded' ? 'The full image is safely stored in your selected folder.' : 'ImageForge will show only verified local output here.'}</span>
+                  </div>
                 ) : (
                   <SimulatedImage seed={selectedPrompt.seed} prompt={selectedPrompt.text} />
                 )}

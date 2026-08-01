@@ -4,6 +4,7 @@ import type {
   CredentialMetadataMap,
   PodPhase,
 } from '../domain/types';
+import type { ProductionRuntimeFacade } from './productionImageForgeAdapter';
 
 export const EU_RO_ORDINARY_GPUS = [
   'RTX 4090',
@@ -63,6 +64,8 @@ export interface StudioProfile {
 }
 
 export interface ImageForgeAdapter {
+  readonly mode?: 'fake' | 'production';
+  readonly runtime?: ProductionRuntimeFacade;
   chooseDestination(defaultPath: string): Promise<string | null>;
   validateDestination(path: string): Promise<boolean>;
   credentialMetadata(): Promise<CredentialMetadataMap>;
@@ -202,6 +205,7 @@ export function createFakeImageForgeAdapter(initialCredentials?: CredentialMetad
   let credentials = cloneCredentialMetadata(initialCredentials ?? emptyCredentialMetadata());
 
   return {
+    mode: 'fake',
     async chooseDestination(defaultPath) {
       await new Promise((resolve) => window.setTimeout(resolve, 180));
       return defaultPath;

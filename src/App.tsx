@@ -1,12 +1,12 @@
 import { AlertTriangle, CheckCircle2, Info, X, XCircle } from 'lucide-react';
-import { useEffect, useMemo, useReducer } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
 import { createFakeImageForgeAdapter, type ImageForgeAdapter } from './adapters/imageForgeAdapter';
 import { BottomNav, TopBar } from './components/AppChrome';
 import { DialogPortal } from './components/DialogPortal';
 import { SetupAssistant } from './components/SetupAssistant';
 import { Button, IconButton } from './components/primitives';
 import { createInitialState, appReducer } from './domain/reducer';
-import type { AppState } from './domain/types';
+import type { AppAction, AppState } from './domain/types';
 import { CreateScreen } from './screens/CreateScreen';
 import { LibraryScreen } from './screens/LibraryScreen';
 import { ProgressScreen } from './screens/ProgressScreen';
@@ -25,6 +25,25 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
     () => injectedAdapter ?? createFakeImageForgeAdapter(initialState?.setup.credentials),
     [injectedAdapter, initialState?.setup.credentials],
   );
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  const runtime = adapter.mode === 'production' ? adapter.runtime : undefined;
+
+  useEffect(() => {
+    if (!runtime) return;
+    return runtime.subscribe((event) => {
+      if (event.type === 'pod') dispatch({ type: 'SYNC_RUNTIME_POD', pod: event.pod });
+      else if (event.type === 'batch') dispatch({ type: 'SYNC_RUNTIME_BATCH', batch: event.batch, assets: event.assets });
+      else if (event.type === 'busy') dispatch({ type: 'SYNC_RUNTIME_BUSY', batch: event.batch });
+      else if (event.type === 'idle') dispatch({ type: 'RUNTIME_BATCH_IDLE' });
+      else dispatch({ type: 'RUNTIME_ERROR', scope: event.scope, message: event.message });
+    });
+  }, [runtime]);
+
+  useEffect(() => {
+    if (!runtime || !state.setup.completed) return;
+    void runtime.refresh(stateRef.current).catch(() => undefined);
+  }, [runtime, state.setup.completed]);
 
   useEffect(() => {
     let active = true;
@@ -41,6 +60,10 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
 
   useEffect(() => {
     if (state.pod.lifecycleSequence === 0 || state.pod.phase !== 'selecting') return;
+    if (runtime) {
+      void runtime.startGpu(stateRef.current).catch(() => undefined);
+      return;
+    }
     return adapter.runPodLifecycle(
       {
         preference: state.settings.gpuPreference,
@@ -50,22 +73,39 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
     );
     // A lifecycle is tied to the explicit start sequence, not each intermediate phase.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [adapter, state.pod.lifecycleSequence]);
+  }, [adapter, runtime, state.pod.lifecycleSequence]);
 
   useEffect(() => {
     if (state.pod.phase !== 'stopping') return;
+    if (runtime) {
+      void runtime.stopGpu(stateRef.current).catch(() => undefined);
+      return;
+    }
     return adapter.finishPodStop(() => dispatch({ type: 'POD_STOPPED' }));
-  }, [adapter, state.pod.phase]);
+  }, [adapter, runtime, state.pod.phase]);
 
   useEffect(() => {
     if (state.batch?.phase !== 'validating') return;
+    if (runtime) {
+      void runtime.startBatch(state.batch).catch(() => undefined);
+      return;
+    }
     return adapter.validateBatch(() => dispatch({ type: 'BATCH_VALIDATED' }));
-  }, [adapter, state.batch?.phase]);
+  }, [adapter, runtime, state.batch?.phase]);
 
   useEffect(() => {
+    if (runtime) return;
     if (state.batch?.phase !== 'running') return;
     return adapter.runBatchClock(state.settings.simulationSpeed, () => dispatch({ type: 'BATCH_TICK' }));
-  }, [adapter, state.batch?.phase, state.settings.simulationSpeed]);
+  }, [adapter, runtime, state.batch?.phase, state.settings.simulationSpeed]);
+
+  useEffect(() => {
+    if (!runtime || state.pod.phase !== 'ready') return;
+    const poll = () => void runtime.pollBatch(stateRef.current).catch(() => undefined);
+    poll();
+    const timer = window.setInterval(poll, 1_500);
+    return () => window.clearInterval(timer);
+  }, [runtime, state.pod.phase]);
 
   useEffect(() => {
     if (!state.toast) return;
@@ -73,14 +113,46 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
     return () => window.clearTimeout(timer);
   }, [state.toast]);
 
-  const screenProps = { state, dispatch, adapter };
+  const uiDispatch = useCallback((action: AppAction) => {
+    if (!runtime) {
+      dispatch(action);
+      return;
+    }
+    const current = stateRef.current;
+    if (action.type === 'TOGGLE_BATCH_PAUSE') {
+      const control = current.batch?.phase === 'running' ? 'pause' : 'resume';
+      void runtime.controlBatch(control, current).catch(() => undefined);
+      return;
+    }
+    if (action.type === 'RETRY_FAILED') {
+      void runtime.controlBatch('retry_failed', current).catch(() => undefined);
+      return;
+    }
+    if (action.type === 'RESUME_INTERRUPTED_BATCH') {
+      void runtime.controlBatch('resume', current).catch(() => undefined);
+      return;
+    }
+    if (action.type === 'CONFIRM_CANCEL_BATCH') {
+      dispatch({ type: 'DISMISS_DIALOG' });
+      void runtime.controlBatch('cancel', current).catch(() => undefined);
+      return;
+    }
+    if (action.type === 'REFRESH_STATUS') {
+      dispatch(action);
+      void runtime.refresh(current).catch(() => undefined);
+      return;
+    }
+    dispatch(action);
+  }, [runtime]);
+
+  const screenProps = { state, dispatch: uiDispatch, adapter };
 
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to content</a>
       <div className="ambient ambient--crimson" aria-hidden="true" />
       <div className="ambient ambient--cobalt" aria-hidden="true" />
-      <TopBar state={state} dispatch={dispatch} />
+      <TopBar state={state} dispatch={uiDispatch} />
 
       {state.pod.matchingPodIds.length > 1 ? (
         <aside className="duplicate-warning" role="alert">
@@ -101,7 +173,7 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
         {state.activeView === 'settings' ? <SettingsScreen {...screenProps} /> : null}
       </main>
 
-      <BottomNav state={state} dispatch={dispatch} />
+      <BottomNav state={state} dispatch={uiDispatch} />
 
       {state.dialog ? (
         <DialogPortal
@@ -135,7 +207,7 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
                 <p>Downloaded and verified files stay in the selected folder. Pending prompts are removed from this run and the shared batch lock is released.</p>
                 <div className="modal__actions">
                   <Button data-autofocus onClick={() => dispatch({ type: 'DISMISS_DIALOG' })}>Continue batch</Button>
-                  <Button tone="danger" onClick={() => dispatch({ type: 'CONFIRM_CANCEL_BATCH' })}>Cancel remaining</Button>
+                  <Button tone="danger" onClick={() => uiDispatch({ type: 'CONFIRM_CANCEL_BATCH' })}>Cancel remaining</Button>
                 </div>
               </>
             ) : (

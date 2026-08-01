@@ -91,7 +91,7 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
   return (
     <div className="screen settings-screen">
       <section className="page-heading">
-        <div><Eyebrow>Settings · this device</Eyebrow><h1>Make the desk yours.</h1><p>Identity, local delivery, redacted connection health, and a deterministic state lab.</p></div>
+        <div><Eyebrow>Settings · this device</Eyebrow><h1>Make the desk yours.</h1><p>Identity, local delivery, redacted connection health, and explicit GPU control.</p></div>
         <div className="page-heading__actions">
           <Button icon={Laptop} onClick={() => openSetup()}>Review setup</Button>
           <PhaseBadge tone="success"><ShieldCheck size={13} /> secrets redacted</PhaseBadge>
@@ -176,19 +176,19 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
             <label className="settings-field"><span>Visible suffix</span><textarea value={state.settings.editorialSuffix} disabled={!state.settings.editorialSuffixEnabled} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'editorialSuffix', value: event.target.value })} /></label>
           </section>
 
-          <section className="panel settings-panel state-lab">
+          {adapter.mode !== 'production' ? <section className="panel settings-panel state-lab">
             <SettingSectionTitle icon={Gauge} eyebrow="Deterministic fake adapter" title="Operational state lab" />
             <p className="settings-intro">Preview every authored Pod, ownership, recovery, and batch state without paid compute.</p>
             <label className="scenario-select"><span>State to preview</span><select value={scenario} onChange={(event) => setScenario(event.target.value as OperationalScenario)}>{SCENARIOS.map((item) => <option key={item.id} value={item.id}>{item.label} — {item.note}</option>)}</select></label>
             <div className="simulation-speed"><span><strong>Simulation speed</strong><small>Controls deterministic batch tick frequency.</small></span><div className="segmented-control">{([1, 4, 12] as const).map((speed) => <button key={speed} className={state.settings.simulationSpeed === speed ? 'active' : ''} onClick={() => dispatch({ type: 'SET_SETTING', key: 'simulationSpeed', value: speed })}>{speed}×</button>)}</div></div>
             <Button tone="primary" icon={Gauge} onClick={() => dispatch({ type: 'PREVIEW_SCENARIO', scenario })}>Load {SCENARIOS.find((item) => item.id === scenario)?.label} state</Button>
-          </section>
+          </section> : null}
 
-          <section className="panel settings-panel danger-zone">
+          {adapter.mode !== 'production' ? <section className="panel settings-panel danger-zone">
             <SettingSectionTitle icon={RotateCcw} eyebrow="Simulation data" title="Reset production desk" />
             <p>Return to the authored offline/empty state. This fake-only action clears the simulated batch and library; it does not touch local files.</p>
             <Button tone="danger" onClick={() => dispatch({ type: 'RESET_WORKSPACE' })}>Reset simulated workspace</Button>
-          </section>
+          </section> : null}
         </div>
       </div>
       {showSetup ? <SetupAssistant key={`setup-${setupInitialStep}`} state={state} dispatch={dispatch} adapter={adapter} initialStep={setupInitialStep} onClose={() => setShowSetup(false)} /> : null}
