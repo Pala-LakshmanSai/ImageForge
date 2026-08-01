@@ -1,0 +1,4 @@
+interface:
+  display_name: "ImageForge Worker"
+  short_description: "Build the RunPod and FLUX worker safely"
+  default_prompt: "Use $imageforge-worker to implement or diagnose the ImageForge GPU backend."

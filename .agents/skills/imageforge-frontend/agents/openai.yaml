@@ -1,0 +1,4 @@
+interface:
+  display_name: "ImageForge Frontend"
+  short_description: "Build and refine the premium desktop UI"
+  default_prompt: "Use $imageforge-frontend to implement or refine this ImageForge interface."

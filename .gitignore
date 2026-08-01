@@ -1,0 +1,17 @@
+node_modules/
+._*
+.DS_Store
+dist/
+.cache/
+.tmp/
+target/
+src-tauri/target/
+.env
+.env.*
+!.env.example
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+*.part
+artifacts/

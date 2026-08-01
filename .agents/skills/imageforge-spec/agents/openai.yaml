@@ -1,0 +1,4 @@
+interface:
+  display_name: "ImageForge Spec"
+  short_description: "Turn product decisions into testable contracts"
+  default_prompt: "Use $imageforge-spec to turn this ImageForge request into a bounded implementation task."

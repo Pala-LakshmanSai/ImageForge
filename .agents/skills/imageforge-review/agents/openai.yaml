@@ -1,0 +1,4 @@
+interface:
+  display_name: "ImageForge Review"
+  short_description: "Independently verify ImageForge changes"
+  default_prompt: "Use $imageforge-review to test an ImageForge task against its acceptance criteria."

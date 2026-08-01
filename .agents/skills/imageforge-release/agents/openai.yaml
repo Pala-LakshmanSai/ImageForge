@@ -1,0 +1,4 @@
+interface:
+  display_name: "ImageForge Release"
+  short_description: "Package reliable macOS and Windows builds"
+  default_prompt: "Use $imageforge-release to package and verify an ImageForge desktop release."
