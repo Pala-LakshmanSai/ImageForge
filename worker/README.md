@@ -133,8 +133,10 @@ digest, and results; any failure disqualifies that storage configuration.
 
 ## API behavior
 
-`POST /v1/batches` accepts `{"prompts":[...],"base_seed":0}`. Batch IDs and
-all paths are server generated. If a lease is already held, the server returns
+`POST /v1/batches` accepts `{"prompts":[...],"base_seed":0,"references":[{"name":"anchor.png","mime_type":"image/png","data_hex":"..."}]}`.
+References are optional, batch-level, and apply to every prompt; raw bytes are
+stored only as temporary worker files and never copied into prompt text or logs.
+Batch IDs and all paths are server generated. If a lease is already held, the server returns
 HTTP 423 with stable code `batch_busy`, the owner's display name, and progress;
 there is no queue. Pause stops before the next image while retaining the lease.
 Cancel allows the current image to finish, cancels the remainder, and releases
