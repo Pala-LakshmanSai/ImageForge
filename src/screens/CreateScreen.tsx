@@ -361,7 +361,7 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
                 onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'editorialSuffix', value: event.target.value })}
                 aria-describedby="create-editorial-suffix-help"
               />
-              <small id="create-editorial-suffix-help">Appended exactly as shown to each submitted prompt.</small>
+              <small id="create-editorial-suffix-help">Appended after each submitted prompt when enabled; surrounding whitespace is normalized.</small>
             </label>
           </section>
 
