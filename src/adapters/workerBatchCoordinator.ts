@@ -5,6 +5,8 @@ import {
   type WorkerBatchSummary,
   type WorkerManifest,
 } from './workerContracts';
+import { MAX_BATCH_REFERENCES, MAX_REFERENCE_BYTES, MAX_REFERENCE_TOTAL_BYTES, isReferenceMimeType } from '../domain/references';
+import type { BatchReference } from '../domain/types';
 
 export interface WorkerHttpResult {
   status: number;
@@ -23,7 +25,7 @@ export interface LocalDownloadReceipt {
 
 export interface WorkerBatchPort {
   status(): Promise<WorkerHttpResult>;
-  createBatch(prompts: string[], baseSeed: number): Promise<WorkerHttpResult>;
+  createBatch(prompts: string[], baseSeed: number, references?: WorkerReferencePayload[]): Promise<WorkerHttpResult>;
   getBatch(batchId: string): Promise<WorkerHttpResult>;
   pauseBatch(batchId: string): Promise<WorkerHttpResult>;
   resumeBatch(batchId: string): Promise<WorkerHttpResult>;
@@ -36,6 +38,12 @@ export interface WorkerBatchPort {
     expectedSha256: string;
     expectedSizeBytes: number;
   }): Promise<LocalDownloadReceipt>;
+}
+
+export interface WorkerReferencePayload {
+  name: string;
+  mimeType: BatchReference['mimeType'];
+  bytes: number[];
 }
 
 export type WorkerBatchEvent =
@@ -64,9 +72,8 @@ function validateReceipt(receipt: LocalDownloadReceipt, batchId: string): LocalD
   if (
     receipt.schemaVersion !== 1 ||
     receipt.batchId !== batchId ||
-    !Number.isInteger(receipt.index) ||
+    !Number.isSafeInteger(receipt.index) ||
     receipt.index < 1 ||
-    receipt.index > 500 ||
     receipt.filename !== `batches/${batchId}/${String(receipt.index).padStart(6, '0')}.jpg` ||
     !/^[0-9a-f]{64}$/.test(receipt.sha256) ||
     !Number.isSafeInteger(receipt.sizeBytes) ||
@@ -125,18 +132,34 @@ export class WorkerBatchCoordinator {
     else this.#receiptCache.delete(batchId);
   }
 
-  async create(prompts: readonly string[], baseSeed: number): Promise<WorkerBatchEvent> {
+  async create(prompts: readonly string[], baseSeed: number, references: readonly BatchReference[] = []): Promise<WorkerBatchEvent> {
     if (
       prompts.length < 1 ||
-      prompts.length > 450 ||
-      prompts.some((prompt) => !prompt.trim() || new TextEncoder().encode(prompt).length > 4_096) ||
+      prompts.some((prompt) => !prompt.trim()) ||
       !Number.isSafeInteger(baseSeed) ||
       baseSeed < 0 ||
       baseSeed + prompts.length - 1 > Number.MAX_SAFE_INTEGER
     ) {
       throw new WorkerBatchError('batch_request_invalid', 'The batch request is invalid.', 0);
     }
-    const result = await this.#port.createBatch([...prompts], baseSeed);
+    if (
+      references.length > MAX_BATCH_REFERENCES ||
+      references.reduce((total, reference) => total + reference.bytes.length, 0) > MAX_REFERENCE_TOTAL_BYTES ||
+      references.some((reference) =>
+        !reference.name ||
+        !isReferenceMimeType(reference.mimeType) ||
+        reference.sizeBytes !== reference.bytes.length ||
+        reference.bytes.length < 1 ||
+        reference.bytes.length > MAX_REFERENCE_BYTES,
+      )
+    ) {
+      throw new WorkerBatchError('batch_reference_invalid', 'One or more image references are invalid.', 0);
+    }
+    const result = await this.#port.createBatch(
+      [...prompts],
+      baseSeed,
+      references.map(({ name, mimeType, bytes }) => ({ name, mimeType, bytes: [...bytes] })),
+    );
     if (result.status === 423) {
       // The authoritative status contains owner/progress without exposing the
       // other user's prompt manifest. There is deliberately no local queue.

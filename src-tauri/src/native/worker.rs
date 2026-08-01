@@ -12,14 +12,25 @@ use uuid::Uuid;
 
 const MAX_JSON_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PREVIEW_BYTES: usize = 4 * 1024 * 1024;
-const MAX_PROMPTS: usize = 500;
-const MAX_PROMPT_BYTES: usize = 4096;
+const MAX_BATCH_REFERENCES: usize = 8;
+const MAX_REFERENCE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_REFERENCE_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateBatchInput {
     pub prompts: Vec<String>,
     pub base_seed: u64,
+    #[serde(default)]
+    pub references: Vec<ReferenceInput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReferenceInput {
+    pub name: String,
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,10 +110,15 @@ impl WorkerApi {
 
     pub async fn create_batch(&self, input: CreateBatchInput) -> NativeResult<WorkerHttpResponse> {
         validate_create_batch(&input)?;
+        let references = input.references.iter().map(|reference| json!({
+            "name": reference.name,
+            "mime_type": reference.mime_type,
+            "data_hex": hex::encode(&reference.bytes),
+        })).collect::<Vec<_>>();
         self.request_json(
             Method::POST,
             "/v1/batches",
-            Some(json!({"prompts": input.prompts, "base_seed": input.base_seed})),
+            Some(json!({"prompts": input.prompts, "base_seed": input.base_seed, "references": references})),
             true,
             WorkerOperation::Manifest,
         )
@@ -138,7 +154,7 @@ impl WorkerApi {
 
     /// Fetch one generated preview through the native authenticated boundary.
     /// The renderer never receives the worker bearer token or an arbitrary URL.
-    pub async fn preview(&self, batch_id: Uuid, index: u16) -> NativeResult<WorkerPreviewResponse> {
+    pub async fn preview(&self, batch_id: Uuid, index: u64) -> NativeResult<WorkerPreviewResponse> {
         validate_index(index)?;
         let pin = self.session.pin().await?;
         let url = pin.endpoint(&format!("/v1/batches/{batch_id}/previews/{index}"))?;
@@ -401,32 +417,74 @@ impl WorkerApi {
 
 fn validate_create_batch(input: &CreateBatchInput) -> NativeResult<()> {
     if input.prompts.is_empty()
-        || input.prompts.len() > MAX_PROMPTS
-        || input.base_seed > (i64::MAX as u64).saturating_sub(MAX_PROMPTS as u64)
+        || input.base_seed
+            > (i64::MAX as u64).saturating_sub(input.prompts.len().saturating_sub(1) as u64)
     {
         return Err(NativeError::new(
             "batch_invalid",
-            "A batch must contain 1–500 prompts and a valid base seed.",
+            "A batch must contain at least one prompt and a valid base seed.",
         ));
     }
-    if input.prompts.iter().any(|prompt| {
-        prompt.trim().is_empty()
-            || prompt.len() > MAX_PROMPT_BYTES
-            || prompt.chars().any(|character| character == '\0')
-    }) {
+    if input
+        .prompts
+        .iter()
+        .any(|prompt| prompt.trim().is_empty() || prompt.chars().any(|character| character == '\0'))
+    {
         return Err(NativeError::new(
             "batch_invalid",
-            "Each prompt must contain text and fit within 4096 UTF-8 bytes.",
+            "Each prompt must contain text and no embedded null character.",
+        ));
+    }
+    if input.references.len() > MAX_BATCH_REFERENCES
+        || input.references.iter().map(|reference| reference.bytes.len()).sum::<usize>() > MAX_REFERENCE_TOTAL_BYTES
+        || input.references.iter().any(|reference| !validate_reference(reference))
+    {
+        return Err(NativeError::new(
+            "batch_reference_invalid",
+            "Each image reference must be a supported, decodable image within the safe batch size.",
         ));
     }
     Ok(())
 }
 
-pub(crate) fn validate_index(index: u16) -> NativeResult<()> {
-    if !(1..=MAX_PROMPTS as u16).contains(&index) {
+fn validate_reference(reference: &ReferenceInput) -> bool {
+    if reference.name.trim().is_empty()
+        || reference.name.len() > 255
+        || reference.name.contains('\0')
+        || reference.name.contains('/')
+        || reference.name.contains('\\')
+        || reference.bytes.is_empty()
+        || reference.bytes.len() > MAX_REFERENCE_BYTES
+    {
+        return false;
+    }
+    match reference.mime_type.as_str() {
+        "image/jpeg" => is_jpeg(&reference.bytes),
+        "image/png" => is_png(&reference.bytes),
+        "image/webp" => is_webp(&reference.bytes),
+        _ => false,
+    }
+}
+
+fn is_jpeg(bytes: &[u8]) -> bool {
+    bytes.len() > 4
+        && bytes[0..3] == [0xff, 0xd8, 0xff]
+        && bytes.windows(2).any(|pair| pair == [0xff, 0xd9])
+}
+
+fn is_png(bytes: &[u8]) -> bool {
+    bytes.len() >= 24
+        && bytes[..8] == [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+        && &bytes[12..16] == b"IHDR"
+        && u32::from_be_bytes(bytes[16..20].try_into().unwrap()) > 0
+        && u32::from_be_bytes(bytes[20..24].try_into().unwrap()) > 0
+}
+
+pub(crate) fn validate_index(index: u64) -> NativeResult<()> {
+    if index == 0 {
         return Err(NativeError::new(
             "image_index_invalid",
-            "Image indices must be between 1 and 500.",
+            "Image indices must be positive.",
         ));
     }
     Ok(())
@@ -594,7 +652,20 @@ fn project_manifest(body: &Value) -> NativeResult<Value> {
         .map(project_image)
         .collect::<NativeResult<Vec<_>>>()?;
     projected.insert("images".into(), Value::Array(images));
+    if let Some(references) = body.get("references") {
+        let references = references
+            .as_array()
+            .ok_or_else(worker_response_invalid)?
+            .iter()
+            .map(project_reference)
+            .collect::<NativeResult<Vec<_>>>()?;
+        projected.insert("references".into(), Value::Array(references));
+    }
     Ok(Value::Object(projected))
+}
+
+fn project_reference(value: &Value) -> NativeResult<Value> {
+    project_object(value, &["name", "mime_type", "size_bytes", "sha256", "filename"])
 }
 
 fn project_image(value: &Value) -> NativeResult<Value> {
@@ -746,21 +817,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn batch_validation_is_bounded_without_logging_prompt_content() {
+    fn batch_validation_rejects_only_malformed_prompt_input_without_logging_content() {
         assert!(validate_create_batch(&CreateBatchInput {
             prompts: vec!["A realistic editorial photograph".into()],
             base_seed: 42,
+            references: vec![],
         })
         .is_ok());
-        let sensitive_prompt = format!("DO-NOT-ECHO-THIS-{}", "x".repeat(MAX_PROMPT_BYTES));
-        for prompts in [vec![], vec![" ".into()], vec![sensitive_prompt.clone()]] {
+        let long_prompt = format!("DO-NOT-ECHO-THIS-{}", "x".repeat(5_000));
+        assert!(validate_create_batch(&CreateBatchInput {
+            prompts: vec![long_prompt],
+            base_seed: 0,
+            references: vec![],
+        })
+        .is_ok());
+        for prompts in [vec![], vec![" ".into()], vec!["contains\0null".into()]] {
             let error = validate_create_batch(&CreateBatchInput {
                 prompts,
                 base_seed: 0,
+                references: vec![],
             })
             .unwrap_err();
             assert_eq!(error.code, "batch_invalid");
-            assert!(!error.message.contains("DO-NOT-ECHO-THIS"));
         }
     }
 
@@ -768,6 +846,7 @@ mod tests {
     fn checksum_and_index_contracts_are_exact() {
         assert!(validate_index(1).is_ok());
         assert!(validate_index(500).is_ok());
+        assert!(validate_index(501).is_ok());
         assert!(validate_index(0).is_err());
         assert!(validate_checksum(&"a".repeat(64)).is_ok());
         assert!(validate_checksum(&"A".repeat(64)).is_err());
@@ -780,6 +859,19 @@ mod tests {
         assert!(!is_webp(b"RIFF0000JPEG"));
         assert!(!is_webp(b"WEBP"));
         assert!(MAX_PREVIEW_BYTES < MAX_JSON_RESPONSE_BYTES);
+    }
+
+    #[test]
+    fn reference_validation_requires_supported_decodable_headers_and_safe_names() {
+        let png = vec![
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+            0, 0, 0, 13, b'I', b'H', b'D', b'R',
+            0, 0, 0, 1, 0, 0, 0, 1,
+        ];
+        assert!(validate_reference(&ReferenceInput { name: "anchor.png".into(), mime_type: "image/png".into(), bytes: png }));
+        assert!(!validate_reference(&ReferenceInput { name: "anchor.svg".into(), mime_type: "image/svg+xml".into(), bytes: b"<svg/>".to_vec() }));
+        assert!(!validate_reference(&ReferenceInput { name: "../secret.png".into(), mime_type: "image/png".into(), bytes: vec![1; 24] }));
+        assert!(!validate_reference(&ReferenceInput { name: "empty.png".into(), mime_type: "image/png".into(), bytes: vec![] }));
     }
 
     #[test]

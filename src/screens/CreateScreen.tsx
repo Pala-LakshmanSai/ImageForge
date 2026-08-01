@@ -7,15 +7,19 @@ import {
   Folder,
   Gauge,
   HardDrive,
+  Image,
   LockKeyhole,
   ShieldCheck,
   Sparkles,
   Upload,
   WandSparkles,
+  X,
   Zap,
 } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { canStartBatch } from '../domain/reducer';
+import { isReferenceMimeType, MAX_BATCH_REFERENCES, MAX_REFERENCE_TOTAL_BYTES, normalizeReferenceName, validateReferenceBytes } from '../domain/references';
+import type { BatchReference, ReferenceMimeType } from '../domain/types';
 import { TERMINAL_BATCH_PHASES } from '../domain/types';
 import { Button, Eyebrow, PhaseBadge } from '../components/primitives';
 import type { ScreenProps } from './types';
@@ -45,10 +49,34 @@ function readiness(state: ScreenProps['state']) {
   ];
 }
 
+function ReferenceThumbnail({ reference }: { reference: BatchReference }) {
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    const url = URL.createObjectURL(new Blob([new Uint8Array(reference.bytes)], { type: reference.mimeType }));
+    setSrc(url);
+    return () => URL.revokeObjectURL(url);
+  }, [reference.bytes, reference.mimeType]);
+  return src ? <img src={src} alt="" /> : <span className="reference-card__placeholder"><Image size={17} /></span>;
+}
+
+function referenceMimeForFile(file: File): string {
+  if (isReferenceMimeType(file.type)) return file.type;
+  const extension = file.name.toLowerCase().split('.').at(-1);
+  return extension === 'jpg' || extension === 'jpeg'
+    ? 'image/jpeg'
+    : extension === 'png'
+      ? 'image/png'
+      : extension === 'webp'
+        ? 'image/webp'
+        : file.type;
+}
+
 export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const referenceInputRef = useRef<HTMLInputElement>(null);
   const [choosingDestination, setChoosingDestination] = useState(false);
   const [readingFile, setReadingFile] = useState(false);
+  const [readingReferences, setReadingReferences] = useState(false);
   const errors = state.draft.issues.filter((issue) => issue.level === 'error');
   const warnings = state.draft.issues.filter((issue) => issue.level === 'warning');
   const activeBatch = state.batch && !TERMINAL_BATCH_PHASES.includes(state.batch.phase);
@@ -91,6 +119,46 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
     } finally {
       setReadingFile(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  }
+
+  async function importReferences(files: FileList | File[]) {
+    const candidates = Array.from(files).slice(0, MAX_BATCH_REFERENCES - state.draft.references.length);
+    if (candidates.length === 0) {
+      dispatch({ type: 'SHOW_TOAST', tone: 'warning', title: 'Reference limit reached', message: `A batch can use up to ${MAX_BATCH_REFERENCES} references.` });
+      return;
+    }
+    setReadingReferences(true);
+    try {
+      let addedBytes = 0;
+      for (const file of candidates) {
+        const mimeType = referenceMimeForFile(file) as ReferenceMimeType;
+        const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+        const validation = validateReferenceBytes(mimeType, bytes);
+        if (validation !== null) {
+          dispatch({ type: 'SHOW_TOAST', tone: 'error', title: 'Reference rejected', message: `${file.name}: ${validation}` });
+          continue;
+        }
+        const existingBytes = state.draft.references.reduce((total, reference) => total + reference.sizeBytes, 0);
+        if (existingBytes + addedBytes + bytes.length > MAX_REFERENCE_TOTAL_BYTES) {
+          dispatch({ type: 'SHOW_TOAST', tone: 'error', title: 'Reference set is too large', message: `Keep all batch references under ${MAX_REFERENCE_TOTAL_BYTES / (1024 * 1024)} MB.` });
+          continue;
+        }
+        const reference: BatchReference = {
+          id: `reference-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          name: normalizeReferenceName(file.name),
+          mimeType,
+          sizeBytes: bytes.length,
+          bytes,
+        };
+        dispatch({ type: 'ADD_REFERENCE', reference });
+        addedBytes += bytes.length;
+      }
+    } catch {
+      dispatch({ type: 'SHOW_TOAST', tone: 'error', title: 'Could not read reference', message: 'Choose a local JPEG, PNG, or WebP image and try again.' });
+    } finally {
+      setReadingReferences(false);
+      if (referenceInputRef.current) referenceInputRef.current.value = '';
     }
   }
 
@@ -199,6 +267,55 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
         </section>
 
         <aside className="create-sidebar">
+          <section className="panel reference-panel">
+            <header className="panel-heading panel-heading--compact">
+              <div><Eyebrow>Optional visual anchor</Eyebrow><h2>Batch references</h2></div>
+              <Image size={20} />
+            </header>
+            <p className="reference-panel__intro">References apply to every prompt in this batch. They stay local until you explicitly start generation.</p>
+            <label
+              className="reference-dropzone"
+              htmlFor="reference-files"
+              aria-busy={readingReferences}
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => {
+                event.preventDefault();
+                void importReferences(event.dataTransfer.files);
+              }}
+            >
+              <input
+                ref={referenceInputRef}
+                id="reference-files"
+                className="visually-hidden"
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                multiple
+                onChange={(event) => void importReferences(event.target.files ?? [])}
+              />
+              <Upload size={17} />
+              <strong>{readingReferences ? 'Reading references…' : 'Choose or drop images'}</strong>
+              <small>JPEG, PNG, or WebP · up to {MAX_BATCH_REFERENCES}</small>
+            </label>
+            {state.draft.references.length > 0 ? (
+              <div className="reference-grid" aria-label={`${state.draft.references.length} batch references`}>
+                {state.draft.references.map((reference) => (
+                  <article className="reference-card" key={reference.id}>
+                    <ReferenceThumbnail reference={reference} />
+                    <div className="reference-card__meta">
+                      <strong title={reference.name}>{reference.name}</strong>
+                      <small>{reference.mimeType.replace('image/', '').toUpperCase()} · {(reference.sizeBytes / (1024 * 1024)).toFixed(1)} MB</small>
+                    </div>
+                    <button
+                      type="button"
+                      className="reference-card__remove"
+                      aria-label={`Remove ${reference.name}`}
+                      onClick={() => dispatch({ type: 'REMOVE_REFERENCE', id: reference.id })}
+                    ><X size={14} /></button>
+                  </article>
+                ))}
+              </div>
+            ) : null}
+          </section>
           <section className="panel destination-panel">
             <header className="panel-heading panel-heading--compact">
               <div><Eyebrow>02 · Local delivery</Eyebrow><h2>Destination</h2></div>
@@ -240,7 +357,6 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
               <textarea
                 id="create-editorial-suffix"
                 value={state.settings.editorialSuffix}
-                disabled={!state.settings.editorialSuffixEnabled}
                 onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'editorialSuffix', value: event.target.value })}
                 aria-describedby="create-editorial-suffix-help"
               />

@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { CredentialKind, CredentialMetadata, CredentialMetadataMap } from '../domain/types';
+import type { BatchReference, CredentialKind, CredentialMetadata, CredentialMetadataMap } from '../domain/types';
 
 export const NATIVE_RUNPOD_API_KEY_SENTINEL = '__IMAGEFORGE_NATIVE_VAULT__';
 
@@ -202,8 +202,18 @@ export function nativeWorkerStatus(): Promise<NativeHttpResponse> {
   return invoke('worker_status');
 }
 
-export function nativeWorkerCreateBatch(prompts: string[], baseSeed: number): Promise<NativeHttpResponse> {
-  return invoke('worker_create_batch', { input: { prompts, baseSeed } });
+export interface NativeWorkerReference {
+  name: string;
+  mimeType: BatchReference['mimeType'];
+  bytes: number[];
+}
+
+export function nativeWorkerCreateBatch(
+  prompts: string[],
+  baseSeed: number,
+  references: NativeWorkerReference[] = [],
+): Promise<NativeHttpResponse> {
+  return invoke('worker_create_batch', { input: { prompts, baseSeed, references } });
 }
 
 export function nativeWorkerGetBatch(batchId: string): Promise<NativeHttpResponse> {

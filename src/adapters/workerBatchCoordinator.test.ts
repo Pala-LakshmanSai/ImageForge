@@ -111,6 +111,31 @@ describe('WorkerBatchCoordinator', () => {
     expect(port.getBatch).toHaveBeenCalledOnce();
   });
 
+  it('forwards batch-level image references without mutating their bytes', async () => {
+    const port = fakePort();
+    const references = [{
+      id: 'reference-1',
+      name: 'anchor.png',
+      mimeType: 'image/png' as const,
+      sizeBytes: 4,
+      bytes: [0x89, 0x50, 0x4e, 0x47],
+    }];
+    await new WorkerBatchCoordinator(port).create(['A documentary shipyard at dawn'], 700, references);
+    expect(port.createBatch).toHaveBeenCalledWith(
+      ['A documentary shipyard at dawn'],
+      700,
+      [{ name: 'anchor.png', mimeType: 'image/png', bytes: [0x89, 0x50, 0x4e, 0x47] }],
+    );
+  });
+
+  it('rejects malformed or oversized image references before transport', async () => {
+    const port = fakePort();
+    await expect(new WorkerBatchCoordinator(port).create(['A documentary shipyard at dawn'], 700, [{
+      id: 'reference-1', name: 'bad.gif', mimeType: 'image/gif' as never, sizeBytes: 3, bytes: [1, 2, 3],
+    }])).rejects.toMatchObject({ code: 'batch_reference_invalid' });
+    expect(port.createBatch).not.toHaveBeenCalled();
+  });
+
   it('turns 423 into the authoritative foreign-owner lock and never queues or fetches prompts', async () => {
     const port = fakePort({
       createBatch: vi.fn(async (): Promise<WorkerHttpResult> => ({

@@ -1,4 +1,5 @@
 import { parsePromptText, SAMPLE_PROMPTS } from './prompts';
+import { MAX_BATCH_REFERENCES } from './references';
 import { DEFAULT_STUDIO_PROFILE, emptyCredentialMetadata } from '../adapters/imageForgeAdapter';
 import type {
   AppAction,
@@ -80,6 +81,7 @@ function emptyDraft(): DraftState {
     prompts: [],
     issues: [],
     destination: null,
+    references: [],
   };
 }
 
@@ -217,6 +219,7 @@ export function createDemoState(): AppState {
       prompts: batch.prompts,
       issues: [],
       destination: defaultDestinationForPlatform(),
+      references: [],
     },
     settings: { ...DEFAULT_SETTINGS, userName: 'Lakshman' },
     setup: {
@@ -570,6 +573,14 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         draft: { ...state.draft, destination: action.path },
         ...toast(state, 'success', 'Destination connected', `Verified write access to ${action.path}`),
       };
+    case 'ADD_REFERENCE':
+      if (state.draft.references.length >= MAX_BATCH_REFERENCES || state.draft.references.some((reference) => reference.id === action.reference.id)) return state;
+      return { ...state, draft: { ...state.draft, references: [...state.draft.references, action.reference] } };
+    case 'REMOVE_REFERENCE':
+      return {
+        ...state,
+        draft: { ...state.draft, references: state.draft.references.filter((reference) => reference.id !== action.id) },
+      };
     case 'START_POD':
       if (state.pod.createRecovery) {
         return {
@@ -737,6 +748,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           estimatedCost: 0,
           lockMessage: null,
           statusMessage: `Validating ${prompts.length} prompts and destination receipts`,
+          references: state.draft.references,
         },
         toast: null,
       };

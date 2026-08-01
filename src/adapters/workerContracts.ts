@@ -85,8 +85,17 @@ export interface WorkerManifest {
   interruptedAt: string | null;
   pauseRequested: boolean;
   cancelRequested: boolean;
+  references: WorkerReferenceMetadata[];
   images: WorkerImageRecord[];
   progress: WorkerProgress;
+}
+
+export interface WorkerReferenceMetadata {
+  name: string;
+  mimeType: 'image/jpeg' | 'image/png' | 'image/webp';
+  sizeBytes: number;
+  sha256: string;
+  filename: string;
 }
 
 export interface WorkerApiError {
@@ -224,6 +233,21 @@ function checksum(value: unknown, label: string): string {
   return parsed;
 }
 
+function referenceMetadata(value: unknown): WorkerReferenceMetadata {
+  const item = record(value, 'manifest reference');
+  exactKeys(item, ['name', 'mime_type', 'size_bytes', 'sha256', 'filename'], 'manifest reference');
+  const mimeType = enumeration(item.mime_type, ['image/jpeg', 'image/png', 'image/webp'] as const, 'manifest reference.mime_type');
+  const filename = string(item.filename, 'manifest reference.filename');
+  if (!/^references\/\d{6}\.(?:jpe?g|png|webp)$/.test(filename)) throw new Error('manifest reference filename is invalid.');
+  return {
+    name: string(item.name, 'manifest reference.name'),
+    mimeType,
+    sizeBytes: integer(item.size_bytes, 'manifest reference.size_bytes', 1),
+    sha256: checksum(item.sha256, 'manifest reference.sha256'),
+    filename,
+  };
+}
+
 function image(value: unknown, expectedIndex: number): WorkerImageRecord {
   const item = record(value, `images[${expectedIndex - 1}]`);
   // Attempts-in-cycle/history are intentionally removed by the native response
@@ -313,16 +337,23 @@ export function parseWorkerManifest(value: unknown): WorkerManifest {
       'interrupted_at',
       'pause_requested',
       'cancel_requested',
+      'references',
       'images',
       'progress',
     ],
     'worker manifest',
   );
   if (item.schema_version !== 1) throw new Error('worker manifest schema version is unsupported.');
-  if (!Array.isArray(item.images) || item.images.length < 1 || item.images.length > 500) {
+  if (!Array.isArray(item.images) || item.images.length < 1) {
     throw new Error('worker manifest image count is invalid.');
   }
   const images = item.images.map((candidate, index) => image(candidate, index + 1));
+  const references = item.references === undefined
+    ? []
+    : (() => {
+        if (!Array.isArray(item.references)) throw new Error('worker manifest references are invalid.');
+        return item.references.map(referenceMetadata);
+      })();
   const parsedProgress = progress(item.progress);
   if (parsedProgress.total !== images.length) throw new Error('worker manifest total does not match its images.');
   return {
@@ -336,6 +367,7 @@ export function parseWorkerManifest(value: unknown): WorkerManifest {
     interruptedAt: nullable(item.interrupted_at, (candidate) => string(candidate, 'interrupted_at')),
     pauseRequested: boolean(item.pause_requested, 'pause_requested'),
     cancelRequested: boolean(item.cancel_requested, 'cancel_requested'),
+    references,
     images,
     progress: parsedProgress,
   };

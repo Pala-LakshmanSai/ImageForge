@@ -177,7 +177,11 @@ class ProductionRuntime implements ProductionRuntimeFacade {
       hourlyRate: this.#pod?.hourlyRate ?? null,
     };
     try {
-      await this.#worker.create(batch.prompts.map((prompt) => prompt.text), batch.prompts[0]?.seed ?? 0);
+      await this.#worker.create(
+        batch.prompts.map((prompt) => prompt.text),
+        batch.prompts[0]?.seed ?? 0,
+        batch.references ?? [],
+      );
     } catch (error) {
       this.#emitError('batch', error, 'ImageForge could not create the batch.');
       throw error;

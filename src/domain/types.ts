@@ -87,6 +87,18 @@ export interface BatchPrompt extends DraftPrompt {
   failureReason?: string;
 }
 
+export type ReferenceMimeType = 'image/jpeg' | 'image/png' | 'image/webp';
+
+/** A local image reference held only for the pending batch request. Raw bytes
+ * never enter manifests, receipts, or safe preferences. */
+export interface BatchReference {
+  id: string;
+  name: string;
+  mimeType: ReferenceMimeType;
+  sizeBytes: number;
+  bytes: number[];
+}
+
 export interface DraftState {
   name: string;
   rawText: string;
@@ -94,6 +106,7 @@ export interface DraftState {
   prompts: DraftPrompt[];
   issues: ValidationIssue[];
   destination: string | null;
+  references: BatchReference[];
 }
 
 export interface PodState {
@@ -134,6 +147,7 @@ export interface BatchState {
   estimatedCost: number;
   lockMessage: string | null;
   statusMessage: string;
+  references?: BatchReference[];
   reportedProgress?: {
     total: number;
     completed: number;
@@ -224,6 +238,8 @@ export type AppAction =
   | { type: 'LOAD_SAMPLE' }
   | { type: 'NEW_BATCH' }
   | { type: 'SET_DESTINATION'; path: string }
+  | { type: 'ADD_REFERENCE'; reference: BatchReference }
+  | { type: 'REMOVE_REFERENCE'; id: string }
   | { type: 'START_POD' }
   | { type: 'SET_POD_PHASE'; phase: PodPhase; progress: number; detail: string; podId?: string; gpu?: string; vram?: string; hourlyRate?: number }
   | { type: 'SYNC_RUNTIME_POD'; pod: PodState }

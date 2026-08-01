@@ -117,4 +117,24 @@ describe('strict worker renderer contracts', () => {
     expect(parsed.images).toHaveLength(450);
     expect(performance.now() - started).toBeLessThan(100);
   });
+
+  it('projects safe batch reference metadata without accepting raw bytes', () => {
+    const parsed = parseWorkerManifest({
+      ...manifest(),
+      references: [{
+        name: 'anchor.png',
+        mime_type: 'image/png',
+        size_bytes: 1024,
+        sha256: 'a'.repeat(64),
+        filename: 'references/000001.png',
+      }],
+    });
+    expect(parsed.references).toEqual([{
+      name: 'anchor.png',
+      mimeType: 'image/png',
+      sizeBytes: 1024,
+      sha256: 'a'.repeat(64),
+      filename: 'references/000001.png',
+    }]);
+  });
 });

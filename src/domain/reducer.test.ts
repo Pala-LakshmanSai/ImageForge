@@ -174,6 +174,35 @@ describe('appReducer', () => {
     expect(defaultDestinationForPlatform('Mozilla/5.0 (Macintosh; Intel Mac OS X)')).toBe('/Users/Shared/Pictures/ImageForge');
   });
 
+  it('uses an edited default suffix exactly, and omits it when disabled', () => {
+    let state = readyDraft(1);
+    state = appReducer(state, { type: 'SET_SETTING', key: 'editorialSuffix', value: 'cinematic tungsten, clean frame' });
+    state = appReducer(state, { type: 'START_BATCH', startedAt: '2026-08-01T10:01:00.000Z' });
+    expect(state.batch?.prompts[0].text).toBe('Editorial documentary frame 001 with natural light and honest texture cinematic tungsten, clean frame');
+
+    state = readyDraft(1);
+    state = appReducer(state, { type: 'SET_SETTING', key: 'editorialSuffixEnabled', value: false });
+    state = appReducer(state, { type: 'START_BATCH', startedAt: '2026-08-01T10:02:00.000Z' });
+    expect(state.batch?.prompts[0].text).toBe('Editorial documentary frame 001 with natural light and honest texture');
+  });
+
+  it('keeps batch-level references local until launch and preserves them on the batch', () => {
+    let state = readyDraft(1);
+    const reference = {
+      id: 'reference-1',
+      name: 'anchor.png',
+      mimeType: 'image/png' as const,
+      sizeBytes: 24,
+      bytes: [0x89, 0x50, 0x4e, 0x47],
+    };
+    state = appReducer(state, { type: 'ADD_REFERENCE', reference });
+    expect(state.draft.references).toEqual([reference]);
+    state = appReducer(state, { type: 'START_BATCH', startedAt: '2026-08-01T10:00:00.000Z' });
+    expect(state.batch?.references).toEqual([reference]);
+    state = appReducer(state, { type: 'REMOVE_REFERENCE', id: reference.id });
+    expect(state.draft.references).toHaveLength(0);
+  });
+
   it('authors other-user lock, duplicate Pod, recovery, failure, and complete scenarios', () => {
     let state = createInitialState();
     state = appReducer(state, { type: 'PREVIEW_SCENARIO', scenario: 'locked' });
