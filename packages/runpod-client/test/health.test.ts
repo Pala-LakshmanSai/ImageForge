@@ -118,6 +118,25 @@ describe("HttpWorkerHealthProbe", () => {
       (error: unknown) => error instanceof RunPodClientError && error.code === "operation_aborted",
     );
   });
+
+  it("settles an abort when health response body parsing never resolves", async () => {
+    const response = {
+      ok: true,
+      status: 200,
+      json: () => new Promise<unknown>(() => undefined),
+    } as Response;
+    const probe = new HttpWorkerHealthProbe({
+      fetchTransport: (async () => response) as FetchTransport,
+    });
+    const controller = new AbortController();
+    const pending = probe.getHealth(deriveRunPodProxyUrl("abortbody1", 8000), controller.signal);
+    await Promise.resolve();
+    controller.abort();
+    await assert.rejects(
+      () => pending,
+      (error: unknown) => error instanceof RunPodClientError && error.code === "operation_aborted",
+    );
+  });
 });
 
 function jsonHealthResponse(phase: string): Response {

@@ -198,4 +198,54 @@ describe("rankGpuOffers", () => {
       "NVIDIA RTX 2000 Ada Generation",
     ]);
   });
+
+  it("never lets an emergency benchmark satisfy ordinary measured quorum", () => {
+    const ranked = rankGpuOffers({
+      offers: [
+        makeOffer({ hourlyPriceUsd: 0.8 }),
+        makeOffer({
+          gpuId: "NVIDIA GeForce RTX 5090",
+          policyKey: "rtx_5090",
+          coldPriority: 2,
+          displayName: "RTX 5090",
+          hourlyPriceUsd: 0.1,
+        }),
+        makeOffer({
+          gpuId: "NVIDIA RTX 2000 Ada Generation",
+          policyKey: "rtx_2000_ada",
+          coldPriority: 100,
+          emergency: true,
+          displayName: "RTX 2000 Ada",
+          hourlyPriceUsd: 0.01,
+        }),
+      ],
+      benchmarkProfiles: [
+        {
+          gpuId: "NVIDIA GeForce RTX 5090",
+          measuredAt: "2026-07-01T00:00:00.000Z",
+          promptSampleSize: 30,
+          bootSeconds: 1,
+          secondsPerImage: 1,
+          contract: benchmarkContract,
+        },
+        {
+          gpuId: "NVIDIA RTX 2000 Ada Generation",
+          measuredAt: "2026-07-01T00:00:00.000Z",
+          promptSampleSize: 30,
+          bootSeconds: 1,
+          secondsPerImage: 1,
+          contract: benchmarkContract,
+        },
+      ],
+      benchmarkContract,
+      expectedImageCount: 450,
+    });
+
+    assert.deepEqual(ranked.map((offer) => offer.gpuId), [
+      "NVIDIA GeForce RTX 4090",
+      "NVIDIA GeForce RTX 5090",
+      "NVIDIA RTX 2000 Ada Generation",
+    ]);
+    assert.ok(ranked.every((offer) => offer.rankingMode === "safe_4090_default"));
+  });
 });

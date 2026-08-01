@@ -15,6 +15,7 @@ import {
   type PodDiscoveryCriteria,
   type PodView,
   type RefreshOptions,
+  type ResolveAmbiguousCreateIntent,
   type RunPodClientConfig,
   type RunPodProvider,
   type RunPodSnapshot,
@@ -49,6 +50,15 @@ interface PendingConfirmation {
 interface EnrichedPods {
   readonly views: readonly PodView[];
   readonly warnings: readonly SnapshotWarning[];
+}
+
+interface StartAttemptState {
+  postAttempted: boolean;
+  exactPodReceived: boolean;
+}
+
+interface StopAttemptState {
+  deleteAttempted: boolean;
 }
 
 const ACTIVE_POD_STATUSES = new Set<ManagedPod["status"]>([
@@ -131,6 +141,35 @@ function awaitWithAbort<T>(
   });
 }
 
+interface OperationDeadline {
+  readonly signal: AbortSignal;
+  readonly timedOut: () => boolean;
+  readonly dispose: () => void;
+}
+
+function createOperationDeadline(
+  externalSignal: AbortSignal | undefined,
+  timeoutMs: number,
+): OperationDeadline {
+  const controller = new AbortController();
+  let didTimeOut = false;
+  const onExternalAbort = (): void => controller.abort();
+  externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
+  if (externalSignal?.aborted === true) controller.abort();
+  const timer = setTimeout(() => {
+    didTimeOut = true;
+    controller.abort();
+  }, timeoutMs);
+  return {
+    signal: controller.signal,
+    timedOut: () => didTimeOut,
+    dispose: () => {
+      clearTimeout(timer);
+      externalSignal?.removeEventListener("abort", onExternalAbort);
+    },
+  };
+}
+
 function safeErrorSummary(error: RunPodClientError): SafeErrorSummary {
   return Object.freeze({
     code: error.code,
@@ -188,6 +227,7 @@ export class RunPodLifecycleController {
   readonly #knownCreatedPods = new Map<string, ManagedPod>();
   #snapshot: RunPodSnapshot;
   #startPromise: Promise<StartGpuResult> | null = null;
+  #unresolvedStartRequestId: string | null = null;
   #mutationTail: Promise<void> = Promise.resolve();
 
   constructor(options: RunPodLifecycleControllerOptions) {
@@ -234,8 +274,57 @@ export class RunPodLifecycleController {
     return () => this.#listeners.delete(listener);
   }
 
+  resolveAmbiguousCreate(intent: ResolveAmbiguousCreateIntent): RunPodSnapshot {
+    if (
+      intent.intent !== "resolve_ambiguous_create" ||
+      intent.source !== "foreground_user" ||
+      this.#unresolvedStartRequestId === null ||
+      intent.requestId !== this.#unresolvedStartRequestId
+    ) {
+      throw new RunPodClientError({
+        code: "pod_create_ambiguous",
+        message: "The unresolved create marker does not match this explicit resolution.",
+        operation: "create_pod",
+        retryable: true,
+        mayHaveSucceeded: true,
+      });
+    }
+    this.#unresolvedStartRequestId = null;
+    const selected = this.#snapshot.selectedPodId === null
+      ? undefined
+      : this.#snapshot.pods.find((pod) => pod.id === this.#snapshot.selectedPodId);
+    this.#publish({
+      ...this.#snapshot,
+      phase: selected?.lifecyclePhase ?? "offline",
+      warnings: Object.freeze(
+        this.#snapshot.warnings.filter((warning) => warning.code !== "ambiguous_create_unresolved"),
+      ),
+      error: null,
+    });
+    return this.#snapshot;
+  }
+
   refresh(options: RefreshOptions = {}): Promise<RunPodSnapshot> {
-    return this.#enqueueMutation(() => this.#refresh(options));
+    const deadline = createOperationDeadline(options.signal, this.#config.operationTimeoutMs);
+    const boundedOptions: RefreshOptions = {
+      ...(options.expectedImageCount === undefined
+        ? {}
+        : { expectedImageCount: options.expectedImageCount }),
+      signal: deadline.signal,
+    };
+    const queued = this.#enqueueMutation(() => this.#refresh(boundedOptions));
+    return awaitWithAbort(queued, deadline.signal, "list_pods").catch((error: unknown) => {
+      if (!deadline.timedOut()) throw error;
+      const timeoutError = new RunPodClientError({
+        code: "api_request_failed",
+        message: "RunPod refresh exceeded the operation timeout.",
+        operation: "list_pods",
+        retryable: true,
+        details: { timeoutMs: this.#config.operationTimeoutMs },
+      });
+      this.#publish({ ...this.#snapshot, phase: "error", error: safeErrorSummary(timeoutError) });
+      throw timeoutError;
+    }).finally(deadline.dispose);
   }
 
   async #refresh(options: RefreshOptions = {}): Promise<RunPodSnapshot> {
@@ -285,6 +374,10 @@ export class RunPodLifecycleController {
 
       let inventory: readonly GpuOffer[];
       const warnings: SnapshotWarning[] = [];
+      this.#observeUnresolvedCreate(podsResult.value);
+      if (this.#unresolvedStartRequestId !== null) {
+        warnings.push(this.#unresolvedCreateWarning());
+      }
       if (inventoryResult.status === "fulfilled") {
         inventory = this.#validatedInventory(inventoryResult.value);
       } else {
@@ -335,6 +428,7 @@ export class RunPodLifecycleController {
         operation: "list_pods",
         retryable: true,
       });
+      if (runPodError.code === "operation_aborted") throw runPodError;
       this.#publish({
         ...this.#snapshot,
         phase: "error",
@@ -359,23 +453,40 @@ export class RunPodLifecycleController {
     }
 
     const controller = new AbortController();
+    const startRequestId = intent.requestId ?? this.#tokenFactory();
+    const attempt: StartAttemptState = { postAttempted: false, exactPodReceived: false };
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
       controller.abort();
     }, this.#config.provisioningTimeoutMs);
-    const queued = this.#enqueueMutation(() => this.#startGpu(intent, controller.signal));
+    const queued = this.#enqueueMutation(() =>
+      this.#startGpu(intent, controller.signal, startRequestId, attempt));
     const promise = awaitWithAbort(queued, controller.signal, "create_pod").catch((error: unknown) => {
       if (!timedOut) throw error;
+      const ambiguous = attempt.postAttempted && !attempt.exactPodReceived;
+      if (ambiguous) this.#unresolvedStartRequestId = startRequestId;
       const timeoutError = new RunPodClientError({
         code: "provisioning_timeout",
         message: "The GPU start operation exceeded the provisioning timeout.",
         operation: "create_pod",
         retryable: true,
-        mayHaveSucceeded: true,
+        mayHaveSucceeded: attempt.postAttempted,
         details: { timeoutMs: this.#config.provisioningTimeoutMs },
       });
-      this.#publish({ ...this.#snapshot, phase: "error", error: safeErrorSummary(timeoutError) });
+      this.#publish({
+        ...this.#snapshot,
+        phase: "error",
+        warnings: ambiguous
+          ? Object.freeze([
+              ...this.#snapshot.warnings.filter(
+                (warning) => warning.code !== "ambiguous_create_unresolved",
+              ),
+              this.#unresolvedCreateWarning(),
+            ])
+          : this.#snapshot.warnings,
+        error: safeErrorSummary(timeoutError),
+      });
       throw timeoutError;
     }).finally(() => {
       clearTimeout(timer);
@@ -526,10 +637,53 @@ export class RunPodLifecycleController {
   }
 
   stopGpu(intent: ConfirmedStopIntent, signal?: AbortSignal): Promise<StopGpuResult> {
-    return this.#enqueueMutation(() => this.#stopGpu(intent, signal));
+    const deadline = createOperationDeadline(signal, this.#config.operationTimeoutMs);
+    const attempt: StopAttemptState = { deleteAttempted: false };
+    const queued = this.#enqueueMutation(() => this.#stopGpu(intent, deadline.signal, attempt));
+    return awaitWithAbort(queued, deadline.signal, "terminate_pod").catch((error: unknown) => {
+      if (!deadline.timedOut()) {
+        const stoppedError = asRunPodClientError(error, {
+          code: "operation_aborted",
+          message: "The Pod termination request was cancelled.",
+          operation: "terminate_pod",
+        });
+        if (stoppedError.code === "operation_aborted") {
+          const surfacedAbort = this.#snapshot.phase === "stopping"
+            ? new RunPodClientError({
+                code: "operation_aborted",
+                message: "The Pod termination request was cancelled; refresh to verify its outcome.",
+                operation: "terminate_pod",
+                retryable: true,
+                mayHaveSucceeded: true,
+                details: { podId: intent.podId },
+              })
+            : stoppedError;
+          this.#publish({ ...this.#snapshot, phase: "error", error: safeErrorSummary(surfacedAbort) });
+          throw surfacedAbort;
+        }
+        throw stoppedError;
+      }
+      const timeoutError = new RunPodClientError({
+        code: attempt.deleteAttempted ? "pod_termination_failed" : "pod_discovery_failed",
+        message: attempt.deleteAttempted
+          ? "Pod termination timed out; refresh to verify whether DELETE succeeded."
+          : "Pod revalidation timed out before DELETE was attempted.",
+        operation: attempt.deleteAttempted ? "terminate_pod" : "get_pod",
+        retryable: true,
+        mayHaveSucceeded: attempt.deleteAttempted,
+        details: { podId: intent.podId, timeoutMs: this.#config.operationTimeoutMs },
+      });
+      this.#publish({ ...this.#snapshot, phase: "error", error: safeErrorSummary(timeoutError) });
+      throw timeoutError;
+    }).finally(deadline.dispose);
   }
 
-  async #stopGpu(intent: ConfirmedStopIntent, signal?: AbortSignal): Promise<StopGpuResult> {
+  async #stopGpu(
+    intent: ConfirmedStopIntent,
+    signal: AbortSignal | undefined,
+    attempt: StopAttemptState,
+  ): Promise<StopGpuResult> {
+    if (isSignalAborted(signal)) throw operationAborted("terminate_pod");
     if (intent.intent !== "confirm_stop_gpu" || intent.source !== "foreground_user") {
       throw new RunPodClientError({
         code: "termination_confirmation_required",
@@ -585,6 +739,7 @@ export class RunPodLifecycleController {
         operation: "get_pod",
         retryable: true,
       });
+      if (discoveryError.code === "operation_aborted") throw discoveryError;
       this.#publish({
         ...this.#snapshot,
         phase: "error",
@@ -610,6 +765,7 @@ export class RunPodLifecycleController {
       error: null,
     });
     try {
+      attempt.deleteAttempted = true;
       await awaitWithAbort(
         this.#provider.terminatePod(intent.podId, signal),
         signal,
@@ -631,7 +787,6 @@ export class RunPodLifecycleController {
           mayHaveSucceeded: true,
           details: { podId: intent.podId },
         });
-        this.#publish({ ...this.#snapshot, phase: "error", error: safeErrorSummary(aborted) });
         throw aborted;
       }
       const terminationError = new RunPodClientError({
@@ -672,11 +827,16 @@ export class RunPodLifecycleController {
     return Object.freeze({ terminatedPodId: intent.podId, snapshot: this.#snapshot });
   }
 
-  async #startGpu(intent: ForegroundStartIntent, signal: AbortSignal): Promise<StartGpuResult> {
+  async #startGpu(
+    intent: ForegroundStartIntent,
+    signal: AbortSignal,
+    startRequestId: string,
+    attempt: StartAttemptState,
+  ): Promise<StartGpuResult> {
+    const unresolvedAtStart = this.#unresolvedStartRequestId;
     const expectedImageCount = validateExpectedImageCount(
       intent.expectedImageCount ?? this.#config.defaultImageCount,
     );
-    const startRequestId = intent.requestId ?? this.#tokenFactory();
     const podName = buildManagedPodName(this.#config.podNamePrefix, startRequestId);
 
     try {
@@ -684,6 +844,42 @@ export class RunPodLifecycleController {
         expectedImageCount,
         signal,
       });
+      if (unresolvedAtStart !== null) {
+        if (this.#unresolvedStartRequestId !== null) {
+          throw new RunPodClientError({
+            code: "pod_create_ambiguous",
+            message:
+              "A prior Pod create remains unresolved. No additional Pod will be created until its request marker is resolved.",
+            operation: "create_pod",
+            retryable: true,
+            mayHaveSucceeded: true,
+            details: { requestId: unresolvedAtStart },
+          });
+        }
+        const resolvedActive = refreshed.pods.filter(
+          (pod) => pod.startRequestId === unresolvedAtStart && isActivePod(pod),
+        );
+        const resolvedReusable = resolvedActive.length === 1 && resolvedActive[0] !== undefined &&
+          this.#selectedReusablePod(resolvedActive) !== null
+          ? resolvedActive[0]
+          : null;
+        if (resolvedReusable !== null) {
+          return Object.freeze({
+            outcome: "connected_existing",
+            pod: resolvedReusable,
+            snapshot: refreshed,
+          });
+        }
+        if (resolvedActive.length > 0) {
+          throw new RunPodClientError({
+            code: "operation_in_progress",
+            message: "The previously ambiguous Pod is active but cannot safely be reused.",
+            operation: "create_pod",
+            retryable: true,
+            details: { requestId: unresolvedAtStart },
+          });
+        }
+      }
       const existing = this.#selectedReusablePod(refreshed.pods);
       if (existing !== null) {
         return Object.freeze({
@@ -732,12 +928,16 @@ export class RunPodLifecycleController {
         constraints: this.#config.constraints,
       });
 
+      let exactCreatedPod: ManagedPod | null = null;
       try {
+        attempt.postAttempted = true;
         const created = await awaitWithAbort(
           this.#provider.createPodFromTemplate(request, signal),
           signal,
           "create_pod",
         );
+        attempt.exactPodReceived = true;
+        exactCreatedPod = created;
         return await this.#finishSuccessfulCreate(
           created,
           expectedImageCount,
@@ -752,13 +952,19 @@ export class RunPodLifecycleController {
           retryable: true,
           mayHaveSucceeded: true,
         });
+        if (createError.code === "operation_aborted") {
+          if (exactCreatedPod === null) this.#unresolvedStartRequestId = startRequestId;
+          throw createError;
+        }
         if (createError.mayHaveSucceeded) {
+          this.#unresolvedStartRequestId = startRequestId;
           const reconciled = await this.#reconcileAmbiguousCreate(
             startRequestId,
             expectedImageCount,
             signal,
           );
           if (reconciled !== null) {
+            this.#unresolvedStartRequestId = null;
             return reconciled;
           }
           throw new RunPodClientError({
@@ -788,9 +994,18 @@ export class RunPodLifecycleController {
         operation: "create_pod",
         retryable: true,
       });
+      if (runPodError.code === "operation_aborted") throw runPodError;
       this.#publish({
         ...this.#snapshot,
         phase: "error",
+        warnings: this.#unresolvedStartRequestId === null
+          ? this.#snapshot.warnings
+          : Object.freeze([
+              ...this.#snapshot.warnings.filter(
+                (warning) => warning.code !== "ambiguous_create_unresolved",
+              ),
+              this.#unresolvedCreateWarning(),
+            ]),
         error: safeErrorSummary(runPodError),
       });
       throw runPodError;
@@ -947,6 +1162,25 @@ export class RunPodLifecycleController {
     return Object.freeze({
       views: Object.freeze(views),
       warnings: Object.freeze(warnings),
+    });
+  }
+
+  #observeUnresolvedCreate(pods: readonly ManagedPod[]): void {
+    const requestId = this.#unresolvedStartRequestId;
+    if (requestId === null) return;
+    const matching = pods.filter((pod) => pod.startRequestId === requestId);
+    const active = matching.filter(isActivePod);
+    if (active.length === 1 || (active.length === 0 && matching.length > 0)) {
+      this.#unresolvedStartRequestId = null;
+    }
+  }
+
+  #unresolvedCreateWarning(): SnapshotWarning {
+    return Object.freeze({
+      code: "ambiguous_create_unresolved",
+      message:
+        "A prior create request has no confirmed Pod identity. Further creates are blocked until its request marker is resolved.",
+      podIds: Object.freeze([]),
     });
   }
 

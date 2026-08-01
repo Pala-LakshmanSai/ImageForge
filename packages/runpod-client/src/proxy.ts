@@ -1,14 +1,17 @@
-import { RunPodClientError } from "./errors.js";
+import { RunPodClientError, type RunPodOperation } from "./errors.js";
 
 // `<pod-id>-8000` must remain one valid DNS label (63 bytes maximum).
 const POD_ID = /^[A-Za-z0-9][A-Za-z0-9-]{0,57}$/;
 
-export function validateRunPodPodId(podId: string): string {
+export function validateRunPodPodId(
+  podId: string,
+  operation: Extract<RunPodOperation, "get_pod" | "terminate_pod"> = "get_pod",
+): string {
   if (typeof podId !== "string" || !POD_ID.test(podId)) {
     throw new RunPodClientError({
       code: "api_response_invalid",
       message: "RunPod returned an invalid Pod identifier.",
-      operation: "get_pod",
+      operation,
       details: { field: "podId" },
     });
   }

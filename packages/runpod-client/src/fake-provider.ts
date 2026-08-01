@@ -230,7 +230,7 @@ export class FakeRunPodProvider implements RunPodProvider {
   }
 
   async terminatePod(podId: string, _signal?: AbortSignal): Promise<void> {
-    validateRunPodPodId(podId);
+    validateRunPodPodId(podId, "terminate_pod");
     this.calls.terminate.push(podId);
     this.#throwFailure("terminate");
     await this.#terminateHook?.(podId, this);

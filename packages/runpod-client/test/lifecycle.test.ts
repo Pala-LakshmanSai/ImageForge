@@ -387,6 +387,93 @@ describe("RunPodLifecycleController refresh and start", () => {
     assert.equal(provider.calls.create.length, 1);
   });
 
+  it("blocks every later POST while an ambiguous create marker remains omitted", async () => {
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()] });
+    provider.failNext("create", new RunPodClientError({
+      code: "api_network_error",
+      message: "create response lost",
+      operation: "create_pod",
+      retryable: true,
+      mayHaveSucceeded: true,
+    }));
+    const controller = makeController(provider);
+
+    await assert.rejects(
+      () => controller.startGpu({
+        intent: "start_gpu",
+        source: "foreground_user",
+        requestId: "unresolvedmarker1",
+      }),
+      (error: unknown) => error instanceof RunPodClientError && error.code === "pod_create_ambiguous",
+    );
+    await assert.rejects(
+      () => controller.startGpu({
+        intent: "start_gpu",
+        source: "foreground_user",
+        requestId: "mustnotpost2",
+      }),
+      (error: unknown) => error instanceof RunPodClientError && error.code === "pod_create_ambiguous",
+    );
+
+    assert.equal(provider.calls.create.length, 1);
+    const warning = controller.getSnapshot().warnings.find(
+      (candidate) => candidate.code === "ambiguous_create_unresolved",
+    );
+    assert.deepEqual(warning?.podIds, []);
+
+    provider.setPods([makePod({
+      id: "reconciledmarkerpod1",
+      name: "imageforge-unresolvedmarker1",
+      startRequestId: "unresolvedmarker1",
+      status: "provisioning",
+    })]);
+    const connected = await controller.startGpu({
+      intent: "start_gpu",
+      source: "foreground_user",
+      requestId: "stillmustnotpost3",
+    });
+    assert.equal(connected.outcome, "connected_existing");
+    assert.equal(connected.pod.id, "reconciledmarkerpod1");
+    assert.equal(provider.calls.create.length, 1);
+    assert.equal(
+      connected.snapshot.warnings.some((warning) => warning.code === "ambiguous_create_unresolved"),
+      false,
+    );
+  });
+
+  it("requires the exact foreground marker for explicit ambiguity resolution", async () => {
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()] });
+    provider.failNext("create", new RunPodClientError({
+      code: "api_network_error",
+      message: "create response lost",
+      operation: "create_pod",
+      mayHaveSucceeded: true,
+    }));
+    const controller = makeController(provider);
+    await assert.rejects(() => controller.startGpu({
+      intent: "start_gpu",
+      source: "foreground_user",
+      requestId: "resolveexact1",
+    }));
+    assert.throws(() => controller.resolveAmbiguousCreate({
+      intent: "resolve_ambiguous_create",
+      source: "foreground_user",
+      requestId: "wrongmarker2",
+    }));
+    controller.resolveAmbiguousCreate({
+      intent: "resolve_ambiguous_create",
+      source: "foreground_user",
+      requestId: "resolveexact1",
+    });
+    const created = await controller.startGpu({
+      intent: "start_gpu",
+      source: "foreground_user",
+      requestId: "afterexplicit3",
+    });
+    assert.equal(created.outcome, "created");
+    assert.equal(provider.calls.create.length, 2);
+  });
+
   it("ignores an exited Pod with a reused marker when reconciling an ambiguous create", async () => {
     const requestId = "reusedmarker1";
     const provider = new FakeRunPodProvider({
@@ -521,6 +608,25 @@ describe("RunPodLifecycleController refresh and start", () => {
     provider.listGpuInventory = originalInventory;
     const refreshed = await controller.refresh();
     assert.equal(refreshed.selectedPodId, "timeoutpod1");
+  });
+
+  it("gives public refresh its own deadline and releases the queue without a caller signal", async () => {
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()] });
+    const originalInventory = provider.listGpuInventory.bind(provider);
+    provider.listGpuInventory = (() => new Promise(() => undefined)) as typeof provider.listGpuInventory;
+    const controller = makeController(provider, {
+      configOverrides: { operationTimeoutMs: 100 },
+    });
+
+    await assert.rejects(
+      () => controller.refresh(),
+      (error: unknown) =>
+        error instanceof RunPodClientError &&
+        error.code === "api_request_failed" &&
+        error.operation === "list_pods",
+    );
+    provider.listGpuInventory = originalInventory;
+    assert.equal((await controller.refresh()).phase, "offline");
   });
 
   it("bounds a never-resolving worker probe and propagates explicit health aborts", async () => {
@@ -1027,6 +1133,71 @@ describe("RunPodLifecycleController explicit Stop GPU", () => {
         error.code === "operation_aborted" &&
         error.mayHaveSucceeded,
     );
+    assert.equal((await controller.refresh()).selectedPodId, pod.id);
+  });
+
+  it("gives confirmed stop its own deadline and treats an unresolved DELETE as ambiguous", async () => {
+    const pod = makePod({ id: "timeoutstop1" });
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()], pods: [pod] });
+    provider.onTerminate(() => new Promise(() => undefined));
+    const controller = makeController(provider, {
+      token: () => "timeout-stop-token",
+      configOverrides: { operationTimeoutMs: 100 },
+    });
+    await controller.refresh();
+    const confirmation = controller.requestStopConfirmation({
+      intent: "stop_gpu",
+      source: "foreground_user",
+      podId: pod.id,
+    });
+
+    await assert.rejects(
+      () => controller.stopGpu({
+        intent: "confirm_stop_gpu",
+        source: "foreground_user",
+        podId: pod.id,
+        confirmationToken: confirmation.token,
+      }),
+      (error: unknown) =>
+        error instanceof RunPodClientError &&
+        error.code === "pod_termination_failed" &&
+        error.mayHaveSucceeded,
+    );
+    assert.equal(controller.getSnapshot().error?.code, "pod_termination_failed");
+    assert.equal((await controller.refresh()).selectedPodId, pod.id);
+  });
+
+  it("times out stop revalidation without claiming an unattempted DELETE may have succeeded", async () => {
+    const pod = makePod({ id: "timeoutgetstop1" });
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()], pods: [pod] });
+    const originalGet = provider.getPod.bind(provider);
+    const controller = makeController(provider, {
+      token: () => "timeout-get-stop-token",
+      configOverrides: { operationTimeoutMs: 100 },
+    });
+    await controller.refresh();
+    provider.getPod = (() => new Promise(() => undefined)) as typeof provider.getPod;
+    const confirmation = controller.requestStopConfirmation({
+      intent: "stop_gpu",
+      source: "foreground_user",
+      podId: pod.id,
+    });
+
+    await assert.rejects(
+      () => controller.stopGpu({
+        intent: "confirm_stop_gpu",
+        source: "foreground_user",
+        podId: pod.id,
+        confirmationToken: confirmation.token,
+      }),
+      (error: unknown) =>
+        error instanceof RunPodClientError &&
+        error.code === "pod_discovery_failed" &&
+        error.operation === "get_pod" &&
+        !error.mayHaveSucceeded,
+    );
+    assert.equal(provider.calls.terminate.length, 0);
+    provider.getPod = originalGet;
     assert.equal((await controller.refresh()).selectedPodId, pod.id);
   });
 });

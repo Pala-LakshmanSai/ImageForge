@@ -21,6 +21,7 @@ export interface RunPodClientConfigInput {
   readonly defaultImageCount?: number;
   readonly refreshIntervalMs?: number;
   readonly provisioningTimeoutMs?: number;
+  readonly operationTimeoutMs?: number;
   readonly stopConfirmationTtlMs?: number;
   readonly constraints?: PodConstraintInput;
   readonly benchmarkContract: BenchmarkContract;
@@ -47,6 +48,7 @@ const CONFIG_KEYS = new Set([
   "defaultImageCount",
   "refreshIntervalMs",
   "provisioningTimeoutMs",
+  "operationTimeoutMs",
   "stopConfirmationTtlMs",
   "constraints",
   "benchmarkContract",
@@ -440,6 +442,12 @@ export function createRunPodClientConfig(input: RunPodClientConfigInput): RunPod
       1_000,
       60 * 60_000,
       "provisioningTimeoutMs",
+    ),
+    operationTimeoutMs: requireIntegerInRange(
+      raw.operationTimeoutMs === undefined ? 30_000 : raw.operationTimeoutMs,
+      100,
+      120_000,
+      "operationTimeoutMs",
     ),
     stopConfirmationTtlMs: requireIntegerInRange(
       raw.stopConfirmationTtlMs === undefined ? 2 * 60_000 : raw.stopConfirmationTtlMs,

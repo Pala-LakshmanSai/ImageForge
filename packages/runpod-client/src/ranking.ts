@@ -90,12 +90,20 @@ export function rankGpuOffers(input: RankGpuOffersInput): readonly RankedGpuOffe
         (Number.isFinite(offer.hourlyPriceUsd) && offer.hourlyPriceUsd > 0)),
   );
   const profiles = latestComparableProfiles(input.benchmarkProfiles, input.benchmarkContract);
-  const comparableProfileCount = new Set(
-    available.map((offer) => offer.gpuId).filter((gpuId) => profiles.has(gpuId)),
+  const ordinaryAvailable = available.filter((offer) => !offer.emergency);
+  const safeDefault = ordinaryAvailable.find((offer) => offer.coldPriority === 0);
+  const comparableOrdinaryProfileCount = new Set(
+    ordinaryAvailable.map((offer) => offer.gpuId).filter((gpuId) => profiles.has(gpuId)),
   ).size;
+  const hasMeasuredOrdinaryQuorum =
+    safeDefault !== undefined &&
+    profiles.has(safeDefault.gpuId) &&
+    comparableOrdinaryProfileCount >= 2;
 
   const estimated = available.map((offer) => {
-    const profile = comparableProfileCount >= 2 ? profiles.get(offer.gpuId) : undefined;
+    const profile = hasMeasuredOrdinaryQuorum && !offer.emergency
+      ? profiles.get(offer.gpuId)
+      : undefined;
     const generationCost =
       profile === undefined || offer.hourlyPriceUsd === null
         ? null

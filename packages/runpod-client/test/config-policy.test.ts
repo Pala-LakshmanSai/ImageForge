@@ -29,6 +29,7 @@ describe("RunPod studio configuration", () => {
       defaultImageCount: 450,
       refreshIntervalMs: 1000,
       provisioningTimeoutMs: 1200000,
+      operationTimeoutMs: 30000,
       stopConfirmationTtlMs: 120000,
       constraints: { allowedCudaVersions: ["13.0"], minRamPerGpuGb: 16 },
       benchmarkContract,
@@ -59,6 +60,7 @@ describe("RunPod studio configuration", () => {
       defaultImageCount: 450,
       refreshIntervalMs: 1000,
       provisioningTimeoutMs: 1200000,
+      operationTimeoutMs: 30000,
       stopConfirmationTtlMs: 120000,
       constraints: { allowedCudaVersions: ["13.0"], minRamPerGpuGb: 16 },
       benchmarkContract,
@@ -99,6 +101,8 @@ describe("RunPod studio configuration", () => {
       { ...valid, networkVolumeMountPath: "/workspace/.." },
       { ...valid, networkVolumeMountPath: "/.." },
       { ...valid, networkVolumeMountPath: "/workspace/." },
+      { ...valid, operationTimeoutMs: 99 },
+      { ...valid, operationTimeoutMs: 120001 },
       { ...valid, unexpectedTopLevel: true },
     ];
 
@@ -141,6 +145,7 @@ describe("RunPod studio configuration", () => {
 
     assert.equal(config.workerPort, 8000);
     assert.equal(config.gpuCount, 1);
+    assert.equal(config.operationTimeoutMs, 30_000);
     assert.deepEqual(config.cloudLanes, ["secure"]);
     assert.deepEqual(config.constraints.allowedCudaVersions, ["13.0"]);
     assert.equal(config.constraints.minRamPerGpuGb, 16);
@@ -165,6 +170,11 @@ describe("RunPod studio configuration", () => {
         readonly gpuCount: { readonly const: unknown };
         readonly cloudLanes: { readonly items: { readonly const: unknown } };
         readonly networkVolumeMountPath: { readonly pattern: string };
+        readonly operationTimeoutMs: {
+          readonly minimum: number;
+          readonly maximum: number;
+          readonly default: number;
+        };
       };
       readonly $defs: {
         readonly constraints: {
@@ -181,6 +191,12 @@ describe("RunPod studio configuration", () => {
     assert.equal(schema.properties.workerPort.const, 8000);
     assert.equal(schema.properties.gpuCount.const, 1);
     assert.equal(schema.properties.cloudLanes.items.const, "secure");
+    assert.deepEqual(schema.properties.operationTimeoutMs, {
+      type: "integer",
+      minimum: 100,
+      maximum: 120000,
+      default: 30000,
+    });
     const mountPattern = new RegExp(schema.properties.networkVolumeMountPath.pattern);
     assert.equal(mountPattern.test("/workspace"), true);
     assert.equal(mountPattern.test("/workspace/models"), true);

@@ -144,6 +144,7 @@ export interface RunPodClientConfig {
   readonly defaultImageCount: number;
   readonly refreshIntervalMs: number;
   readonly provisioningTimeoutMs: number;
+  readonly operationTimeoutMs: number;
   readonly stopConfirmationTtlMs: number;
   readonly constraints: PodConstraints;
   readonly benchmarkContract: BenchmarkContract;
@@ -246,7 +247,8 @@ export type SnapshotWarningCode =
   | "duplicate_pods"
   | "inventory_fallback"
   | "worker_health_unreachable"
-  | "post_create_discovery_failed";
+  | "post_create_discovery_failed"
+  | "ambiguous_create_unresolved";
 
 export interface SnapshotWarning {
   readonly code: SnapshotWarningCode;
@@ -309,6 +311,12 @@ export interface ConfirmedStopIntent {
   readonly source: "foreground_user";
   readonly podId: string;
   readonly confirmationToken: string;
+}
+
+export interface ResolveAmbiguousCreateIntent {
+  readonly intent: "resolve_ambiguous_create";
+  readonly source: "foreground_user";
+  readonly requestId: string;
 }
 
 export interface StopGpuResult {

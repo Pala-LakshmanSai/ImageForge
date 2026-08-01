@@ -16,7 +16,9 @@ invokes a real adapter method.
   ordered list of approved catalog IDs, and `gpuTypePriority: "custom"`.
 - Existing Pods are preferred. Local double-clicks share one create operation.
   External races and ambiguous create responses are reconciled by a unique Pod
-  name marker. Every duplicate is shown; none is automatically terminated.
+  name marker. An unresolved marker blocks every later create until discovery
+  resolves it or the operator explicitly acknowledges it. Every duplicate is
+  shown; none is automatically terminated.
 - Proxy URLs are derived from each freshly discovered Pod ID as
   `https://<pod-id>-8000.proxy.runpod.net` and verified through worker health.
 - `stopGpu()` can only call DELETE after `requestStopConfirmation()` issues a
@@ -24,6 +26,9 @@ invokes a real adapter method.
   compute and ephemeral data are terminated while the network volume remains.
 - No timer, idle event, completed batch, health failure, process exit, or
   background observer can invoke termination.
+- Provider observations and confirmed termination use the validated
+  `operationTimeoutMs` transport bound. A DELETE timeout remains ambiguous and
+  requires a refresh; the deadline never triggers termination itself.
 
 ## Provider boundaries
 

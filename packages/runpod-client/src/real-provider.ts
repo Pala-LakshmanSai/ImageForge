@@ -694,7 +694,7 @@ export class RunPodRestProvider implements RunPodProvider {
   }
 
   async terminatePod(podId: string, signal?: AbortSignal): Promise<void> {
-    validateRunPodPodId(podId);
+    validateRunPodPodId(podId, "terminate_pod");
     await this.#client.request(`${this.#baseUrl}/pods/${encodeURIComponent(podId)}`, {
       method: "DELETE",
       operation: "terminate_pod",

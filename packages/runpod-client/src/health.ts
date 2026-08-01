@@ -10,6 +10,27 @@ const MODEL_ID = "black-forest-labs/FLUX.2-klein-4B";
 const MODEL_REVISION = "e7b7dc27f91deacad38e78976d1f2b499d76a294";
 const MODEL_PRECISION = "bfloat16";
 
+function healthAborted(): RunPodClientError {
+  return new RunPodClientError({
+    code: "operation_aborted",
+    message: "The worker health request was cancelled.",
+    operation: "worker_health",
+  });
+}
+
+function awaitHealthAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal === undefined) return promise;
+  if (signal.aborted) return Promise.reject(healthAborted());
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(healthAborted());
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => { signal.removeEventListener("abort", onAbort); resolve(value); },
+      (error: unknown) => { signal.removeEventListener("abort", onAbort); reject(error); },
+    );
+  });
+}
+
 export interface HttpWorkerHealthProbeOptions {
   readonly fetchTransport?: FetchTransport;
 }
@@ -57,28 +78,7 @@ export class HttpWorkerHealthProbe implements WorkerHealthProbe {
         redirect: "error",
         ...(signal === undefined ? {} : { signal }),
       });
-      const response = signal === undefined
-        ? await fetchPromise
-        : await new Promise<Response>((resolve, reject) => {
-            if (signal.aborted) {
-              reject(new RunPodClientError({
-                code: "operation_aborted",
-                message: "The worker health request was cancelled.",
-                operation: "worker_health",
-              }));
-              return;
-            }
-            const onAbort = (): void => reject(new RunPodClientError({
-              code: "operation_aborted",
-              message: "The worker health request was cancelled.",
-              operation: "worker_health",
-            }));
-            signal.addEventListener("abort", onAbort, { once: true });
-            fetchPromise.then(
-              (value) => { signal.removeEventListener("abort", onAbort); resolve(value); },
-              (error: unknown) => { signal.removeEventListener("abort", onAbort); reject(error); },
-            );
-          });
+      const response = await awaitHealthAbort(fetchPromise, signal);
       if (!response.ok) {
         throw new RunPodClientError({
           code: "api_request_failed",
@@ -91,8 +91,9 @@ export class HttpWorkerHealthProbe implements WorkerHealthProbe {
       }
       let raw: unknown;
       try {
-        raw = await response.json();
+        raw = await awaitHealthAbort(response.json(), signal);
       } catch (error) {
+        if (error instanceof RunPodClientError && error.code === "operation_aborted") throw error;
         throw new RunPodClientError({
           code: "api_response_invalid",
           message: "The ImageForge worker returned malformed health data.",

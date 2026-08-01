@@ -704,7 +704,10 @@ describe("RunPodRestProvider", () => {
       );
       await assert.rejects(
         () => provider.terminatePod(podId),
-        (error: unknown) => error instanceof RunPodClientError && error.code === "api_response_invalid",
+        (error: unknown) =>
+          error instanceof RunPodClientError &&
+          error.code === "api_response_invalid" &&
+          error.operation === "terminate_pod",
       );
     }
     assert.equal(fetchCalls, 0);

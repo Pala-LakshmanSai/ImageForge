@@ -12,6 +12,7 @@
   "defaultImageCount": 450,
   "refreshIntervalMs": 1000,
   "provisioningTimeoutMs": 1200000,
+  "operationTimeoutMs": 30000,
   "stopConfirmationTtlMs": 120000,
   "constraints": {
     "allowedCudaVersions": ["13.0"],
