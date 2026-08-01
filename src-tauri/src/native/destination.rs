@@ -507,11 +507,51 @@ fn root_identity(path: &Path) -> NativeResult<RootIdentity> {
 
 #[cfg(windows)]
 fn root_identity(path: &Path) -> NativeResult<RootIdentity> {
-    use std::os::windows::fs::MetadataExt;
-    let metadata = std::fs::metadata(path).map_err(|_| destination_root_replaced())?;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    // `std::os::windows::fs::MetadataExt::{volume_serial_number,file_index}`
+    // is still unstable on the Rust toolchain used for this release. Open the
+    // directory with the stable Win32 metadata API instead. Backup semantics
+    // is required for directory handles; sharing all access avoids blocking
+    // another editor or Explorer while we verify the destination.
+    let wide_path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe {
+        CreateFileW(
+            wide_path.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(destination_root_replaced());
+    }
+
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    let result = unsafe { GetFileInformationByHandle(handle, &mut information) };
+    // Close the handle on both success and failure. The identity is copied
+    // before closing, so no Win32 resource escapes this function.
+    let _ = unsafe { CloseHandle(handle) };
+    if result == 0 {
+        return Err(destination_root_replaced());
+    }
+
     Ok(RootIdentity {
-        volume: metadata.volume_serial_number(),
-        index: metadata.file_index(),
+        volume: Some(information.dwVolumeSerialNumber),
+        index: Some(((information.nFileIndexHigh as u64) << 32) | information.nFileIndexLow as u64),
     })
 }
 
@@ -666,6 +706,17 @@ mod tests {
             replaced.restore().unwrap_err().code,
             "destination_root_replaced"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_root_identity_is_stable_for_a_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first = root_identity(temporary.path()).unwrap();
+        let second = root_identity(temporary.path()).unwrap();
+        assert_eq!(first, second);
+        assert!(first.volume.is_some());
+        assert!(first.index.is_some());
     }
 
     #[test]
