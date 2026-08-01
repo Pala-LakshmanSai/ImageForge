@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -127,6 +128,27 @@ def test_large_prompt_and_receipt_models_have_no_product_count_or_text_cap() -> 
         ]
     )
     assert len(receipts.receipts) == 501
+
+
+@pytest.mark.anyio
+async def test_create_batch_accepts_more_than_500_prompts_at_http_boundary(tmp_path: Path) -> None:
+    first_generation_started = asyncio.Event()
+    release_first_generation = asyncio.Event()
+    adapter = FakeInferenceAdapter(
+        first_generation_started=first_generation_started,
+        release_first_generation=release_first_generation,
+    )
+    async with worker_client(tmp_path / "volume", adapter) as (client, _, _):
+        prompts = [f"prompt {index}" for index in range(501)]
+        prompts[-1] = "long prompt " + "x" * 5000
+        response = await client.post(
+            "/v1/batches", json={"prompts": prompts, "base_seed": 123}, headers=auth()
+        )
+        assert response.status_code == 201
+        manifest = response.json()
+        assert manifest["progress"]["total"] == 501
+        assert [image["index"] for image in manifest["images"]] == list(range(1, 502))
+        assert manifest["images"][-1]["prompt"] == prompts[-1]
 
 
 @pytest.mark.anyio
