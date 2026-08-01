@@ -51,10 +51,13 @@ without admitting materially smaller cards. An undersized device fails measured
 readiness instead of attempting CPU offload.
 
 RunPod network-volume Pods are terminated and recreated rather than stopped.
-The new Pod gets a new ID, but `/workspace` persists. The worker attempts to hold
-a POSIX advisory lock at `/workspace/imageforge/.active-batch.lock` for the entire
-running, paused, or interrupted lifetime; a duplicate process that observes the
-lock remains read-only. Local multi-process tests verify the worker logic, but
+The new Pod gets a new ID, but `/workspace` persists. Every initialized worker
+attempts to hold shared presence at `/workspace/imageforge/.worker-presence.lock`
+for its full process lifetime. Separately, the active batch owner holds an
+exclusive advisory lock at `/workspace/imageforge/.active-batch.lock` for the
+entire running, paused, or interrupted lifetime; a duplicate process that
+observes that lock remains read-only. Local multi-process tests verify the worker
+logic, but
 they do **not** establish that a selected RunPod network-volume driver propagates
 `flock` correctly between Pods. Before approving a deployment region/volume type,
 run the paid two-Pod gate below. Do not rely on this lease in production until
@@ -141,9 +144,11 @@ Receipts are durable, but the current manifest represents one acknowledgement
 rather than an all-device acknowledgement set. ImageForge therefore never deletes
 artifacts automatically. An operator may explicitly remove only checksum-verified,
 acknowledged artifacts after a minimum 24-hour safety window. Terminate all worker
-Pods before running this maintenance command. The command also acquires the
-exclusive shared-volume guard and refuses while a worker holds it, but this is
-defense in depth and depends on the real cross-Pod validation gate above:
+Pods before running this maintenance command. Before any storage probe or cleanup,
+the command must acquire exclusive worker presence and therefore refuses while
+even an idle initialized worker is alive. It then also acquires the active-batch
+lease. Both locks are defense in depth and depend on the real cross-Pod validation
+gate above:
 
 ```sh
 python -m imageforge_worker.cleanup_retention \

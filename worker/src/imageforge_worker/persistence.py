@@ -28,6 +28,14 @@ class CleanupResult:
 class ManifestStore(Protocol):
     def initialize(self) -> None: ...
 
+    def try_acquire_worker_presence(self) -> bool: ...
+
+    def release_worker_presence(self) -> None: ...
+
+    def try_acquire_maintenance_presence(self) -> bool: ...
+
+    def release_maintenance_presence(self) -> None: ...
+
     @property
     def active_lease_held(self) -> bool: ...
 
@@ -65,6 +73,8 @@ class FileManifestStore:
         self.root = root
         self.batches_root = root / "batches"
         self.fsync_writes = fsync_writes
+        self._worker_presence_descriptor: int | None = None
+        self._maintenance_presence_descriptor: int | None = None
         self._active_lease_descriptor: int | None = None
 
     @property
@@ -78,27 +88,73 @@ class FileManifestStore:
         probe.unlink(missing_ok=True)
         self._fsync_directory(self.root)
 
+    def try_acquire_worker_presence(self) -> bool:
+        """Hold shared presence for the lifetime of an initialized worker process."""
+
+        if self._worker_presence_descriptor is not None:
+            return True
+        if self._maintenance_presence_descriptor is not None:
+            return False
+        descriptor = self._try_acquire_lock(".worker-presence.lock", fcntl.LOCK_SH)
+        if descriptor is None:
+            return False
+        self._worker_presence_descriptor = descriptor
+        return True
+
+    def release_worker_presence(self) -> None:
+        descriptor = self._worker_presence_descriptor
+        self._worker_presence_descriptor = None
+        self._release_lock(descriptor)
+
+    def try_acquire_maintenance_presence(self) -> bool:
+        """Take exclusive presence only when no worker process is alive."""
+
+        if self._maintenance_presence_descriptor is not None:
+            return True
+        if self._worker_presence_descriptor is not None:
+            return False
+        descriptor = self._try_acquire_lock(".worker-presence.lock", fcntl.LOCK_EX)
+        if descriptor is None:
+            return False
+        self._maintenance_presence_descriptor = descriptor
+        return True
+
+    def release_maintenance_presence(self) -> None:
+        descriptor = self._maintenance_presence_descriptor
+        self._maintenance_presence_descriptor = None
+        self._release_lock(descriptor)
+
     def try_acquire_active_lease(self) -> bool:
         if self._active_lease_descriptor is not None:
             return True
-        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        flags = os.O_RDWR | os.O_CREAT
-        if hasattr(os, "O_CLOEXEC"):
-            flags |= os.O_CLOEXEC
-        descriptor = os.open(self.root / ".active-batch.lock", flags, 0o600)
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            os.close(descriptor)
-            if exc.errno in {errno.EACCES, errno.EAGAIN}:
-                return False
-            raise
+        descriptor = self._try_acquire_lock(".active-batch.lock", fcntl.LOCK_EX)
+        if descriptor is None:
+            return False
         self._active_lease_descriptor = descriptor
         return True
 
     def release_active_lease(self) -> None:
         descriptor = self._active_lease_descriptor
         self._active_lease_descriptor = None
+        self._release_lock(descriptor)
+
+    def _try_acquire_lock(self, name: str, operation: int) -> int | None:
+        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        flags = os.O_RDWR | os.O_CREAT
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        descriptor = os.open(self.root / name, flags, 0o600)
+        try:
+            fcntl.flock(descriptor, operation | fcntl.LOCK_NB)
+        except OSError as exc:
+            os.close(descriptor)
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                return None
+            raise
+        return descriptor
+
+    @staticmethod
+    def _release_lock(descriptor: int | None) -> None:
         if descriptor is None:
             return
         try:

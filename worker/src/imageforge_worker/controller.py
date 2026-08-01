@@ -85,19 +85,24 @@ class GenerationController:
         async with self._lock:
             if self._initialized:
                 return
-            self.store.initialize()
-            if self.store.try_acquire_active_lease():
-                try:
+            if self._closing:
+                raise RuntimeError("generation controller is shutting down")
+            if not self.store.try_acquire_worker_presence():
+                raise RuntimeError("worker startup is disabled during retention maintenance")
+            try:
+                self.store.initialize()
+                if self.store.try_acquire_active_lease():
                     active = self._discover_active_locked(recover=True)
-                except BaseException:
-                    self.store.release_active_lease()
-                    raise
-                self._active_batch_id = active.batch_id if active is not None else None
-                if active is None:
-                    self.store.release_active_lease()
-            else:
-                active = self._discover_active_locked(recover=False)
-                self._active_batch_id = active.batch_id if active is not None else None
+                    self._active_batch_id = active.batch_id if active is not None else None
+                    if active is None:
+                        self.store.release_active_lease()
+                else:
+                    active = self._discover_active_locked(recover=False)
+                    self._active_batch_id = active.batch_id if active is not None else None
+            except BaseException:
+                self.store.release_active_lease()
+                self.store.release_worker_presence()
+                raise
             self._initialized = True
 
     def _recover_manifest(self, manifest: BatchManifest) -> bool:
@@ -168,6 +173,7 @@ class GenerationController:
                     self.store.save(manifest)
             finally:
                 self.store.release_active_lease()
+                self.store.release_worker_presence()
 
     async def release_lease_after_boot_failure(self) -> None:
         """Allow a healthy replacement Pod to adopt an interrupted batch."""

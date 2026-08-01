@@ -91,6 +91,20 @@ def _lease_holder_child(root, ready, release) -> None:
         store.release_active_lease()
 
 
+def _idle_worker_child(root, ready, release, results) -> None:
+    async def run() -> None:
+        controller = _controller(Path(root), FakeInferenceAdapter())
+        await controller.initialize()
+        results.put({"active_lease_held": controller.store.active_lease_held})
+        ready.set()
+        try:
+            release.wait()
+        finally:
+            await controller.shutdown()
+
+    asyncio.run(run())
+
+
 def _duplicate_observer_child(root, batch_id, results) -> None:
     async def run() -> None:
         controller = _controller(Path(root), FakeInferenceAdapter())
@@ -217,12 +231,44 @@ def test_cleanup_maintenance_guard_refuses_while_worker_lease_is_live(tmp_path: 
         try:
             cleanup_retained_artifacts(root)
         except RuntimeError as exc:
-            assert "shared-volume guard" in str(exc)
+            assert "active-batch lease" in str(exc)
         else:
             raise AssertionError("cleanup acquired the guard while a worker lease was live")
     finally:
         release.set()
         _join_or_terminate(holder)
+
+
+def test_idle_initialized_worker_presence_blocks_cleanup_until_process_exit(
+    tmp_path: Path,
+) -> None:
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    results = context.Queue()
+    root = tmp_path / "shared-volume"
+    worker = context.Process(
+        target=_idle_worker_child,
+        args=(root, ready, release, results),
+    )
+    worker.start()
+    try:
+        assert ready.wait(20), "idle worker did not become ready"
+        assert _queue_result(results) == {"active_lease_held": False}
+        try:
+            cleanup_retained_artifacts(root)
+        except RuntimeError as exc:
+            assert "worker process is alive" in str(exc)
+        else:
+            raise AssertionError("cleanup ran while an initialized idle worker was alive")
+    finally:
+        release.set()
+        _join_or_terminate(worker)
+
+    cleaned = cleanup_retained_artifacts(root)
+    assert cleaned.images_deleted == 0
+    assert cleaned.files_deleted == 0
+    assert cleaned.bytes_deleted == 0
 
 
 def test_duplicate_boot_is_read_only_and_forced_kill_recovers_once(tmp_path: Path) -> None:
