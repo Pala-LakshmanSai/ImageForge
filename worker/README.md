@@ -16,9 +16,11 @@ It never creates, stops, or terminates a Pod.
 - retries: one initial attempt and two automatic retries
 - prompts: 1-500, at most 4096 UTF-8 bytes each
 
-The CUDA 13.0 Docker base supports the approved Ampere, Ada, and Blackwell families. The
-Docker base image, Python minor version, direct dependencies, PyTorch,
-Diffusers, model revision, and schema are pinned. The production adapter uses
+The pinned Python 3.11 slim image plus the SHA-256-pinned `torch==2.13.0+cu130`
+wheel supports the approved Ampere, Ada, and Blackwell families; RunPod supplies
+the host NVIDIA driver. The Docker base image, Python minor version, direct
+dependencies, PyTorch wheel, Diffusers, model revision, and schema are pinned.
+The production adapter uses
 `local_files_only=True` while all Hugging Face offline flags are set. Model
 weights must be provisioned once onto `/workspace/models/huggingface` before a
 normal start. Boot never installs packages and never downloads weights.

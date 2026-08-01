@@ -9,7 +9,10 @@ needed before Lakshman and Sujal install their desktop clients.
    volume is `imageforge-prod-50gb` (`ukh207b26r`). The volume holds the
    selective FLUX snapshot, durable manifests, previews, and short-lived full
    artifacts. Pod deletion must never delete this volume.
-2. Build and publish the pinned ImageForge worker container. Normal Pod boot
+2. Build and publish the pinned ImageForge worker container. The checked-in
+   `.github/workflows/publish-worker.yml` builds only `linux/amd64`, emits an
+   OCI digest, and pushes the worker to GHCR. Copy the digest printed by the
+   workflow; never use a mutable tag in a RunPod template. Normal Pod boot
    installs nothing and has all Hugging Face offline flags enabled.
 3. Prepare the model cache once on the attached volume with the worker's
    explicitly confirmed preparation command. It downloads only the Diffusers
@@ -18,9 +21,18 @@ needed before Lakshman and Sujal install their desktop clients.
 4. Verify the pinned revision and required files, then perform subsequent boots
    with networking disabled for Hugging Face libraries.
 
-The worker image uses the official PyTorch CUDA 13.0 runtime so one immutable
-image supports the approved Ada/Ampere and Blackwell fallbacks. The app filters
+The worker image uses the pinned Python 3.11 slim base plus the SHA-256-pinned
+PyTorch 2.13.0 CUDA 13.0 wheel. RunPod supplies the NVIDIA driver, while the
+wheel supplies the CUDA userspace runtime. One immutable image therefore
+supports the approved Ada/Ampere and Blackwell fallbacks. The app filters
 RunPod hosts to a compatible CUDA runtime before creation.
+
+The GHCR package must be readable by RunPod. For a private package, create a
+read-only package-pull secret in RunPod and record that it was used; for a
+public package, verify the package visibility explicitly. Never put a personal
+GitHub token in the repository, desktop profile, or this runbook. The current
+repository has no published image digest or RunPod template ID yet; those are
+one-time release outputs, not values to guess.
 
 ## 2. Worker authentication
 
