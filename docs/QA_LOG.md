@@ -145,9 +145,9 @@ warmup/generation smoke before the template is considered production-ready.
 - The smoke Pod was explicitly terminated and the live Pod list returned zero
   active Pods.
 
-The cross-Pod shared-volume lease gate and Windows installer build are recorded
-below. A Windows-machine install/folder-reveal smoke remains the only target-OS
-check not executable on this Mac.
+The cross-Pod shared-volume lease gate and Windows installer evidence are
+recorded below; the final native install/launch/uninstall smoke is now closed
+on `windows-latest`.
 
 ## EU-RO-1 shared-volume qualification — `d611d99`
 
@@ -212,7 +212,7 @@ the recovery poll observes it.
   This keeps the native packaging path focused and avoids a runner-hosted
   credential/UI test holding the installer job indefinitely.
 
-## Windows NSIS artifact — run `30717838047`
+## Windows NSIS artifact — run `30717838047` (superseded)
 
 - Native `windows-latest` build completed successfully in 15m44s after the
   frontend tests and TypeScript checks passed.
@@ -220,5 +220,34 @@ the recovery poll observes it.
   `/Volumes/ImageForgeBuild/windows-artifact/ImageForge_0.1.0_x64-setup.exe`
 - SHA-256: `a8267713c57e7d27041e1df4499adde81fbf2654a80112df90142b28209218fa`
 - Artifact inspection identifies a PE32 GUI NSIS self-extracting installer.
-  It was built on Windows and downloaded for handoff; Windows installation
-  execution still requires a Windows machine.
+  The native install execution was added and is recorded in the final run
+  below.
+
+## Windows native install/launch/uninstall smoke — run `30719056249`
+
+- The final `main` commit `913496e` passed the native `windows-latest` job in
+  16m32s: frontend tests, TypeScript checks, Windows NSIS packaging, silent
+  install to a disposable directory, installed executable discovery,
+  `uninstall.exe` discovery, launch with the process alive after five seconds,
+  silent uninstall, and temporary-directory cleanup.
+- The uploaded installer is
+  `/Volumes/ImageForgeBuild/windows-artifact-30719056249/ImageForge_0.1.0_x64-setup.exe`.
+  SHA-256: `05408a278e95b69f6407553d367acb1e79606f104db4a517c845319a40d770d9`.
+  Artifact inspection identifies a PE32 GUI NSIS self-extracting installer.
+- The runner emitted only the known GitHub Actions Node 20 deprecation
+  annotation; all build, smoke, and cleanup steps passed.
+
+## Final source/release verification — commit `913496e`
+
+- Frontend: 13 Vitest files, 83 tests passed; `npm run typecheck` and
+  `npm run build` passed. The new regressions cover immutable production
+  template/image binding, error progress staying at zero, and re-acknowledging
+  a durable local receipt when the worker still reports `ready`.
+- The production profile now uses template `q8sfgixfy2` and the exact worker
+  image digest recorded above. A lifecycle error/ambiguous start is rendered
+  as an action-needed, empty progress state rather than `100%`.
+- Fresh removable-disk macOS DMG built from this commit:
+  `/Volumes/ImageForgeBuild/cargo-target/release/bundle/dmg/ImageForge_0.1.0_aarch64.dmg`.
+  SHA-256: `8da2420bf4d593ac979ec2296bdec49080eb7e94acc73b8869a766247249261f`.
+  It was mounted, launched, and detached successfully. The beta artifact is
+  ad-hoc/unsigned; no signing is claimed.
