@@ -128,7 +128,7 @@ describe('production ImageForge adapter', () => {
 
     const event = events.find((candidate) => candidate.type === 'batch');
     expect(event).toMatchObject({ type: 'batch', batch: { id: batchId, name: 'History Brief', phase: 'complete' } });
-    if (event?.type === 'batch') expect(event.assets[0].filename).toBe('000001.jpg');
+    if (event?.type === 'batch') expect(event.assets[0].filename).toBe(`batches/${batchId}/000001.jpg`);
     expect(native.downloadArtifact).not.toHaveBeenCalled();
   });
 

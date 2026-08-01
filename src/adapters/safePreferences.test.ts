@@ -74,7 +74,7 @@ describe('safe preference persistence', () => {
   it('persists only a non-secret recovery pointer while a batch is active', () => {
     const state = createConfiguredInitialState();
     state.batch = {
-      id: 'batch-recovery-pointer',
+      id: '11111111-1111-4111-8111-111111111111',
       name: 'Private title',
       owner: 'Lakshman',
       phase: 'running',
@@ -89,7 +89,7 @@ describe('safe preference persistence', () => {
     };
     const setItem = vi.fn();
     persistSafePreferences(state, { setItem });
-    expect(setItem.mock.calls[0][1]).toContain('batch-recovery-pointer');
+    expect(setItem.mock.calls[0][1]).toContain('11111111-1111-4111-8111-111111111111');
     expect(setItem.mock.calls[0][1]).not.toContain('Private title');
   });
 });

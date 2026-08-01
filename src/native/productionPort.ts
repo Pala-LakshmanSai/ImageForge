@@ -9,6 +9,7 @@ import {
   nativeClearRunPodStartAuthorization,
   nativeCredentialMetadata,
   nativeDownloadArtifact,
+  nativeReadReceiptLedger,
   nativeReconcileReceipts,
   nativeReplaceCredential,
   nativeRestoreDestination,
@@ -69,7 +70,8 @@ export function createNativeProductionPort(): ProductionDesktopPort {
     resumeBatch: nativeWorkerResumeBatch,
     cancelBatch: nativeWorkerCancelBatch,
     retryFailed: nativeWorkerRetryFailed,
-    readReceipts: async (batchId) => (await nativeReconcileReceipts(batchId)).receipts,
+    readReceipts: async (batchId) => (await nativeReadReceiptLedger(batchId)).receipts,
+    reconcileReceipts: (batchId) => nativeReconcileReceipts(batchId),
     downloadArtifact: nativeDownloadArtifact,
   };
 }

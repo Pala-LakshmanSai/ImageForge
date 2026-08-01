@@ -43,6 +43,7 @@ export interface ProductionDesktopPort extends GpuLifecycleNativePort, WorkerBat
     podId: string | null;
   }>;
   resolveCreateMarker(attemptId: string, reconciledPodId: string | null): Promise<void>;
+  reconcileReceipts(batchId: string): Promise<unknown>;
 }
 
 export type ProductionRuntimeEvent =
@@ -77,9 +78,12 @@ class ProductionRuntime implements ProductionRuntimeFacade {
   #presentation: BatchPresentationContext | null = null;
   #unsubscribeGpu: () => void;
   #unsubscribeWorker: () => void;
+  #recoveredBatchId: string | null;
+  #reconciledRecoveredBatch = false;
 
   constructor(port: ProductionDesktopPort, recoveredBatchId: string | null = null) {
     this.#port = port;
+    this.#recoveredBatchId = recoveredBatchId;
     this.#gpu = new GpuLifecycleCoordinator(port);
     this.#worker = new WorkerBatchCoordinator(port, recoveredBatchId);
     this.#unsubscribeGpu = this.#gpu.subscribe((snapshot) => this.#onPodSnapshot(snapshot));
@@ -109,6 +113,10 @@ class ProductionRuntime implements ProductionRuntimeFacade {
     }
     await this.#reconcileCreateMarker(snapshot);
     if (snapshot.phase === 'ready') {
+      if (this.#recoveredBatchId !== null && !this.#reconciledRecoveredBatch) {
+        await this.#port.reconcileReceipts(this.#recoveredBatchId);
+        this.#reconciledRecoveredBatch = true;
+      }
       // A worker outage must not obscure the still-live billed Pod. The worker
       // coordinator emits a retryable batch event and the UI keeps Stop visible.
       await this.#worker.poll();

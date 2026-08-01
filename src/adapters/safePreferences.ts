@@ -21,6 +21,8 @@ function boundedString(value: unknown, maximum: number): string | null {
   return typeof value === 'string' && value.length <= maximum ? value : null;
 }
 
+const BATCH_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 function parse(value: unknown): SafePreferencesV1 | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
   const item = value as Record<string, unknown>;
@@ -37,9 +39,10 @@ function parse(value: unknown): SafePreferencesV1 | null {
     'gpuPreference',
     'studioProfile',
   ]);
-  const lastOwnedBatchId = item.lastOwnedBatchId === null
+  const rawBatchId = item.lastOwnedBatchId === null
     ? null
     : boundedString(item.lastOwnedBatchId, 80);
+  const lastOwnedBatchId = rawBatchId === null || BATCH_ID_PATTERN.test(rawBatchId) ? rawBatchId : null;
   if (
     Object.keys(item).some((key) => !allowed.has(key)) ||
     item.version !== 1 ||
@@ -117,9 +120,7 @@ export function persistSafePreferences(state: AppState, storage: Pick<Storage, '
   const preferences: SafePreferencesV1 = {
     version: 1,
     setupCompleted: true,
-    lastOwnedBatchId: state.batch && !['complete', 'partial_failure', 'cancelled'].includes(state.batch.phase)
-      ? state.batch.id
-      : null,
+    lastOwnedBatchId: state.batch && BATCH_ID_PATTERN.test(state.batch.id) ? state.batch.id : null,
     userName: state.settings.userName.slice(0, 80),
     defaultDestination: state.settings.defaultDestination.slice(0, 2_048),
     editorialSuffixEnabled: state.settings.editorialSuffixEnabled,

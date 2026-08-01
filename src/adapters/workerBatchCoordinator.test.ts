@@ -191,6 +191,24 @@ describe('WorkerBatchCoordinator', () => {
     expect(port.downloadArtifact).not.toHaveBeenCalled();
   });
 
+  it('does not fetch a foreign owner manifest after that owner releases the lock', async () => {
+    let active = true;
+    const port = fakePort({
+      status: vi.fn(async () => ({
+        status: 200,
+        body: active
+          ? status(false)
+          : { schema_version: 1, ready: true, active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false } },
+      })),
+      getBatch: vi.fn(async () => ({ status: 200, body: manifest('downloaded') })),
+    });
+    const observer = new WorkerBatchCoordinator(port);
+    await expect(observer.poll()).resolves.toMatchObject({ type: 'busy' });
+    active = false;
+    await expect(observer.poll()).resolves.toMatchObject({ type: 'idle' });
+    expect(port.getBatch).not.toHaveBeenCalled();
+  });
+
   it('fails closed on conflicting receipts and malformed errors', async () => {
     const conflict = { ...receipt(), sha256: 'b'.repeat(64) };
     const port = fakePort({ readReceipts: vi.fn(async () => [conflict]) });

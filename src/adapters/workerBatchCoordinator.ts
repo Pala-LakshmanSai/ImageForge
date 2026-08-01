@@ -101,12 +101,13 @@ function requireSuccess(result: WorkerHttpResult, expected: readonly number[]): 
 export class WorkerBatchCoordinator {
   readonly #port: WorkerBatchPort;
   readonly #listeners = new Set<(event: WorkerBatchEvent) => void>();
-  #batchId: string | null = null;
+  #ownedBatchId: string | null = null;
+  #observedBusyBatchId: string | null = null;
   #pollPromise: Promise<WorkerBatchEvent> | null = null;
 
   constructor(port: WorkerBatchPort, recoveredBatchId: string | null = null) {
     this.#port = port;
-    this.#batchId = recoveredBatchId;
+    this.#ownedBatchId = recoveredBatchId;
   }
 
   subscribe(listener: (event: WorkerBatchEvent) => void): () => void {
@@ -115,7 +116,7 @@ export class WorkerBatchCoordinator {
   }
 
   get batchId(): string | null {
-    return this.#batchId;
+    return this.#ownedBatchId;
   }
 
   async create(prompts: readonly string[], baseSeed: number): Promise<WorkerBatchEvent> {
@@ -136,7 +137,8 @@ export class WorkerBatchCoordinator {
       return this.poll();
     }
     const manifest = parseWorkerManifest(requireSuccess(result, [201]));
-    this.#batchId = manifest.batchId;
+    this.#ownedBatchId = manifest.batchId;
+    this.#observedBusyBatchId = null;
     return this.#synchronizeOwnedManifest(manifest);
   }
 
@@ -150,7 +152,7 @@ export class WorkerBatchCoordinator {
   }
 
   async control(action: BatchControl): Promise<WorkerBatchEvent> {
-    const batchId = this.#batchId;
+    const batchId = this.#ownedBatchId;
     if (batchId === null) {
       throw new WorkerBatchError('batch_not_connected', 'No owned batch is connected.', 0);
     }
@@ -173,8 +175,8 @@ export class WorkerBatchCoordinator {
         // terminal state. Keep the known owner batch ID long enough to fetch
         // that terminal manifest and reconcile every ready artifact; otherwise
         // a final JPEG can become orphaned between two desktop polls.
-        if (this.#batchId !== null) {
-          const knownBatchId = this.#batchId;
+        if (this.#ownedBatchId !== null) {
+          const knownBatchId = this.#ownedBatchId;
           const result = await this.#port.getBatch(knownBatchId);
           if (result.status === 200) {
             const manifest = parseWorkerManifest(result.body);
@@ -182,13 +184,16 @@ export class WorkerBatchCoordinator {
           }
           if (result.status !== 404) throw workerFailure(result);
         }
-        this.#batchId = null;
+        this.#ownedBatchId = null;
+        this.#observedBusyBatchId = null;
         return this.#emit({ type: 'idle' });
       }
-      this.#batchId = status.activeBatch.batchId;
       if (!status.permissions.isOwner) {
+        this.#observedBusyBatchId = status.activeBatch.batchId;
         return this.#emit({ type: 'busy', summary: status.activeBatch });
       }
+      this.#ownedBatchId = status.activeBatch.batchId;
+      this.#observedBusyBatchId = null;
       const manifest = parseWorkerManifest(
         requireSuccess(await this.#port.getBatch(status.activeBatch.batchId), [200]),
       );
