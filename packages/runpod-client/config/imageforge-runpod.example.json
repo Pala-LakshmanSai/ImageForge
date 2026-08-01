@@ -1,0 +1,31 @@
+{
+  "$schema": "./imageforge-runpod.schema.json",
+  "templateId": "replace-with-imageforge-template-id",
+  "networkVolumeId": "replace-with-eu-ro-network-volume-id",
+  "networkVolumeDataCenterId": "EU-RO-1",
+  "networkVolumeMountPath": "/workspace",
+  "podNamePrefix": "imageforge",
+  "workerPort": 8000,
+  "cloudLanes": ["secure"],
+  "allowEmergencyGpuTier": false,
+  "defaultImageCount": 450,
+  "refreshIntervalMs": 1000,
+  "provisioningTimeoutMs": 1200000,
+  "stopConfirmationTtlMs": 120000,
+  "constraints": {
+    "allowedCudaVersions": ["12.8"],
+    "minRamPerGpuGb": 16
+  },
+  "benchmarkContract": {
+    "model": "black-forest-labs/FLUX.2-klein-4B",
+    "modelRevision": "replace-with-pinned-model-revision",
+    "softwareImage": "replace-with-pinned-image-digest",
+    "precision": "BF16",
+    "width": 1280,
+    "height": 720,
+    "steps": 4,
+    "guidance": 1,
+    "jpegQuality": 95
+  },
+  "benchmarkProfiles": []
+}

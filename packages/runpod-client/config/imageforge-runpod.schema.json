@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://imageforge.local/schemas/runpod-connection-v1.json",
+  "title": "ImageForge RunPod connection profile",
+  "description": "Non-secret RunPod lifecycle configuration. API keys and worker credentials are intentionally not valid fields.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "templateId",
+    "networkVolumeId",
+    "networkVolumeDataCenterId",
+    "benchmarkContract"
+  ],
+  "properties": {
+    "$schema": { "type": "string" },
+    "templateId": { "$ref": "#/$defs/runpodId" },
+    "networkVolumeId": { "$ref": "#/$defs/runpodId" },
+    "networkVolumeDataCenterId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,190}$",
+      "default": "EU-RO-1"
+    },
+    "networkVolumeMountPath": {
+      "type": "string",
+      "pattern": "^/(?!.*\\.\\.).+$",
+      "default": "/workspace"
+    },
+    "podNamePrefix": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,47}$",
+      "default": "imageforge"
+    },
+    "workerPort": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535,
+      "default": 8000
+    },
+    "cloudLanes": {
+      "type": "array",
+      "items": { "const": "secure" },
+      "minItems": 1,
+      "maxItems": 1,
+      "uniqueItems": true,
+      "default": ["secure"]
+    },
+    "allowEmergencyGpuTier": {
+      "type": "boolean",
+      "default": false
+    },
+    "defaultImageCount": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 500,
+      "default": 450
+    },
+    "refreshIntervalMs": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 60000,
+      "default": 1000
+    },
+    "provisioningTimeoutMs": {
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 3600000,
+      "default": 1200000
+    },
+    "stopConfirmationTtlMs": {
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 600000,
+      "default": 120000
+    },
+    "constraints": { "$ref": "#/$defs/constraints" },
+    "benchmarkContract": { "$ref": "#/$defs/benchmarkContract" },
+    "benchmarkProfiles": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/benchmarkProfile" },
+      "default": []
+    }
+  },
+  "$defs": {
+    "runpodId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,190}$"
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allowedCudaVersions": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^\\d{2}(?:\\.\\d)?$" },
+          "minItems": 1,
+          "uniqueItems": true,
+          "default": ["12.8"]
+        },
+        "minRamPerGpuGb": { "type": "number", "exclusiveMinimum": 0, "default": 16 },
+        "minDiskBandwidthMbps": { "type": "number", "exclusiveMinimum": 0 },
+        "minDownloadMbps": { "type": "number", "exclusiveMinimum": 0 },
+        "minUploadMbps": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "benchmarkContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "modelRevision",
+        "softwareImage",
+        "precision",
+        "width",
+        "height",
+        "steps",
+        "guidance",
+        "jpegQuality"
+      ],
+      "properties": {
+        "model": { "const": "black-forest-labs/FLUX.2-klein-4B" },
+        "modelRevision": { "type": "string", "minLength": 1 },
+        "softwareImage": { "type": "string", "minLength": 1 },
+        "precision": { "const": "BF16" },
+        "width": { "const": 1280 },
+        "height": { "const": 720 },
+        "steps": { "const": 4 },
+        "guidance": { "const": 1 },
+        "jpegQuality": { "const": 95 }
+      }
+    },
+    "benchmarkProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gpuId",
+        "measuredAt",
+        "promptSampleSize",
+        "bootSeconds",
+        "secondsPerImage",
+        "contract"
+      ],
+      "properties": {
+        "gpuId": { "type": "string", "minLength": 1, "maxLength": 191 },
+        "measuredAt": { "type": "string", "format": "date-time" },
+        "promptSampleSize": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "bootSeconds": { "type": "number", "exclusiveMinimum": 0 },
+        "secondsPerImage": { "type": "number", "exclusiveMinimum": 0 },
+        "contract": { "$ref": "#/$defs/benchmarkContract" }
+      }
+    }
+  }
+}
