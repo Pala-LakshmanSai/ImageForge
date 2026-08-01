@@ -45,7 +45,10 @@ items, dialog keyboard behavior, prompt parser errors, realistic fake download
 states/retries, full receipt hashes, contrast, and cross-platform paths are
 covered by tests.
 
-## Pending gates
+## Initial review gates (superseded by the production completion loop below)
+
+The checklist in this historical section was captured before the repair and
+paid qualification passes recorded later in this file.
 
 - Desktop visual/keyboard QA has a direct browser interaction pass after the
   repair: onboarding renders as a centered modal, a sample 24-prompt brief
@@ -102,7 +105,7 @@ covered by tests.
   `/Volumes/ImageForgeBuild/cargo-target/release/bundle/dmg/ImageForge_0.1.0_aarch64.dmg`
   SHA-256 `89d713b3beb74e6615bcbab702dfff96aaada5e52ba0eb2ec488ee7af066ca10`.
 
-### Still-required external gates
+### Historical external gates (superseded by the evidence below)
 
 - Verify the configured RunPod template boots the new public GHCR digest and
   prepare the pinned model cache on the EU-RO-1 network volume.
@@ -142,8 +145,9 @@ warmup/generation smoke before the template is considered production-ready.
 - The smoke Pod was explicitly terminated and the live Pod list returned zero
   active Pods.
 
-The cross-Pod shared-volume lease gate, Windows installer smoke, and final
-packaged-app keyboard/folder-reveal checks remain separate release gates.
+The cross-Pod shared-volume lease gate and Windows installer build are recorded
+below. A Windows-machine install/folder-reveal smoke remains the only target-OS
+check not executable on this Mac.
 
 ## EU-RO-1 shared-volume qualification — `d611d99`
 
