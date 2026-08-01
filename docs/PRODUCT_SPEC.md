@@ -28,11 +28,13 @@ application took 30-60 minutes to become usable.
 
 - AC-1: A nontechnical user can start a compatible available RunPod GPU and
   connect to the resulting worker without copying a Pod ID or proxy URL.
-- AC-2: Start selection supports the approved NVIDIA 16-32 GB fallback pool,
-  evaluates current catalog availability and price, and resolves the final
-  choice at creation time through RunPod's ordered fallback. It chooses one
-  GPU, never multiple GPUs. Expensive 48 GB emergency types require an explicit
-  user opt-in.
+- AC-2: Start selection is fixed to EU-RO-1 Secure Cloud and the approved
+  ordinary ladder: RTX 4090, RTX PRO 4500 Blackwell, RTX 5090, RTX PRO 4000
+  Blackwell, L4, RTX A4500, and RTX 4000 Ada. RTX 2000 Ada is a visibly slow,
+  opt-in emergency only. Current catalog availability and price are evaluated,
+  and the final choice resolves at creation time through RunPod's ordered
+  fallback. It chooses exactly one GPU and never silently adds B200, RTX PRO
+  6000, A40/A6000, L40/L40S, or another unapproved type.
 - AC-3: Stop terminates compute only after an explicit confirmation. No timer,
   background monitor, or completed-job event can terminate a Pod.
 - AC-4: The app parses, previews, and submits 300-450 ordered prompts.
