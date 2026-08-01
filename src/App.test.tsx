@@ -128,6 +128,33 @@ describe('ImageForge shell', () => {
     expect(production.runtime.resolveAmbiguousStart).toHaveBeenCalledOnce();
   });
 
+  it('does not present an unresolved RunPod start as completed work', () => {
+    const production = productionAdapter();
+    const state = createConfiguredInitialState();
+    state.pod = {
+      ...state.pod,
+      phase: 'error',
+      phaseProgress: 100,
+      statusDetail: 'RunPod may have created a Pod, but the result could not be confirmed.',
+      errorMessage: 'RunPod may have created a Pod, but the result could not be confirmed.',
+      createRecovery: {
+        attemptId: 'attempt-1',
+        podName: 'imageforge-attempt-1',
+        gpuId: 'NVIDIA GeForce RTX 4090',
+        podId: null,
+      },
+    };
+
+    render(<App initialState={state} adapter={production.adapter} />);
+
+    const track = screen.getByLabelText('Current production status');
+    expect(track).toHaveTextContent('RunPod start needs confirmation');
+    expect(track).toHaveTextContent('—');
+    expect(track).toHaveTextContent('eta action needed');
+    expect(screen.getByRole('progressbar', { name: 'Current operation' })).toHaveAttribute('aria-valuenow', '0');
+    expect(track).not.toHaveTextContent('100%');
+  });
+
   it('navigates all five real destinations', async () => {
     const user = userEvent.setup();
     render(<App initialState={createConfiguredInitialState()} adapter={immediateAdapter()} />);

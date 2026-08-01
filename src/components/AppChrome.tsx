@@ -47,10 +47,29 @@ function formatEta(state: AppState) {
   return minutes > 0 ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
 }
 
+function commandTitle(state: AppState): string {
+  if (state.pod.createRecovery) return 'RunPod start needs confirmation';
+  if (state.pod.phase === 'error') return 'GPU operation needs attention';
+  return state.batch?.name ?? (state.pod.phase === 'offline' ? 'Production desk' : state.pod.statusDetail);
+}
+
+function commandProgress(state: AppState, progress: number): string {
+  const needsAction = state.pod.phase === 'error' || state.pod.createRecovery !== null;
+  return state.batch || !needsAction ? `${progress}%` : '—';
+}
+
+function commandEta(state: AppState): string {
+  if (!state.batch && (state.pod.phase === 'error' || state.pod.createRecovery !== null)) return 'action needed';
+  return formatEta(state);
+}
+
 export function TopBar({ state, dispatch }: { state: AppState; dispatch: Dispatch<AppAction> }) {
   const counts = batchCounts(state.batch);
   const podBusy = !['offline', 'ready', 'error'].includes(state.pod.phase);
-  const topProgress = state.batch ? counts.progress : state.pod.phaseProgress;
+  // An error is not completed work. Keep the track visibly empty so a failed
+  // or ambiguous RunPod start cannot be mistaken for a successful 100% run.
+  const needsAction = state.pod.phase === 'error' || state.pod.createRecovery !== null;
+  const topProgress = state.batch ? counts.progress : needsAction ? 0 : state.pod.phaseProgress;
 
   return (
     <header className="top-bar">
@@ -65,11 +84,11 @@ export function TopBar({ state, dispatch }: { state: AppState; dispatch: Dispatc
             <StatusDot tone={phaseTone(state.pod.phase)} pulse={state.pod.phase === 'ready' || podBusy} />
             {state.batch?.phase === 'running' ? 'generating' : podLabel(state.pod.phase)}
           </span>
-          <strong>{state.batch?.name ?? (state.pod.phase === 'offline' ? 'Production desk' : state.pod.statusDetail)}</strong>
+          <strong>{commandTitle(state)}</strong>
         </div>
         <div className="command-track__numbers">
-          <span>{state.batch ? `${counts.progress}%` : `${state.pod.phaseProgress}%`}</span>
-          <span>eta {formatEta(state)}</span>
+          <span>{commandProgress(state, topProgress)}</span>
+          <span>eta {commandEta(state)}</span>
         </div>
         <LinearProgress value={topProgress} label="Current operation" />
       </div>
