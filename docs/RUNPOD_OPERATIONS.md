@@ -39,16 +39,26 @@ Approved IDs:
 - `NVIDIA L4`
 - `NVIDIA RTX A5000`
 - `NVIDIA RTX A4500`
+- `NVIDIA RTX 4000 Ada Generation`
+- RTX PRO 4500 Blackwell (use the exact catalog ID)
+- RTX PRO 4000 Blackwell (use the exact catalog ID)
 
-Cold-start priority is the order above until identical ImageForge benchmarks
-exist. After that, rank by estimated whole-batch cost, not hourly price alone.
+The current studio profile targets `EU-RO-1`. Its observed cold-start priority
+is RTX 4090, RTX PRO 4500 Blackwell, RTX 5090, RTX PRO 4000 Blackwell, L4, RTX
+A4500, and RTX 4000 Ada. RTX 2000 Ada is an explicitly labeled slow/emergency
+fallback. Intersect this profile with the exact IDs and availability returned by
+the live catalog; do not manufacture a new GPU ID from its display label.
+
+After comparable benchmarks exist, rank by estimated whole-batch cost, not
+hourly price alone.
 The 16 GB candidates remain eligible because the pinned 4B BF16 checkpoint is
 documented at roughly 13 GB, but each must pass the real 1280x720 smoke gate.
 
 Emergency opt-in IDs are `NVIDIA A40`, `NVIDIA RTX A6000`, `NVIDIA L40`, and
-`NVIDIA L40S`. They are compatible but may be poor value. Never include them in
-an ordinary create request unless the user explicitly enables the emergency
-tier after seeing the current hourly estimate.
+`NVIDIA L40S`; RTX 2000 Ada is also emergency-only because its throughput may
+be impractical for 300-450 images. They are compatible but may be poor value.
+Never include them in an ordinary create request unless the user explicitly
+enables the emergency tier after seeing the current hourly estimate.
 
 ## Selection formula
 
@@ -67,12 +77,11 @@ attempt; surface a warning and use the safe cold-start order.
 
 ## Choosing the network-volume data center
 
-A network volume constrains the Pod to its data center. Before the volume is
-created, compare the number and stock status of approved GPUs in candidate data
-centers. For users in India, prefer `AP-IN-2` when it has at least three useful
-approved families; otherwise favor a center with deeper stock and fast volume
-storage over geographic proximity. Store the chosen data-center ID in the
-connection profile and make the limitation visible in Advanced Settings.
+A network volume constrains the Pod to its data center. The studio selected
+`EU-RO-1` because it currently exposes a deeper compatible fallback pool than
+the closer candidates and supports S3-compatible volume access. Store that ID
+in the connection profile and make the limitation visible in Advanced Settings.
+The live catalog remains authoritative because stock changes.
 
 ## Stop GPU
 

@@ -12,8 +12,8 @@ The first-run assistant has four short screens:
 2. **Connect RunPod** — paste the RunPod API key. Store it in the operating
    system credential vault and never render the complete value again.
 3. **Import studio connection** — import or paste the non-secret ImageForge
-   connection profile containing the template ID, network-volume ID, approved
-   GPU order, worker port, and model preset. Enter the user's worker token into
+   connection profile containing the template ID, `EU-RO-1` network-volume ID,
+   approved GPU policy, worker port, and model preset. Enter the user's token into
    a separate masked field and store it in the credential vault.
 4. **Choose downloads folder** — use the native folder picker, run a write test,
    and explain that images are saved directly to this computer.
@@ -57,4 +57,3 @@ GPU preference (`Best value` or `Fastest`), and masked credential replacement.
 Template, volume, port, API base URL, model path, timeout, and diagnostic logs
 live under **Advanced**. Developer and fake-backend switches are available only
 in development builds.
-
