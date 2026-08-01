@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Literal
@@ -11,6 +12,10 @@ from .constants import (
     GUIDANCE_SCALE,
     INFERENCE_STEPS,
     JPEG_QUALITY,
+    MAX_REFERENCE_BYTES,
+    MAX_REFERENCE_NAME_BYTES,
+    MAX_REFERENCE_TOTAL_BYTES,
+    MAX_REFERENCES,
     MAX_SEED,
     MODEL_ID,
     MODEL_PRECISION,
@@ -68,9 +73,64 @@ NONTERMINAL_IMAGE_STATES = {
 }
 
 
+ReferenceMime = Literal["image/jpeg", "image/png", "image/webp"]
+
+
+class ReferenceInput(StrictModel):
+    name: str = Field(min_length=1)
+    mime_type: ReferenceMime
+    data_hex: str = Field(min_length=2)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, name: str) -> str:
+        if (
+            len(name.encode("utf-8")) > MAX_REFERENCE_NAME_BYTES
+            or not name.strip()
+            or any(separator in name for separator in ("/", "\\", "\x00"))
+        ):
+            raise ValueError("reference name is invalid")
+        return name
+
+    @field_validator("data_hex")
+    @classmethod
+    def validate_data_hex(cls, data_hex: str) -> str:
+        if (
+            len(data_hex) % 2
+            or len(data_hex) > MAX_REFERENCE_BYTES * 2
+            or re.fullmatch(r"[0-9a-f]+", data_hex) is None
+        ):
+            raise ValueError("reference data must be lowercase hexadecimal within the byte limit")
+        return data_hex
+
+    @property
+    def size_bytes(self) -> int:
+        return len(self.data_hex) // 2
+
+
+class StoredReference(StrictModel):
+    name: str = Field(min_length=1)
+    mime_type: ReferenceMime
+    size_bytes: int = Field(ge=1, le=MAX_REFERENCE_BYTES)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    filename: str = Field(pattern=r"^references/[0-9]{6}\.(?:jpg|png|webp)$")
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, name: str) -> str:
+        if (
+            len(name.encode("utf-8")) > MAX_REFERENCE_NAME_BYTES
+            or not name.strip()
+            or any(separator in name for separator in ("/", "\\", "\x00"))
+        ):
+            raise ValueError("reference name is invalid")
+        return name
+
+
 class CreateBatchRequest(StrictModel):
     prompts: list[str] = Field(min_length=1)
     base_seed: int = Field(default=0, ge=0, le=MAX_SEED)
+    references: list[ReferenceInput] = Field(default_factory=list, max_length=MAX_REFERENCES)
 
     @field_validator("prompts")
     @classmethod
@@ -84,6 +144,8 @@ class CreateBatchRequest(StrictModel):
     def validate_seed_range(self) -> CreateBatchRequest:
         if self.base_seed + len(self.prompts) - 1 > MAX_SEED:
             raise ValueError("base_seed plus prompt count exceeds the supported seed range")
+        if sum(reference.size_bytes for reference in self.references) > MAX_REFERENCE_TOTAL_BYTES:
+            raise ValueError("reference images exceed the total byte limit")
         return self
 
 
@@ -193,6 +255,7 @@ class BatchManifest(StrictModel):
     pause_requested: bool = False
     cancel_requested: bool = False
     settings: GenerationSettings = Field(default_factory=GenerationSettings)
+    references: list[StoredReference] = Field(default_factory=list, max_length=MAX_REFERENCES)
     images: list[ImageRecord]
     progress: BatchProgress
 

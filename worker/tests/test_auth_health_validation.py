@@ -8,7 +8,7 @@ import pytest
 from conftest import auth, wait_for_health, worker_client
 
 from imageforge_worker.config import Credential, WorkerSettings
-from imageforge_worker.constants import MODEL_REVISION
+from imageforge_worker.constants import MAX_REFERENCE_BYTES, MODEL_REVISION
 from imageforge_worker.domain import CreateBatchRequest, ReceiptRequest
 from imageforge_worker.inference import FakeInferenceAdapter
 
@@ -128,6 +128,28 @@ def test_large_prompt_and_receipt_models_have_no_product_count_or_text_cap() -> 
         ]
     )
     assert len(receipts.receipts) == 501
+
+
+def test_reference_request_bounds_are_practical_and_typed() -> None:
+    with pytest.raises(ValueError):
+        CreateBatchRequest(
+            prompts=["safe"],
+            references=[
+                {
+                    "name": "too-large.png",
+                    "mime_type": "image/png",
+                    "data_hex": "00" * (MAX_REFERENCE_BYTES + 1),
+                }
+            ],
+        )
+    with pytest.raises(ValueError):
+        CreateBatchRequest(
+            prompts=["safe"],
+            references=[
+                {"name": f"ref-{index}.png", "mime_type": "image/png", "data_hex": "00"}
+                for index in range(9)
+            ],
+        )
 
 
 @pytest.mark.anyio

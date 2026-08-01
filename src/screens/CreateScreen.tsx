@@ -309,6 +309,7 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
                       type="button"
                       className="reference-card__remove"
                       aria-label={`Remove ${reference.name}`}
+                      disabled={destinationLocked}
                       onClick={() => dispatch({ type: 'REMOVE_REFERENCE', id: reference.id })}
                     ><X size={14} /></button>
                   </article>

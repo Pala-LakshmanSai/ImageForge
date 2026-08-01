@@ -16,6 +16,8 @@ It never creates, stops, or terminates a Pod.
 - retries: one initial attempt and two automatic retries
 - prompts: any non-empty finite list; prompt text is preserved without a product
   count or per-prompt byte cap
+- references: optional batch-level JPEG, PNG, or WebP images (up to 8 files,
+  8 MiB each and 32 MiB total); manifests retain only safe metadata and checksums
 
 The pinned Python 3.11 slim image plus the SHA-256-pinned `torch==2.13.0+cu130`
 wheel supports the approved Ampere, Ada, and Blackwell families; RunPod supplies

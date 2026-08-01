@@ -1126,6 +1126,7 @@ textarea:disabled {
 .reference-card__meta small { margin-top: 4px; color: var(--muted-dim); font: 600 7px/1 var(--font-mono); }
 .reference-card__remove { position: absolute; top: 4px; right: 4px; display: grid; width: 19px; height: 19px; padding: 0; place-items: center; border: 0; border-radius: 6px; background: rgba(7, 9, 22, 0.78); color: var(--muted); cursor: pointer; }
 .reference-card__remove:hover { color: var(--coral); }
+.reference-card__remove:disabled { opacity: 0.35; cursor: not-allowed; }
 
 .folder-picker,
 .settings-picker {
