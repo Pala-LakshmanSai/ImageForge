@@ -11,8 +11,7 @@ from .constants import (
     GUIDANCE_SCALE,
     INFERENCE_STEPS,
     JPEG_QUALITY,
-    MAX_PROMPT_UTF8_BYTES,
-    MAX_PROMPTS,
+    MAX_SEED,
     MODEL_ID,
     MODEL_PRECISION,
     MODEL_REVISION,
@@ -70,8 +69,8 @@ NONTERMINAL_IMAGE_STATES = {
 
 
 class CreateBatchRequest(StrictModel):
-    prompts: list[str] = Field(min_length=1, max_length=MAX_PROMPTS)
-    base_seed: int = Field(default=0, ge=0, le=(2**63 - 1) - MAX_PROMPTS)
+    prompts: list[str] = Field(min_length=1)
+    base_seed: int = Field(default=0, ge=0, le=MAX_SEED)
 
     @field_validator("prompts")
     @classmethod
@@ -79,9 +78,13 @@ class CreateBatchRequest(StrictModel):
         for prompt in prompts:
             if not prompt.strip():
                 raise ValueError("prompts cannot be blank")
-            if len(prompt.encode("utf-8")) > MAX_PROMPT_UTF8_BYTES:
-                raise ValueError(f"each prompt is limited to {MAX_PROMPT_UTF8_BYTES} UTF-8 bytes")
         return prompts
+
+    @model_validator(mode="after")
+    def validate_seed_range(self) -> CreateBatchRequest:
+        if self.base_seed + len(self.prompts) - 1 > MAX_SEED:
+            raise ValueError("base_seed plus prompt count exceeds the supported seed range")
+        return self
 
 
 class GenerationSettings(StrictModel):
@@ -128,7 +131,7 @@ class StoredReceipt(StrictModel):
 class ImageRecord(StrictModel):
     index: int = Field(ge=1)
     prompt: str
-    seed: int = Field(ge=0)
+    seed: int = Field(ge=0, le=MAX_SEED)
     status: ImageState = ImageState.PENDING
     attempts: int = Field(default=0, ge=0)
     attempts_in_cycle: int = Field(default=0, ge=0)
@@ -252,7 +255,7 @@ class ReceiptItem(StrictModel):
 
 
 class ReceiptRequest(StrictModel):
-    receipts: list[ReceiptItem] = Field(min_length=1, max_length=MAX_PROMPTS)
+    receipts: list[ReceiptItem] = Field(min_length=1)
 
     @model_validator(mode="after")
     def unique_indices(self) -> ReceiptRequest:

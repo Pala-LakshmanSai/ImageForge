@@ -16,7 +16,6 @@ import {
 } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { canStartBatch } from '../domain/reducer';
-import { MAX_PROMPTS } from '../domain/prompts';
 import { TERMINAL_BATCH_PHASES } from '../domain/types';
 import { Button, Eyebrow, PhaseBadge } from '../components/primitives';
 import type { ScreenProps } from './types';
@@ -30,7 +29,7 @@ function readiness(state: ScreenProps['state']) {
     },
     {
       label: 'Prompt order validated',
-      detail: state.draft.prompts.length > 0 ? `${state.draft.prompts.length} of ${MAX_PROMPTS} slots` : 'Paste or import prompts',
+      detail: state.draft.prompts.length > 0 ? `${state.draft.prompts.length} ordered prompts` : 'Paste or import prompts',
       ready: state.draft.prompts.length > 0 && !state.draft.issues.some((issue) => issue.level === 'error'),
     },
     {
@@ -158,8 +157,8 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
               aria-describedby="prompt-validation"
             />
             <div className="prompt-editor__footer">
-              <span className={state.draft.prompts.length > MAX_PROMPTS ? 'count count--error' : 'count'}>
-                {String(state.draft.prompts.length).padStart(3, '0')} / {MAX_PROMPTS} prompts
+              <span className="count" aria-live="polite">
+                {state.draft.prompts.length.toLocaleString()} ordered prompts
               </span>
               <span>{state.draft.rawText.length.toLocaleString()} characters · local only</span>
             </div>
@@ -236,7 +235,17 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
               />
               <i aria-hidden="true" />
             </label>
-            {state.settings.editorialSuffixEnabled ? <p className="visible-suffix"><strong>Appended to every submitted prompt:</strong> {state.settings.editorialSuffix}</p> : null}
+            <label className="settings-field create-suffix-field" htmlFor="create-editorial-suffix">
+              <span>Edit visible suffix</span>
+              <textarea
+                id="create-editorial-suffix"
+                value={state.settings.editorialSuffix}
+                disabled={!state.settings.editorialSuffixEnabled}
+                onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'editorialSuffix', value: event.target.value })}
+                aria-describedby="create-editorial-suffix-help"
+              />
+              <small id="create-editorial-suffix-help">Appended exactly as shown to each submitted prompt.</small>
+            </label>
           </section>
 
           <section className={`panel launch-panel ${isReady ? 'launch-panel--ready' : ''}`}>

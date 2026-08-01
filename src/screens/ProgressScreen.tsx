@@ -112,7 +112,7 @@ function NoBatch({ state, dispatch }: Pick<ScreenProps, 'state' | 'dispatch'>) {
         <EmptyState
           icon={state.pod.phase === 'ready' ? Sparkles : WifiOff}
           title={state.pod.phase === 'ready' ? 'Ready for a production brief' : state.pod.phase === 'error' ? 'GPU needs attention' : 'GPU safely offline'}
-          copy={state.pod.errorMessage ?? (state.pod.phase === 'ready' ? 'Paste or import up to 450 prompts, choose a destination, and begin one batch.' : 'No compute is running and no hourly GPU cost is accruing.')}
+          copy={state.pod.errorMessage ?? (state.pod.phase === 'ready' ? 'Paste or import an ordered prompt list, choose a destination, and begin one batch.' : 'No compute is running and no hourly GPU cost is accruing.')}
           action={
             <div className="empty-state__actions">
               {state.pod.phase !== 'ready' ? <Button tone="primary" icon={Zap} onClick={() => dispatch({ type: 'START_POD' })}>Start GPU</Button> : null}

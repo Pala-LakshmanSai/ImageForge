@@ -15,7 +15,7 @@ Root visual/interaction pass used the in-app browser against the Vite build at
   glass instrument bar, large editorial headings, restrained mono metadata,
   radial and linear progress, live preview, ordered pipeline, and floating nav.
 - No horizontal overflow at 1280x720.
-- A maximum 450-line brief parsed and rendered in about 320 ms in the browser
+- A 450-line endurance brief parsed and rendered in about 320 ms in the browser
   check. The active progress screen rendered 15 virtual rows and 354 total DOM
   nodes rather than mounting 450 full rows.
 - The second-user scenario names the owner, shows progress, disables Generate,

@@ -8,6 +8,7 @@ from conftest import auth, wait_for_health, worker_client
 
 from imageforge_worker.config import Credential, WorkerSettings
 from imageforge_worker.constants import MODEL_REVISION
+from imageforge_worker.domain import CreateBatchRequest, ReceiptRequest
 from imageforge_worker.inference import FakeInferenceAdapter
 
 
@@ -96,7 +97,7 @@ async def test_non_ascii_authorization_is_always_a_safe_401(tmp_path: Path) -> N
 
 
 @pytest.mark.anyio
-async def test_validation_is_bounded_strict_and_does_not_echo_prompts(tmp_path: Path) -> None:
+async def test_validation_is_strict_and_does_not_echo_prompts(tmp_path: Path) -> None:
     async with worker_client(tmp_path / "volume") as (client, _, _):
         sensitive_prompt = "DO-NOT-ECHO-THIS" + "x" * 4096
         response = await client.post(
@@ -109,16 +110,23 @@ async def test_validation_is_bounded_strict_and_does_not_echo_prompts(tmp_path: 
         assert sensitive_prompt not in response.text
         assert "../../etc/passwd" not in response.text
 
-        too_many = await client.post(
-            "/v1/batches",
-            json={"prompts": [f"prompt {index}" for index in range(501)]},
-            headers=auth(),
-        )
-        assert too_many.status_code == 422
-        assert "prompt 500" not in too_many.text
-
         wrong_type = await client.post("/v1/batches", json={"prompts": [123]}, headers=auth())
         assert wrong_type.status_code == 422
+
+
+def test_large_prompt_and_receipt_models_have_no_product_count_or_text_cap() -> None:
+    prompts = [f"prompt {index}" for index in range(501)]
+    prompts[500] = "long prompt " + "x" * 5000
+    request = CreateBatchRequest(prompts=prompts)
+    assert request.prompts == prompts
+
+    receipts = ReceiptRequest(
+        receipts=[
+            {"index": index, "sha256": "0" * 64, "size_bytes": 1}
+            for index in range(1, 502)
+        ]
+    )
+    assert len(receipts.receipts) == 501
 
 
 @pytest.mark.anyio

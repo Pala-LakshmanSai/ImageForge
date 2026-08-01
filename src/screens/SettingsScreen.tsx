@@ -138,7 +138,7 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
             <SettingSectionTitle icon={MonitorCog} eyebrow="Interface" title="Display & feedback" />
             <div className="setting-rows">
               <label className="select-row"><span><strong>Theme</strong><small>Both modes preserve the dark production-console contrast.</small></span><select value={state.settings.theme} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'theme', value: event.target.value as 'midnight' | 'ink' })}><option value="midnight">Midnight cobalt</option><option value="ink">Deep ink</option></select></label>
-              <label className="select-row"><span><strong>Information density</strong><small>Compact keeps 450-item review efficient.</small></span><select value={state.settings.density} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'density', value: event.target.value as 'comfortable' | 'compact' })}><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select></label>
+              <label className="select-row"><span><strong>Information density</strong><small>Compact keeps long prompt-list reviews efficient.</small></span><select value={state.settings.density} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'density', value: event.target.value as 'comfortable' | 'compact' })}><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select></label>
             </div>
           </section>
         </div>

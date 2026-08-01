@@ -51,7 +51,9 @@ function parse(value: unknown): SafePreferencesV1 | null {
   ) return null;
   const userName = boundedString(item.userName, 80);
   const destination = boundedString(item.defaultDestination, 2_048);
-  const suffix = boundedString(item.editorialSuffix, 2_000);
+  // Suffix text is user-authored prompt content. Keep it bounded only by the
+  // storage record's practical size limit rather than imposing a product cap.
+  const suffix = typeof item.editorialSuffix === 'string' ? item.editorialSuffix : null;
   const studioProfile = boundedString(item.studioProfile, 4_096);
   if (
     userName === null ||
@@ -132,7 +134,7 @@ export function persistSafePreferences(
     userName: state.settings.userName.slice(0, 80),
     defaultDestination: state.settings.defaultDestination.slice(0, 2_048),
     editorialSuffixEnabled: state.settings.editorialSuffixEnabled,
-    editorialSuffix: state.settings.editorialSuffix.slice(0, 2_000),
+    editorialSuffix: state.settings.editorialSuffix,
     theme: state.settings.theme,
     density: state.settings.density,
     gpuPreference: state.settings.gpuPreference,

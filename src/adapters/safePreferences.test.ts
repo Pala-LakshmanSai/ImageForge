@@ -90,6 +90,21 @@ describe('safe preference persistence', () => {
     expect(serialized).not.toContain('credential');
   });
 
+  it('round-trips long user-authored suffix text without a product length cap', () => {
+    const state = createConfiguredInitialState();
+    const suffix = `Editorial direction ${'with layered texture '.repeat(160)}`;
+    expect(suffix.length).toBeGreaterThan(2_000);
+    state.settings.editorialSuffix = suffix;
+    const setItem = vi.fn();
+
+    persistSafePreferences(state, { setItem });
+
+    const hydrated = hydrateSafePreferences(createConfiguredInitialState(), {
+      getItem: () => setItem.mock.calls[0][1] as string,
+    });
+    expect(hydrated.settings.editorialSuffix).toBe(suffix);
+  });
+
   it('persists only a non-secret recovery pointer while a batch is active', () => {
     const state = createConfiguredInitialState();
     state.batch = {

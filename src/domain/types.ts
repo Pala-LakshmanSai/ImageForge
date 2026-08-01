@@ -63,7 +63,7 @@ export interface CredentialMetadataMap {
 }
 
 export interface ValidationIssue {
-  code: 'empty' | 'too_many' | 'too_long' | 'duplicate' | 'too_short' | 'invalid_csv';
+  code: 'empty' | 'duplicate' | 'too_short' | 'invalid_csv';
   level: 'error' | 'warning';
   message: string;
   line?: number;

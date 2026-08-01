@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_PROMPTS, parsePromptText } from './prompts';
+import { parsePromptText } from './prompts';
 
 describe('parsePromptText', () => {
   it('normalizes pasted lines, skips blanks, and preserves stable order', () => {
@@ -36,12 +36,24 @@ describe('parsePromptText', () => {
     expect(result.issues.every((issue) => issue.level === 'warning')).toBe(true);
   });
 
-  it('blocks lists above the 450 prompt product limit', () => {
-    const input = Array.from({ length: MAX_PROMPTS + 1 }, (_, index) => `Detailed editorial prompt number ${index + 1}`).join('\n');
+  it('accepts lists above the original 450-prompt workflow target', () => {
+    const input = Array.from({ length: 451 }, (_, index) => `Detailed editorial prompt number ${index + 1}`).join('\n');
     const result = parsePromptText(input);
 
     expect(result.prompts).toHaveLength(451);
-    expect(result.issues).toContainEqual(expect.objectContaining({ code: 'too_many', level: 'error' }));
+    expect(result.prompts.map((prompt) => prompt.index)).toEqual(Array.from({ length: 451 }, (_, index) => index + 1));
+    expect(result.issues.some((issue) => issue.level === 'error')).toBe(false);
+  });
+
+  it('preserves a normalized prompt longer than the original character target', () => {
+    const longPrompt = `A detailed editorial scene ${'with layered visual context '.repeat(30)}`;
+    expect(longPrompt.length).toBeGreaterThan(600);
+
+    const result = parsePromptText(`  ${longPrompt}  `);
+
+    expect(result.prompts).toHaveLength(1);
+    expect(result.prompts[0].text).toBe(longPrompt.trim().replace(/\s+/g, ' '));
+    expect(result.issues.some((issue) => issue.level === 'error')).toBe(false);
   });
 
   it('explains skipped blank rows without treating a trailing newline as an issue', () => {

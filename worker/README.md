@@ -14,7 +14,8 @@ It never creates, stops, or terminates a Pod.
 - output: 1280x720 JPEG quality 95 and 320x180 WebP preview
 - inference: four steps, guidance 1.0
 - retries: one initial attempt and two automatic retries
-- prompts: 1-500, at most 4096 UTF-8 bytes each
+- prompts: any non-empty finite list; prompt text is preserved without a product
+  count or per-prompt byte cap
 
 The pinned Python 3.11 slim image plus the SHA-256-pinned `torch==2.13.0+cu130`
 wheel supports the approved Ampere, Ada, and Blackwell families; RunPod supplies

@@ -1,8 +1,5 @@
 import type { DraftPrompt, ValidationIssue } from './types';
 
-export const MAX_PROMPTS = 450;
-export const MAX_PROMPT_LENGTH = 600;
-
 export interface ParsedPromptResult {
   prompts: DraftPrompt[];
   issues: ValidationIssue[];
@@ -122,24 +119,8 @@ export function parsePromptText(input: string, sourceName?: string | null): Pars
       : []),
     ...blankIssues,
   ];
-  if (nonEmptyRows.length > MAX_PROMPTS) {
-    issues.push({
-      code: 'too_many',
-      level: 'error',
-      message: `${nonEmptyRows.length} prompts found. ImageForge accepts at most ${MAX_PROMPTS} in one batch.`,
-    });
-  }
-
   const prompts = nonEmptyRows.map(({ text, line }, index): DraftPrompt => {
     const promptIssues: ValidationIssue[] = [];
-    if (text.length > MAX_PROMPT_LENGTH) {
-      promptIssues.push({
-        code: 'too_long',
-        level: 'error',
-        line,
-        message: `Line ${line} is ${text.length} characters; shorten it to ${MAX_PROMPT_LENGTH}.`,
-      });
-    }
     if (text.length < 12) {
       promptIssues.push({
         code: 'too_short',

@@ -61,4 +61,5 @@ Image: `pending -> generating -> ready -> downloaded` with `generating -> retryi
 - Worker API uses per-user bearer credentials supplied as RunPod secrets.
 - The worker never accepts output paths from clients.
 - Filenames are server-generated and path-normalized.
-- Request limits cap prompt count and length.
+- Prompt requests must be finite and non-empty; malformed input is rejected while
+  practical OS, transport, storage, and GPU constraints remain explicit.
