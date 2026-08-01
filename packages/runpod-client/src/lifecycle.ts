@@ -648,7 +648,7 @@ export class RunPodLifecycleController {
           operation: "terminate_pod",
         });
         if (stoppedError.code === "operation_aborted") {
-          const surfacedAbort = this.#snapshot.phase === "stopping"
+          const surfacedAbort = attempt.deleteAttempted
             ? new RunPodClientError({
                 code: "operation_aborted",
                 message: "The Pod termination request was cancelled; refresh to verify its outcome.",
@@ -1170,7 +1170,12 @@ export class RunPodLifecycleController {
     if (requestId === null) return;
     const matching = pods.filter((pod) => pod.startRequestId === requestId);
     const active = matching.filter(isActivePod);
-    if (active.length === 1 || (active.length === 0 && matching.length > 0)) {
+    // A terminal Pod can predate this create attempt while reusing the same
+    // deterministic marker. It is not evidence that an ambiguous POST did or
+    // did not create a new Pod, so only one exact active match can reconcile
+    // automatically. Every other outcome remains latched until the operator
+    // explicitly resolves the exact request marker.
+    if (active.length === 1) {
       this.#unresolvedStartRequestId = null;
     }
   }

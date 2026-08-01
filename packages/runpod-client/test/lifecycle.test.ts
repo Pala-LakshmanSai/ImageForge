@@ -516,6 +516,55 @@ describe("RunPodLifecycleController refresh and start", () => {
     assert.equal(result.pod.id, "newactive1");
   });
 
+  it("keeps an ambiguous create latched when only a stale terminal marker exists", async () => {
+    const requestId = "staleterminal1";
+    const provider = new FakeRunPodProvider({
+      inventory: [makeOffer()],
+      pods: [
+        makePod({
+          id: "oldterminal1",
+          name: `imageforge-${requestId}`,
+          startRequestId: requestId,
+          status: "exited",
+        }),
+      ],
+    });
+    provider.failNext("create", new RunPodClientError({
+      code: "api_network_error",
+      message: "create response lost",
+      operation: "create_pod",
+      retryable: true,
+      mayHaveSucceeded: true,
+    }));
+    const controller = makeController(provider);
+
+    await assert.rejects(
+      () => controller.startGpu({
+        intent: "start_gpu",
+        source: "foreground_user",
+        requestId,
+      }),
+      (error: unknown) =>
+        error instanceof RunPodClientError && error.code === "pod_create_ambiguous",
+    );
+    await assert.rejects(
+      () => controller.startGpu({
+        intent: "start_gpu",
+        source: "foreground_user",
+        requestId: "mustnotrepost2",
+      }),
+      (error: unknown) =>
+        error instanceof RunPodClientError && error.code === "pod_create_ambiguous",
+    );
+
+    assert.equal(provider.calls.create.length, 1);
+    assert.ok(
+      controller.getSnapshot().warnings.some(
+        (warning) => warning.code === "ambiguous_create_unresolved",
+      ),
+    );
+  });
+
   it("retains the exact validated create result when discovery only finds an old reused marker", async () => {
     const requestId = "repeat201";
     const provider = new FakeRunPodProvider({
@@ -1134,6 +1183,62 @@ describe("RunPodLifecycleController explicit Stop GPU", () => {
         error.mayHaveSucceeded,
     );
     assert.equal((await controller.refresh()).selectedPodId, pod.id);
+  });
+
+  it("does not attribute another queued stop's DELETE attempt to an aborted stop", async () => {
+    const first = makePod({ id: "firstqueuedstop1", createdAt: "2026-08-01T00:00:00.000Z" });
+    const second = makePod({ id: "secondqueuedstop2", createdAt: "2026-08-01T00:00:01.000Z" });
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()], pods: [first, second] });
+    const firstDeleteEntered = deferred();
+    provider.onTerminate((podId) => {
+      if (podId === first.id) {
+        firstDeleteEntered.resolve();
+        return new Promise(() => undefined);
+      }
+      return undefined;
+    });
+    const tokens = ["first-stop-token", "second-stop-token"];
+    const controller = makeController(provider, { token: () => tokens.shift() ?? "unused-token" });
+    await controller.refresh();
+    const firstConfirmation = controller.requestStopConfirmation({
+      intent: "stop_gpu",
+      source: "foreground_user",
+      podId: first.id,
+    });
+    const secondConfirmation = controller.requestStopConfirmation({
+      intent: "stop_gpu",
+      source: "foreground_user",
+      podId: second.id,
+    });
+    const firstAbort = new AbortController();
+    const secondAbort = new AbortController();
+    const firstPending = controller.stopGpu({
+      intent: "confirm_stop_gpu",
+      source: "foreground_user",
+      podId: first.id,
+      confirmationToken: firstConfirmation.token,
+    }, firstAbort.signal);
+    await firstDeleteEntered.promise;
+    const secondPending = controller.stopGpu({
+      intent: "confirm_stop_gpu",
+      source: "foreground_user",
+      podId: second.id,
+      confirmationToken: secondConfirmation.token,
+    }, secondAbort.signal);
+    secondAbort.abort();
+
+    await assert.rejects(
+      () => secondPending,
+      (error: unknown) =>
+        error instanceof RunPodClientError &&
+        error.code === "operation_aborted" &&
+        !error.mayHaveSucceeded &&
+        error.details.podId === undefined,
+    );
+    assert.deepEqual(provider.calls.terminate, [first.id]);
+
+    firstAbort.abort();
+    await assert.rejects(() => firstPending);
   });
 
   it("gives confirmed stop its own deadline and treats an unresolved DELETE as ambiguous", async () => {
