@@ -14,4 +14,4 @@ pub use runpod::{
 };
 pub use session::WorkerSession;
 pub use vault::{CredentialKind, CredentialMetadata, CredentialVault, KeyringVault};
-pub use worker::{WorkerApi, WorkerHttpResponse};
+pub use worker::{WorkerApi, WorkerHttpResponse, WorkerPreviewResponse};

@@ -13,6 +13,7 @@ import {
 import { useEffect, useMemo, useState } from 'react';
 import type { LibraryAsset } from '../domain/types';
 import { SimulatedImage } from '../components/SimulatedImage';
+import { PreviewImage } from '../components/PreviewImage';
 import { DialogPortal } from '../components/DialogPortal';
 import { Button, EmptyState, Eyebrow, IconButton, PhaseBadge } from '../components/primitives';
 import type { ScreenProps } from './types';
@@ -85,7 +86,7 @@ export function LibraryScreen({ state, dispatch, adapter }: ScreenProps) {
             <div className="asset-grid">
               {assets.slice(0, visibleCount).map((asset) => (
                 <button className="asset-card" type="button" key={asset.id} onClick={() => setSelected(asset)}>
-                  <span className="asset-card__image">{adapter.mode === 'production' ? <VerifiedLocalPreview filename={asset.filename} compact /> : <SimulatedImage seed={asset.seed} prompt={asset.prompt} compact />}<i><Check size={12} /> verified</i></span>
+                  <span className="asset-card__image">{adapter.mode === 'production' ? <PreviewImage cacheKey={`${asset.batchId}:${asset.index}:${asset.checksum}`} alt={`Generated preview for ${asset.filename}`} loader={adapter.fetchPreview ? () => adapter.fetchPreview!(asset.batchId, asset.index) : undefined} fallback={<VerifiedLocalPreview filename={asset.filename} compact />} /> : <SimulatedImage seed={asset.seed} prompt={asset.prompt} compact />}<i><Check size={12} /> verified</i></span>
                   <span className="asset-card__body">
                     <span><strong>{asset.filename}</strong><small>{asset.durationSeconds.toFixed(1)}s</small></span>
                     <em>{asset.prompt}</em>
@@ -111,7 +112,7 @@ export function LibraryScreen({ state, dispatch, adapter }: ScreenProps) {
       {selected ? (
         <DialogPortal backdropClassName="asset-inspector-backdrop" surfaceClassName="asset-inspector" labelledBy="asset-title" onRequestClose={() => setSelected(null)}>
             <IconButton data-autofocus className="asset-inspector__close" label="Close image details" icon={X} onClick={() => setSelected(null)} />
-            <div className="asset-inspector__preview">{adapter.mode === 'production' ? <VerifiedLocalPreview filename={selected.filename} /> : <SimulatedImage seed={selected.seed} prompt={selected.prompt} />}</div>
+            <div className="asset-inspector__preview">{adapter.mode === 'production' ? <PreviewImage cacheKey={`${selected.batchId}:${selected.index}:${selected.checksum}`} alt={`Generated preview for ${selected.filename}`} loader={adapter.fetchPreview ? () => adapter.fetchPreview!(selected.batchId, selected.index) : undefined} fallback={<VerifiedLocalPreview filename={selected.filename} />} /> : <SimulatedImage seed={selected.seed} prompt={selected.prompt} />}</div>
             <div className="asset-inspector__content">
               <div><Eyebrow>{selected.batchName} · frame {String(selected.index).padStart(3, '0')}</Eyebrow><h2 id="asset-title">{selected.filename}</h2></div>
               <PhaseBadge tone="success">verified locally</PhaseBadge>

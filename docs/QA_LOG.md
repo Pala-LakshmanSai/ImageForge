@@ -47,9 +47,28 @@ covered by tests.
 
 ## Pending gates
 
-- Re-run desktop visual/keyboard QA after the repair commit.
-- Run native Tauri command and app launch checks on macOS.
+- Desktop visual/keyboard QA has a direct browser interaction pass after the
+  repair: onboarding renders as a centered modal, a sample 24-prompt brief
+  reaches Ready, the production-shaped progress screen renders live preview
+  state, and Pause after frame holds the manifest lock. A final packaged-app
+  keyboard pass is still pending.
+- Native Tauri command checks are green: 36 Rust tests pass, including bounded
+  authenticated WebP preview validation and macOS canonical-path coverage.
+  A final bundled-app launch check remains pending.
 - Run the integrated 450-item restart/download endurance scenario.
 - Run Windows CI and installer smoke test on a Windows runner.
 - Run explicitly authorized real-GPU smoke benchmarks before enabling measured
   cost ranking.
+
+## Current automated evidence — `77d5c8d` + preview hardening
+
+- Frontend: 12 Vitest files, 69 tests passed; `npm run typecheck` and
+  `npm run build` passed. The production preview path now renders authenticated
+  WebP bytes through native Rust, with a session-local object URL cache and a
+  safe decoder-error fallback.
+- Worker: 33 offline tests passed, 1 explicitly paid real-GPU test deselected;
+  Ruff passed for `worker/src` and `worker/tests`.
+- External RunPod setup: the durable `imageforge-prod-50gb` volume exists as
+  `ukh207b26r` in EU-RO-1. The immutable ImageForge worker image/template,
+  runtime secrets, paid GPU smoke, two-Pod volume gate, and installers are not
+  yet published, so the unrelated default ComfyUI template must not be used.

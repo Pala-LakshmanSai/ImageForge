@@ -21,6 +21,7 @@ import {
   nativeWriteManifest,
   nativeWorkerCreateBatch,
   nativeWorkerGetBatch,
+  nativeWorkerFetchPreview,
   nativeWorkerHealthFetch,
   nativeWorkerPauseBatch,
   nativeWorkerCancelBatch,
@@ -63,6 +64,7 @@ export function createNativeProductionPort(): ProductionDesktopPort {
     },
     validateDestination,
     revealDestination: nativeRevealDestination,
+    fetchPreview: nativeWorkerFetchPreview,
     writeManifest: nativeWriteManifest,
     credentialMetadata: nativeCredentialMetadata,
     replaceCredential: (kind: CredentialKind, value: string): Promise<CredentialMetadata> =>

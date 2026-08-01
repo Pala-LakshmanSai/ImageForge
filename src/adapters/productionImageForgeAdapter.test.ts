@@ -59,6 +59,7 @@ function port(overrides: Partial<ProductionDesktopPort> = {}): ProductionDesktop
     resolveCreateMarker: vi.fn(async () => undefined),
     reconcileReceipts: vi.fn(async () => ({ schemaVersion: 1, batchId, receipts: [] })),
     revealDestination: vi.fn(async () => undefined),
+    fetchPreview: vi.fn(async () => ({ contentType: 'image/webp' as const, sha256: 'a'.repeat(64), sizeBytes: 12, bytes: [] })),
     writeManifest: vi.fn(async (batchId) => `${batchId}/manifest.csv`),
     clearWorkerSession: vi.fn(async () => undefined),
     chooseDestination: vi.fn(async (path) => ({ path, writable: true })),

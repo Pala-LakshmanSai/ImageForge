@@ -226,8 +226,10 @@ function checksum(value: unknown, label: string): string {
 
 function image(value: unknown, expectedIndex: number): WorkerImageRecord {
   const item = record(value, `images[${expectedIndex - 1}]`);
-  // Attempts-in-cycle/history and preview details are intentionally removed by
-  // the native response projector because the desktop never consumes them.
+  // Attempts-in-cycle/history are intentionally removed by the native response
+  // projector. Preview bytes are fetched separately through the authenticated
+  // native preview command so they never travel through the renderer's JSON
+  // manifest path.
   exactKeys(
     item,
     [

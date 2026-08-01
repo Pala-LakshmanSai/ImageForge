@@ -68,7 +68,7 @@ describe('GpuLifecycleCoordinator', () => {
     const snapshot = await coordinator.start(DEFAULT_STUDIO_PROFILE, 450, false);
 
     expect(snapshot.phase).toBe('ready');
-    expect(port.bindProfile).toHaveBeenCalledWith('imageforge-worker-v1', 'if-models-production');
+    expect(port.bindProfile).toHaveBeenCalledWith('imageforge-worker-v1', 'ukh207b26r');
     expect(port.authorizeStart).toHaveBeenCalledWith(false);
     expect(port.clearStartAuthorization).toHaveBeenCalledOnce();
     expect(providers[0].calls.create).toHaveLength(0);

@@ -6,7 +6,7 @@ describe('studio profile parser', () => {
     expect(parseStudioProfile(DEFAULT_STUDIO_PROFILE)).toEqual({
       profile: 'imageforge-studio-v1',
       templateId: 'imageforge-worker-v1',
-      networkVolumeId: 'if-models-production',
+      networkVolumeId: 'ukh207b26r',
       dataCenter: 'EU-RO-1',
       gpuPolicy: 'eu-ro-1-approved-v1',
       workerPort: 8000,

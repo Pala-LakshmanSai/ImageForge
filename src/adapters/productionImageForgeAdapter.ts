@@ -46,6 +46,12 @@ export interface ProductionDesktopPort extends GpuLifecycleNativePort, WorkerBat
   reconcileReceipts(batchId: string): Promise<unknown>;
   revealDestination(relativePath?: string): Promise<void>;
   writeManifest(batchId: string, content: string): Promise<string>;
+  fetchPreview(batchId: string, index: number): Promise<{
+    contentType: 'image/webp';
+    sha256: string;
+    sizeBytes: number;
+    bytes: number[];
+  }>;
 }
 
 export type ProductionRuntimeEvent =
@@ -366,6 +372,7 @@ export function createProductionImageForgeAdapter(port: ProductionDesktopPort, r
       return (await port.validateDestination(path)).writable;
     },
     revealPath: (relativePath) => port.revealDestination(relativePath),
+    fetchPreview: (batchId, index) => port.fetchPreview(batchId, index),
     writeManifest: (batchId, content) => port.writeManifest(batchId, content),
     credentialMetadata: () => port.credentialMetadata(),
     replaceCredential: (kind, value) => port.replaceCredential(kind, value),

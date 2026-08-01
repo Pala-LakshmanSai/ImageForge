@@ -19,7 +19,9 @@ export const EU_RO_ORDINARY_GPUS = [
 export const DEFAULT_STUDIO_PROFILE = [
   'profile: imageforge-studio-v1',
   'template_id: imageforge-worker-v1',
-  'network_volume_id: if-models-production',
+  // Provisioned once in RunPod EU-RO-1; only the template ID remains a
+  // one-time deployment value until the immutable worker template exists.
+  'network_volume_id: ukh207b26r',
   'data_center: EU-RO-1',
   'gpu_policy: eu-ro-1-approved-v1',
   'worker_port: 8000',
@@ -69,6 +71,13 @@ export interface ImageForgeAdapter {
   chooseDestination(defaultPath: string): Promise<string | null>;
   validateDestination(path: string): Promise<boolean>;
   revealPath(relativePath?: string): Promise<void>;
+  /** Fetches one worker-generated 320px WebP through the native vault. */
+  fetchPreview?(batchId: string, index: number): Promise<{
+    contentType: 'image/webp';
+    sha256: string;
+    sizeBytes: number;
+    bytes: number[];
+  }>;
   writeManifest(batchId: string, content: string): Promise<string>;
   credentialMetadata(): Promise<CredentialMetadataMap>;
   replaceCredential(kind: CredentialKind, value: string): Promise<CredentialMetadata>;

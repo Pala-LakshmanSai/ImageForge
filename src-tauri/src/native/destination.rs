@@ -589,11 +589,12 @@ mod tests {
         std::fs::create_dir(&nested).unwrap();
         let store = DestinationStore::new_for_test(temporary.path().join("record.json"));
         let metadata = store.validate_and_bind(&nested).unwrap();
+        let canonical_nested = nested.canonicalize().unwrap();
         assert!(metadata.writable);
         assert!(Path::new(&metadata.path).is_absolute());
         assert_eq!(
             store.confine(Path::new("000001.jpg")).unwrap(),
-            nested.join("000001.jpg")
+            canonical_nested.join("000001.jpg")
         );
         for escaped in [Path::new("../outside"), Path::new("/tmp/outside")] {
             assert_eq!(
@@ -650,11 +651,12 @@ mod tests {
         first
             .validate_selected(&destination, &selection.chooser_grant)
             .unwrap();
+        let canonical_destination = destination.canonicalize().unwrap();
 
         let restarted = DestinationStore::new_for_test(record.clone());
         assert_eq!(
             restarted.restore().unwrap().unwrap().path,
-            destination.to_string_lossy()
+            canonical_destination.to_string_lossy()
         );
 
         std::fs::remove_dir(&destination).unwrap();
@@ -673,6 +675,7 @@ mod tests {
         std::fs::create_dir(&destination).unwrap();
         let store = DestinationStore::new_for_test(temporary.path().join("state.json"));
         store.validate_and_bind(&destination).unwrap();
+        let canonical_destination = destination.canonicalize().unwrap();
 
         let batch_id = "11111111-1111-4111-8111-111111111111";
         let path = store
@@ -681,7 +684,7 @@ mod tests {
         let path = PathBuf::from(path);
         assert_eq!(
             path.parent().unwrap(),
-            destination.join("batches").join(batch_id)
+            canonical_destination.join("batches").join(batch_id)
         );
         assert_eq!(
             std::fs::read_to_string(path).unwrap(),

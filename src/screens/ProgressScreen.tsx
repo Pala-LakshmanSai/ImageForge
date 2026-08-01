@@ -25,6 +25,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { batchCounts } from '../domain/reducer';
 import type { BatchPrompt } from '../domain/types';
 import { SimulatedImage } from '../components/SimulatedImage';
+import { PreviewImage } from '../components/PreviewImage';
 import { VirtualPromptList } from '../components/VirtualPromptList';
 import { Button, EmptyState, Eyebrow, LinearProgress, Metric, PhaseBadge, RingProgress } from '../components/primitives';
 import type { ScreenProps } from './types';
@@ -271,11 +272,22 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
                 ) : selectedPrompt.status === 'pending' ? (
                   <div className="preview-frame__waiting"><Clock3 size={29} /><strong>Ordered slot waiting</strong><span>Generation begins after earlier prompts settle.</span></div>
                 ) : adapter.mode === 'production' ? (
-                  <div className="preview-frame__waiting">
-                    <ShieldCheck size={29} />
-                    <strong>{selectedPrompt.status === 'downloaded' ? 'JPEG verified locally' : 'Secure preview pending'}</strong>
-                    <span>{selectedPrompt.status === 'downloaded' ? 'The full image is safely stored in your selected folder.' : 'ImageForge will show only verified local output here.'}</span>
-                  </div>
+                  <PreviewImage
+                    cacheKey={`${batch.id}:${selectedPrompt.index}:${selectedPrompt.checksum ?? selectedPrompt.status}`}
+                    alt={`Generated preview for frame ${String(selectedPrompt.index).padStart(3, '0')}`}
+                    loader={
+                      adapter.fetchPreview && ['ready', 'downloaded'].includes(selectedPrompt.status)
+                        ? () => adapter.fetchPreview!(batch.id, selectedPrompt.index)
+                        : undefined
+                    }
+                    fallback={
+                      <div className="preview-frame__waiting">
+                        <ShieldCheck size={29} />
+                        <strong>{selectedPrompt.status === 'downloaded' ? 'Loading verified preview' : 'Secure preview pending'}</strong>
+                        <span>{selectedPrompt.status === 'downloaded' ? 'The full image is safely stored in your selected folder.' : 'The preview becomes available after the worker publishes the frame.'}</span>
+                      </div>
+                    }
+                  />
                 ) : (
                   <SimulatedImage seed={selectedPrompt.seed} prompt={selectedPrompt.text} />
                 )}

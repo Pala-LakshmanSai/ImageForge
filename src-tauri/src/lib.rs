@@ -4,7 +4,7 @@ use native::{
     CredentialKind, CredentialMetadata, CredentialVault, DestinationMetadata, DestinationSelection,
     DestinationStore, DownloadReceipt, DownloadRequest, Downloader, KeyringVault, NativeError,
     NativeResult, ReceiptLedger, RunPodCreateMarkerMetadata, RunPodHttpRequest, RunPodHttpResponse,
-    RunPodTransport, WorkerApi, WorkerHttpResponse, WorkerSession,
+    RunPodTransport, WorkerApi, WorkerHttpResponse, WorkerPreviewResponse, WorkerSession,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -425,6 +425,18 @@ async fn worker_retry_failed(
 }
 
 #[tauri::command]
+async fn worker_fetch_preview(
+    state: State<'_, NativeState>,
+    batch_id: String,
+    index: u16,
+) -> NativeResult<WorkerPreviewResponse> {
+    state
+        .worker
+        .preview(parse_batch_id(&batch_id)?, index)
+        .await
+}
+
+#[tauri::command]
 async fn download_artifact(
     state: State<'_, NativeState>,
     request: DownloadRequest,
@@ -502,6 +514,7 @@ pub fn run() {
             worker_resume_batch,
             worker_cancel_batch,
             worker_retry_failed,
+            worker_fetch_preview,
             download_artifact,
             read_receipt_ledger,
             reconcile_receipts,

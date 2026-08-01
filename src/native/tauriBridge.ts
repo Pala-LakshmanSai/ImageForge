@@ -65,6 +65,13 @@ export interface NativeReceiptLedger {
   receipts: NativeDownloadReceipt[];
 }
 
+export interface NativePreviewResponse {
+  contentType: 'image/webp';
+  sha256: string;
+  sizeBytes: number;
+  bytes: number[];
+}
+
 export interface NativeRunPodCreateMarkerMetadata {
   pending: boolean;
   attemptId: string | null;
@@ -217,6 +224,10 @@ export function nativeWorkerCancelBatch(batchId: string): Promise<NativeHttpResp
 
 export function nativeWorkerRetryFailed(batchId: string): Promise<NativeHttpResponse> {
   return invoke('worker_retry_failed', { batchId });
+}
+
+export function nativeWorkerFetchPreview(batchId: string, index: number): Promise<NativePreviewResponse> {
+  return invoke('worker_fetch_preview', { batchId, index });
 }
 
 export function nativeDownloadArtifact(request: NativeDownloadRequest): Promise<NativeDownloadReceipt> {

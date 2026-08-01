@@ -5,11 +5,13 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Client, Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
 const MAX_JSON_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PREVIEW_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PROMPTS: usize = 500;
 const MAX_PROMPT_BYTES: usize = 4096;
 
@@ -25,6 +27,15 @@ pub struct CreateBatchInput {
 pub struct WorkerHttpResponse {
     pub status: u16,
     pub body: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerPreviewResponse {
+    pub content_type: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -123,6 +134,131 @@ impl WorkerApi {
 
     pub async fn retry_failed(&self, batch_id: Uuid) -> NativeResult<WorkerHttpResponse> {
         self.mutate_batch(batch_id, "retry-failed").await
+    }
+
+    /// Fetch one generated preview through the native authenticated boundary.
+    /// The renderer never receives the worker bearer token or an arbitrary URL.
+    pub async fn preview(&self, batch_id: Uuid, index: u16) -> NativeResult<WorkerPreviewResponse> {
+        validate_index(index)?;
+        let pin = self.session.pin().await?;
+        let url = pin.endpoint(&format!("/v1/batches/{batch_id}/previews/{index}"))?;
+        let token = self.worker_token()?;
+        let response = self
+            .client
+            .get(url)
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(ACCEPT, "image/webp")
+            .send()
+            .await
+            .map_err(|_| {
+                NativeError::retryable(
+                    "worker_network_error",
+                    "The ImageForge preview could not be reached.",
+                )
+            })?;
+        let status = response.status();
+        if status != StatusCode::OK {
+            // Preserve a redacted worker error message where possible, but
+            // never pass an arbitrary response body to the renderer.
+            let body = read_bounded(response, 64 * 1024).await?;
+            if let Ok(value) = serde_json::from_slice::<Value>(&body) {
+                let runpod_key = self.vault.load(CredentialKind::RunpodApiKey).ok();
+                reject_secret_reflection(&value, Some(&token), runpod_key.as_deref())?;
+                if let Some(message) = value
+                    .get("error")
+                    .and_then(Value::as_object)
+                    .and_then(|error| error.get("message"))
+                    .and_then(Value::as_str)
+                    .filter(|message| !message.is_empty() && message.len() <= 500)
+                {
+                    return Err(NativeError::retryable(
+                        "preview_request_failed",
+                        message.to_owned(),
+                    ));
+                }
+            }
+            return Err(NativeError::retryable(
+                "preview_request_failed",
+                format!(
+                    "The worker could not provide preview {index} (HTTP {}).",
+                    status.as_u16()
+                ),
+            ));
+        }
+
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                NativeError::new(
+                    "preview_metadata_mismatch",
+                    "The worker preview did not declare an image/webp content type.",
+                )
+            })?;
+        if content_type != "image/webp" {
+            return Err(NativeError::new(
+                "preview_metadata_mismatch",
+                "The worker returned a non-WebP preview.",
+            ));
+        }
+        let checksum = response
+            .headers()
+            .get("x-imageforge-sha256")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                NativeError::new(
+                    "preview_metadata_mismatch",
+                    "The worker preview did not declare a checksum.",
+                )
+            })?;
+        validate_checksum(&checksum)?;
+        let declared_size = response.content_length().ok_or_else(|| {
+            NativeError::new(
+                "preview_metadata_mismatch",
+                "The worker preview did not declare a byte count.",
+            )
+        })?;
+        if declared_size == 0 || declared_size > MAX_PREVIEW_BYTES as u64 {
+            return Err(NativeError::new(
+                "preview_size_invalid",
+                "The worker preview exceeded the safe preview size limit.",
+            ));
+        }
+        let bytes = read_bounded(response, MAX_PREVIEW_BYTES).await?;
+        if bytes.len() as u64 != declared_size
+            || !is_webp(&bytes)
+            || hex::encode(Sha256::digest(&bytes)) != checksum
+        {
+            return Err(NativeError::new(
+                "preview_checksum_mismatch",
+                "The worker preview failed image, size, or checksum validation.",
+            ));
+        }
+        let runpod_key = self.vault.load(CredentialKind::RunpodApiKey).ok();
+        let reflected_secret = [Some(token.as_str()), runpod_key.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter(|secret| !secret.is_empty())
+            .any(|secret| {
+                bytes
+                    .windows(secret.len())
+                    .any(|window| window == secret.as_bytes())
+            });
+        if reflected_secret {
+            return Err(NativeError::new(
+                "worker_secret_reflection",
+                "The worker preview was rejected because it exposed saved credential material.",
+            ));
+        }
+        Ok(WorkerPreviewResponse {
+            content_type,
+            sha256: checksum,
+            size_bytes: declared_size,
+            bytes,
+        })
     }
 
     pub(crate) async fn acknowledge_with_pin(
@@ -308,6 +444,10 @@ pub(crate) fn validate_checksum(value: &str) -> NativeResult<()> {
         ));
     }
     Ok(())
+}
+
+fn is_webp(bytes: &[u8]) -> bool {
+    bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP"
 }
 
 fn validate_worker_envelope(status: StatusCode, body: &Value) -> NativeResult<()> {
@@ -632,6 +772,14 @@ mod tests {
         assert!(validate_checksum(&"a".repeat(64)).is_ok());
         assert!(validate_checksum(&"A".repeat(64)).is_err());
         assert!(validate_checksum("../../file").is_err());
+    }
+
+    #[test]
+    fn preview_bytes_require_webp_container_and_are_bounded() {
+        assert!(is_webp(b"RIFF0000WEBP"));
+        assert!(!is_webp(b"RIFF0000JPEG"));
+        assert!(!is_webp(b"WEBP"));
+        assert!(MAX_PREVIEW_BYTES < MAX_JSON_RESPONSE_BYTES);
     }
 
     #[test]

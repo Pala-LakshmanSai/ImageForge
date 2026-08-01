@@ -5,7 +5,8 @@ needed before Lakshman and Sujal install their desktop clients.
 
 ## 1. Durable RunPod resources
 
-1. Create one **50 GB network volume** in **EU-RO-1**. The volume holds the
+1. Create one **50 GB network volume** in **EU-RO-1**. ImageForge's provisioned
+   volume is `imageforge-prod-50gb` (`ukh207b26r`). The volume holds the
    selective FLUX snapshot, durable manifests, previews, and short-lived full
    artifacts. Pod deletion must never delete this volume.
 2. Build and publish the pinned ImageForge worker container. Normal Pod boot
@@ -47,6 +48,11 @@ Create one ImageForge template with:
 
 The template does not pin a physical GPU. The desktop supplies the live ordered
 GPU list when it explicitly creates each disposable Pod.
+
+The repository profile is already wired to volume `ukh207b26r`; the template
+ID remains a deliberate one-time deployment value until the immutable worker
+image/template is published. Do not substitute RunPod's default ComfyUI
+template.
 
 ## 4. Desktop connection profile
 

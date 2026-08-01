@@ -6,7 +6,9 @@
 
 - React/TypeScript presentation and local state.
 - Tauri/Rust commands for OS dialogs, credential vault, downloads, checksums,
-  local manifest storage, and RunPod requests.
+  bounded authenticated WebP previews, local manifest storage, and RunPod
+  requests. Preview bytes are held in a session-local object URL only; worker
+  credentials never cross into the renderer.
 - A `RunPodProvider` interface with fake and real implementations.
 - A `WorkerClient` interface with fake and HTTP implementations.
 
