@@ -207,3 +207,14 @@ the recovery poll observes it.
   the complete Rust suite remains covered by the removable-disk macOS run.
   This keeps the native packaging path focused and avoids a runner-hosted
   credential/UI test holding the installer job indefinitely.
+
+## Windows NSIS artifact — run `30717838047`
+
+- Native `windows-latest` build completed successfully in 15m44s after the
+  frontend tests and TypeScript checks passed.
+- Downloaded installer:
+  `/Volumes/ImageForgeBuild/windows-artifact/ImageForge_0.1.0_x64-setup.exe`
+- SHA-256: `a8267713c57e7d27041e1df4499adde81fbf2654a80112df90142b28209218fa`
+- Artifact inspection identifies a PE32 GUI NSIS self-extracting installer.
+  It was built on Windows and downloaded for handoff; Windows installation
+  execution still requires a Windows machine.
