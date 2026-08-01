@@ -8,7 +8,7 @@ import {
   type ManagedPod,
   type RunPodClientConfigInput,
 } from '@imageforge/runpod-client';
-import { DEFAULT_STUDIO_PROFILE } from './imageForgeAdapter';
+import { DEFAULT_STUDIO_PROFILE, IMAGEFORGE_WORKER_IMAGE } from './imageForgeAdapter';
 import {
   GpuLifecycleCoordinator,
   productionRunPodConfig,
@@ -68,7 +68,7 @@ describe('GpuLifecycleCoordinator', () => {
     const snapshot = await coordinator.start(DEFAULT_STUDIO_PROFILE, 450, false);
 
     expect(snapshot.phase).toBe('ready');
-    expect(port.bindProfile).toHaveBeenCalledWith('imageforge-worker-v1', 'ukh207b26r');
+    expect(port.bindProfile).toHaveBeenCalledWith('q8sfgixfy2', 'ukh207b26r');
     expect(port.authorizeStart).toHaveBeenCalledWith(false);
     expect(port.clearStartAuthorization).toHaveBeenCalledOnce();
     expect(providers[0].calls.create).toHaveLength(0);
@@ -142,6 +142,7 @@ describe('GpuLifecycleCoordinator', () => {
     expect(normal.benchmarkContract).toMatchObject({
       model: 'black-forest-labs/FLUX.2-klein-4B',
       modelRevision: 'e7b7dc27f91deacad38e78976d1f2b499d76a294',
+      softwareImage: IMAGEFORGE_WORKER_IMAGE,
       precision: 'BF16',
       width: 1280,
       height: 720,

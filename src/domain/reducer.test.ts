@@ -22,6 +22,18 @@ function readyDraft(promptCount: number): AppState {
 }
 
 describe('appReducer', () => {
+  it('does not mark a failed or ambiguous Pod start as complete', () => {
+    const state = appReducer(createInitialState(), {
+      type: 'RUNTIME_ERROR',
+      scope: 'pod',
+      retryable: false,
+      message: 'RunPod may have created a Pod, but the result could not be confirmed.',
+    });
+    expect(state.pod.phase).toBe('error');
+    expect(state.pod.phaseProgress).toBe(0);
+    expect(state.pod.errorMessage).toContain('result could not be confirmed');
+  });
+
   it('moves through the explicit Pod lifecycle and records the disposable Pod ID', () => {
     let state = createInitialState();
     state = appReducer(state, { type: 'START_POD' });

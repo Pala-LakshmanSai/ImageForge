@@ -16,12 +16,18 @@ export const EU_RO_ORDINARY_GPUS = [
   'RTX 4000 Ada',
 ] as const;
 
+// These are the production bindings validated by the paid EU-RO-1 smoke and
+// shared-volume gates. Keep them immutable so a normal Start cannot silently
+// fall back to an unpinned worker image or an outdated template.
+export const IMAGEFORGE_TEMPLATE_ID = 'q8sfgixfy2';
+export const IMAGEFORGE_NETWORK_VOLUME_ID = 'ukh207b26r';
+export const IMAGEFORGE_WORKER_IMAGE =
+  'ghcr.io/pala-lakshmansai/imageforge-worker@sha256:084f8494c901a21e52c0c2c1025ae0c972efe87f458cfdb339743341d6ef99e0';
+
 export const DEFAULT_STUDIO_PROFILE = [
   'profile: imageforge-studio-v1',
-  'template_id: imageforge-worker-v1',
-  // Provisioned once in RunPod EU-RO-1; only the template ID remains a
-  // one-time deployment value until the immutable worker template exists.
-  'network_volume_id: ukh207b26r',
+  `template_id: ${IMAGEFORGE_TEMPLATE_ID}`,
+  `network_volume_id: ${IMAGEFORGE_NETWORK_VOLUME_ID}`,
   'data_center: EU-RO-1',
   'gpu_policy: eu-ro-1-approved-v1',
   'worker_port: 8000',

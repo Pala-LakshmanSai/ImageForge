@@ -29,7 +29,10 @@ function podProgress(phase: PodPhase): number {
     case 'ready': return 100;
     case 'stopping': return 72;
     case 'reconnecting': return 30;
-    case 'error': return 100;
+    // An error is an indeterminate/attention state, never completed work.
+    // Keeping this at zero also prevents the top-level progress track from
+    // presenting an ambiguous RunPod start as a successful 100% operation.
+    case 'error': return 0;
   }
 }
 

@@ -7,7 +7,7 @@ import {
   type RunPodSnapshot,
 } from '@imageforge/runpod-client';
 import { NATIVE_RUNPOD_API_KEY_SENTINEL } from '../native/tauriBridge';
-import { parseStudioProfile, type StudioProfile } from './imageForgeAdapter';
+import { IMAGEFORGE_WORKER_IMAGE, parseStudioProfile, type StudioProfile } from './imageForgeAdapter';
 
 const MODEL_REVISION = 'e7b7dc27f91deacad38e78976d1f2b499d76a294';
 
@@ -47,7 +47,7 @@ function configFor(profile: StudioProfile, allowSlowEmergency: boolean): RunPodC
       // A RunPod template is immutable from ImageForge's perspective. Paid
       // benchmark profiles are admitted only when recorded against this exact
       // template binding and all other fixed image/model settings.
-      softwareImage: `runpod-template:${profile.templateId}`,
+      softwareImage: IMAGEFORGE_WORKER_IMAGE,
       precision: 'BF16',
       width: 1280,
       height: 720,

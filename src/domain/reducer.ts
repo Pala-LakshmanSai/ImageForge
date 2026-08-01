@@ -834,7 +834,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         : action.scope === 'pod'
         ? {
             ...state,
-            pod: podDetails('error', 100, action.message, state.pod),
+            // A failed or ambiguous lifecycle operation is not completed work.
+            // Keep progress empty so the UI cannot imply a successful start.
+            pod: podDetails('error', 0, action.message, state.pod),
             ...toast(state, 'error', 'GPU operation needs attention', action.message),
           }
         : {

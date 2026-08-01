@@ -148,7 +148,7 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
             <SettingSectionTitle icon={Server} eyebrow="RunPod attachment" title="One GPU, discovered live" />
             <div className="pod-attachment-card">
               <div className="pod-attachment-card__top"><span><Zap size={20} /></span><div><strong>{state.pod.gpu ?? 'No active compute'}</strong><small>{state.pod.podId ? `${state.pod.podId} · disposable session ID` : 'A fresh Pod ID is discovered after each explicit start.'}</small></div><PhaseBadge tone={state.pod.phase === 'ready' ? 'success' : state.pod.phase === 'error' ? 'danger' : 'neutral'}>{state.pod.phase}</PhaseBadge></div>
-              <dl><div><dt>Fallback pool</dt><dd>7 ordinary EU-RO-1 GPUs</dd></div><div><dt>Selection</dt><dd>Atomic ordered fallback</dd></div><div><dt>Template</dt><dd>ImageForge worker v1</dd></div><div><dt>Port</dt><dd>8000 / HTTPS proxy</dd></div></dl>
+              <dl><div><dt>Fallback pool</dt><dd>7 ordinary EU-RO-1 GPUs</dd></div><div><dt>Selection</dt><dd>Atomic ordered fallback</dd></div><div><dt>Template</dt><dd>q8sfgixfy2 · pinned worker</dd></div><div><dt>Port</dt><dd>8000 / HTTPS proxy</dd></div></dl>
             </div>
             <div className="setting-rows pod-preferences">
               <label className="select-row"><span><strong>GPU preference</strong><small>Ranks the compatible pool; it never pins one GPU model.</small></span><select value={state.settings.gpuPreference} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'gpuPreference', value: event.target.value as 'best_value' | 'fastest' })}><option value="best_value">Best whole-batch value</option><option value="fastest">Fastest measured</option></select></label>

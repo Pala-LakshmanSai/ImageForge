@@ -37,6 +37,27 @@ function workerManifest() {
 }
 
 describe('production runtime projection', () => {
+  it('keeps lifecycle errors indeterminate instead of reporting completed progress', () => {
+    const base = createInitialState().pod;
+    const snapshot: RunPodSnapshot = {
+      revision: 2,
+      phase: 'error',
+      inventory: [],
+      rankedCandidates: [],
+      pods: [],
+      selectedPodId: null,
+      proxyUrl: null,
+      expectedImageCount: 1,
+      refreshedAt: '2026-08-01T10:00:02.000Z',
+      warnings: [{ code: 'ambiguous_create_unresolved', message: 'Create result unknown', podIds: [] }],
+      error: { code: 'pod_create_ambiguous', message: 'RunPod may have created a Pod, but the result could not be confirmed.', retryable: false },
+    };
+    const projected = projectPodSnapshot(snapshot, base);
+    expect(projected.phase).toBe('error');
+    expect(projected.phaseProgress).toBe(0);
+    expect(projected.statusDetail).toContain('result could not be confirmed');
+  });
+
   it('projects exact live Pod identity, duplicate warning inputs, and price', () => {
     const base = createInitialState().pod;
     const snapshot: RunPodSnapshot = {
