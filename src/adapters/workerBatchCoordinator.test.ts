@@ -72,7 +72,7 @@ function receipt(): LocalDownloadReceipt {
     schemaVersion: 1,
     batchId,
     index: 1,
-    filename: '000001.jpg',
+    filename: `batches/${batchId}/000001.jpg`,
     sha256: 'a'.repeat(64),
     sizeBytes: 2_048,
     verifiedAtUnixMs: 1_785_579_600_000,
@@ -150,6 +150,45 @@ describe('WorkerBatchCoordinator', () => {
     resolve({ status: 200, body: status(false) });
     await expect(first).resolves.toMatchObject({ type: 'busy' });
     expect(port.status).toHaveBeenCalledOnce();
+  });
+
+  it('reconciles a terminal manifest after the worker releases its active lease', async () => {
+    const port = fakePort({
+      status: vi.fn(async () => ({
+        status: 200,
+        body: { ...status(), active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false } },
+      })),
+      getBatch: vi.fn(async () => ({ status: 200, body: manifest('downloaded') })),
+      readReceipts: vi.fn(async () => []),
+    });
+    const coordinator = new WorkerBatchCoordinator(port);
+    await coordinator.create(['A documentary shipyard at dawn'], 700);
+    vi.mocked(port.downloadArtifact).mockClear();
+    const event = await coordinator.poll();
+
+    expect(event.type).toBe('manifest');
+    expect(port.getBatch).toHaveBeenCalled();
+    expect(port.downloadArtifact).toHaveBeenCalledWith({
+      batchId,
+      index: 1,
+      expectedSha256: 'a'.repeat(64),
+      expectedSizeBytes: 2_048,
+    });
+  });
+
+  it('reconnects a persisted owned batch ID after renderer restart', async () => {
+    const port = fakePort({
+      status: vi.fn(async () => ({
+        status: 200,
+        body: { ...status(), active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false } },
+      })),
+      readReceipts: vi.fn(async () => [receipt()]),
+    });
+    const restarted = new WorkerBatchCoordinator(port, batchId);
+    const event = await restarted.poll();
+    expect(event.type).toBe('manifest');
+    expect(port.getBatch).toHaveBeenCalledWith(batchId);
+    expect(port.downloadArtifact).not.toHaveBeenCalled();
   });
 
   it('fails closed on conflicting receipts and malformed errors', async () => {

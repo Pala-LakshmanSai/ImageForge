@@ -78,10 +78,10 @@ class ProductionRuntime implements ProductionRuntimeFacade {
   #unsubscribeGpu: () => void;
   #unsubscribeWorker: () => void;
 
-  constructor(port: ProductionDesktopPort) {
+  constructor(port: ProductionDesktopPort, recoveredBatchId: string | null = null) {
     this.#port = port;
     this.#gpu = new GpuLifecycleCoordinator(port);
-    this.#worker = new WorkerBatchCoordinator(port);
+    this.#worker = new WorkerBatchCoordinator(port, recoveredBatchId);
     this.#unsubscribeGpu = this.#gpu.subscribe((snapshot) => this.#onPodSnapshot(snapshot));
     this.#unsubscribeWorker = this.#worker.subscribe((event) => this.#onWorkerEvent(event));
   }
@@ -102,6 +102,7 @@ class ProductionRuntime implements ProductionRuntimeFacade {
         state.settings.slowEmergencyGpuEnabled,
       );
     } catch (error) {
+      await this.#clearControllerLatchIfNoDurableMarker();
       await this.#emitCurrentCreateMarker();
       this.#emitError('pod', error, 'ImageForge could not refresh RunPod safely.');
       throw error;
@@ -130,6 +131,7 @@ class ProductionRuntime implements ProductionRuntimeFacade {
       );
       await this.#reconcileCreateMarker(snapshot);
     } catch (error) {
+      await this.#clearControllerLatchIfNoDurableMarker();
       await this.#emitCurrentCreateMarker();
       this.#emitError('pod', error, 'ImageForge could not start a GPU safely.');
       throw error;
@@ -248,6 +250,17 @@ class ProductionRuntime implements ProductionRuntimeFacade {
     }
   }
 
+  async #clearControllerLatchIfNoDurableMarker(): Promise<void> {
+    try {
+      if (await this.#portMarker() !== null) return;
+      this.#gpu.resolveAmbiguousStart();
+    } catch (error) {
+      // No in-memory latch is the normal path. Any durable marker remains
+      // authoritative and is surfaced by #emitCurrentCreateMarker.
+      if (!(error instanceof Error) || !error.message.includes('no unresolved GPU start')) return;
+    }
+  }
+
   async #reconcileCreateMarker(snapshot: RunPodSnapshot): Promise<void> {
     const marker = await this.#portMarker();
     if (marker === null) {
@@ -306,8 +319,8 @@ class ProductionRuntime implements ProductionRuntimeFacade {
   }
 }
 
-export function createProductionImageForgeAdapter(port: ProductionDesktopPort): ImageForgeAdapter {
-  const runtime = new ProductionRuntime(port);
+export function createProductionImageForgeAdapter(port: ProductionDesktopPort, recoveredBatchId: string | null = null): ImageForgeAdapter {
+  const runtime = new ProductionRuntime(port, recoveredBatchId);
   return {
     mode: 'production',
     runtime,

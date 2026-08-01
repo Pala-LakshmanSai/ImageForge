@@ -67,7 +67,7 @@ function validateReceipt(receipt: LocalDownloadReceipt, batchId: string): LocalD
     !Number.isInteger(receipt.index) ||
     receipt.index < 1 ||
     receipt.index > 500 ||
-    receipt.filename !== `${String(receipt.index).padStart(6, '0')}.jpg` ||
+    receipt.filename !== `batches/${batchId}/${String(receipt.index).padStart(6, '0')}.jpg` ||
     !/^[0-9a-f]{64}$/.test(receipt.sha256) ||
     !Number.isSafeInteger(receipt.sizeBytes) ||
     receipt.sizeBytes < 1 ||
@@ -104,8 +104,9 @@ export class WorkerBatchCoordinator {
   #batchId: string | null = null;
   #pollPromise: Promise<WorkerBatchEvent> | null = null;
 
-  constructor(port: WorkerBatchPort) {
+  constructor(port: WorkerBatchPort, recoveredBatchId: string | null = null) {
     this.#port = port;
+    this.#batchId = recoveredBatchId;
   }
 
   subscribe(listener: (event: WorkerBatchEvent) => void): () => void {
@@ -168,6 +169,19 @@ export class WorkerBatchCoordinator {
     try {
       const status = parseWorkerStatus(requireSuccess(await this.#port.status(), [200]));
       if (status.activeBatch === null) {
+        // The worker releases its shared lease as soon as generation reaches a
+        // terminal state. Keep the known owner batch ID long enough to fetch
+        // that terminal manifest and reconcile every ready artifact; otherwise
+        // a final JPEG can become orphaned between two desktop polls.
+        if (this.#batchId !== null) {
+          const knownBatchId = this.#batchId;
+          const result = await this.#port.getBatch(knownBatchId);
+          if (result.status === 200) {
+            const manifest = parseWorkerManifest(result.body);
+            return this.#synchronizeOwnedManifest(manifest);
+          }
+          if (result.status !== 404) throw workerFailure(result);
+        }
         this.#batchId = null;
         return this.#emit({ type: 'idle' });
       }

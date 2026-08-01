@@ -43,6 +43,13 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
   }, [runtime]);
 
   useEffect(() => {
+    if (!runtime) return;
+    const dispose = () => runtime.dispose();
+    window.addEventListener('beforeunload', dispose);
+    return () => window.removeEventListener('beforeunload', dispose);
+  }, [runtime]);
+
+  useEffect(() => {
     if (!runtime || !state.setup.completed) return;
     void runtime.refresh(stateRef.current).catch(() => undefined);
   }, [runtime, state.setup.completed]);
@@ -86,7 +93,7 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
     } catch {
       // A storage failure must never affect GPU or batch control.
     }
-  }, [adapter.mode, state.settings, state.setup.completed, state.setup.studioProfile]);
+  }, [adapter.mode, state.settings, state.setup.completed, state.setup.studioProfile, state.batch?.id, state.batch?.phase]);
 
   useEffect(() => {
     if (state.pod.lifecycleSequence === 0 || state.pod.phase !== 'selecting') return;

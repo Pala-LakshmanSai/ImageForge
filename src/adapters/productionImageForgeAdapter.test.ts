@@ -73,7 +73,7 @@ function port(overrides: Partial<ProductionDesktopPort> = {}): ProductionDesktop
       schemaVersion: 1 as const,
       batchId,
       index: 1,
-      filename: '000001.jpg',
+      filename: `batches/${batchId}/000001.jpg`,
       sha256: 'a'.repeat(64),
       sizeBytes: 2_048,
       verifiedAtUnixMs: 1,

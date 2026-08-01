@@ -12,6 +12,7 @@ describe('safe preference persistence', () => {
     const stored = {
       version: 1,
       setupCompleted: true,
+      lastOwnedBatchId: null,
       userName: 'Sujal',
       defaultDestination: 'D:\\ImageForge',
       editorialSuffixEnabled: false,
@@ -39,6 +40,7 @@ describe('safe preference persistence', () => {
         getItem: () => JSON.stringify({
           version: 1,
           setupCompleted: true,
+          lastOwnedBatchId: null,
           userName: '',
           defaultDestination: '',
           editorialSuffixEnabled: true,
@@ -67,5 +69,27 @@ describe('safe preference persistence', () => {
     expect(serialized).not.toContain('private-pod');
     expect(serialized).not.toContain('K7P9');
     expect(serialized).not.toContain('credential');
+  });
+
+  it('persists only a non-secret recovery pointer while a batch is active', () => {
+    const state = createConfiguredInitialState();
+    state.batch = {
+      id: 'batch-recovery-pointer',
+      name: 'Private title',
+      owner: 'Lakshman',
+      phase: 'running',
+      prompts: [],
+      destination: '/safe',
+      startedAt: '2026-08-01T10:00:00.000Z',
+      elapsedSeconds: 0,
+      estimatedSecondsPerImage: 8.4,
+      estimatedCost: 0,
+      lockMessage: null,
+      statusMessage: 'running',
+    };
+    const setItem = vi.fn();
+    persistSafePreferences(state, { setItem });
+    expect(setItem.mock.calls[0][1]).toContain('batch-recovery-pointer');
+    expect(setItem.mock.calls[0][1]).not.toContain('Private title');
   });
 });

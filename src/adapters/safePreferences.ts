@@ -6,6 +6,7 @@ const STORAGE_KEY = 'imageforge.safe-preferences.v1';
 interface SafePreferencesV1 {
   version: 1;
   setupCompleted: true;
+  lastOwnedBatchId: string | null;
   userName: string;
   defaultDestination: string;
   editorialSuffixEnabled: boolean;
@@ -26,6 +27,7 @@ function parse(value: unknown): SafePreferencesV1 | null {
   const allowed = new Set([
     'version',
     'setupCompleted',
+    'lastOwnedBatchId',
     'userName',
     'defaultDestination',
     'editorialSuffixEnabled',
@@ -35,10 +37,14 @@ function parse(value: unknown): SafePreferencesV1 | null {
     'gpuPreference',
     'studioProfile',
   ]);
+  const lastOwnedBatchId = item.lastOwnedBatchId === null
+    ? null
+    : boundedString(item.lastOwnedBatchId, 80);
   if (
     Object.keys(item).some((key) => !allowed.has(key)) ||
     item.version !== 1 ||
     item.setupCompleted !== true
+    || (item.lastOwnedBatchId !== null && lastOwnedBatchId === null)
   ) return null;
   const userName = boundedString(item.userName, 80);
   const destination = boundedString(item.defaultDestination, 2_048);
@@ -58,6 +64,7 @@ function parse(value: unknown): SafePreferencesV1 | null {
   return {
     version: 1,
     setupCompleted: true,
+    lastOwnedBatchId,
     userName,
     defaultDestination: destination,
     editorialSuffixEnabled: item.editorialSuffixEnabled,
@@ -110,6 +117,9 @@ export function persistSafePreferences(state: AppState, storage: Pick<Storage, '
   const preferences: SafePreferencesV1 = {
     version: 1,
     setupCompleted: true,
+    lastOwnedBatchId: state.batch && !['complete', 'partial_failure', 'cancelled'].includes(state.batch.phase)
+      ? state.batch.id
+      : null,
     userName: state.settings.userName.slice(0, 80),
     defaultDestination: state.settings.defaultDestination.slice(0, 2_048),
     editorialSuffixEnabled: state.settings.editorialSuffixEnabled,
@@ -122,6 +132,19 @@ export function persistSafePreferences(state: AppState, storage: Pick<Storage, '
   // The schema deliberately has no credential values, credential metadata,
   // Pod identifiers, prompt text, manifests, receipts, or diagnostic bodies.
   storage.setItem(STORAGE_KEY, JSON.stringify(preferences));
+}
+
+/** Batch IDs are recovery pointers, not prompt or credential data. They are
+ * kept separately so bootstrap can reconcile a terminal manifest after a
+ * renderer restart without persisting the prompt list. */
+export function readPersistedBatchId(storage: Pick<Storage, 'getItem'>): string | null {
+  try {
+    const raw = storage.getItem(STORAGE_KEY);
+    if (raw === null || raw.length > 32_768) return null;
+    return parse(JSON.parse(raw) as unknown)?.lastOwnedBatchId ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export const SAFE_PREFERENCES_STORAGE_KEY = STORAGE_KEY;
