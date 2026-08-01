@@ -37,7 +37,8 @@ application took 30-60 minutes to become usable.
   6000, A40/A6000, L40/L40S, or another unapproved type.
 - AC-3: Stop terminates compute only after an explicit confirmation. No timer,
   background monitor, or completed-job event can terminate a Pod.
-- AC-4: The app parses, previews, and submits 300-450 ordered prompts.
+- AC-4: The app parses, previews, and submits any finite ordered prompt list,
+  including the original 300-450 prompt production brief.
 - AC-5: The server accepts one active batch. Another user sees who owns it and
   current progress and cannot submit or join a hidden queue.
 - AC-6: Results are 1280x720 JPEG files in stable numeric order and are written
