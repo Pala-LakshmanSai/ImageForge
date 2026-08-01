@@ -99,7 +99,7 @@ export function TopBar({ state, dispatch }: { state: AppState; dispatch: Dispatc
             })
           }
         />
-        {state.pod.phase === 'ready' ? (
+        {state.pod.podId ? (
           <Button compact tone="danger" icon={Square} onClick={() => dispatch({ type: 'REQUEST_STOP_POD' })}>
             Stop GPU
           </Button>
@@ -109,7 +109,7 @@ export function TopBar({ state, dispatch }: { state: AppState; dispatch: Dispatc
             tone="primary"
             icon={Sparkles}
             pending={podBusy}
-            disabled={podBusy}
+            disabled={podBusy || state.pod.createRecovery !== null}
             onClick={() => dispatch({ type: 'START_POD' })}
           >
             {podBusy ? 'Starting' : 'Start GPU'}

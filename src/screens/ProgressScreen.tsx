@@ -125,12 +125,15 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
   const counts = batchCounts(batch);
   const selectedPrompt = batch.prompts.find((prompt) => prompt.id === selectedId) ?? currentPrompt;
   const remainingSeconds = counts.pending * batch.estimatedSecondsPerImage;
-  const isControllable = batch.owner === state.settings.userName && ['running', 'paused'].includes(batch.phase);
+  const canManage = adapter.mode === 'production'
+    ? batch.canManage === true
+    : batch.owner === state.settings.userName;
+  const isControllable = canManage && ['running', 'paused'].includes(batch.phase);
   const isLocked = batch.phase === 'locked';
   const isReconnecting = state.pod.phase === 'reconnecting';
   const isError = batch.phase === 'error' || state.pod.phase === 'error';
   const isInterrupted = batch.phase === 'interrupted';
-  const canResolveInterrupted = isInterrupted && batch.owner === state.settings.userName;
+  const canResolveInterrupted = isInterrupted && canManage;
   const settled = ['complete', 'partial_failure', 'cancelled'].includes(batch.phase);
 
   return (
@@ -156,7 +159,7 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
           {settled || isInterrupted ? <Button icon={FileDown} onClick={() => exportManifest(batch.prompts, batch.name)}>Manifest CSV</Button> : null}
           <Button icon={FolderOpen} onClick={() => dispatch({ type: 'SHOW_TOAST', tone: 'info', title: 'Destination revealed', message: batch.destination })}>Reveal folder</Button>
           {isControllable ? <Button tone="danger" icon={X} onClick={() => dispatch({ type: 'REQUEST_CANCEL_BATCH' })}>Cancel</Button> : null}
-          {canResolveInterrupted ? <Button tone="danger" icon={X} onClick={() => dispatch({ type: 'REQUEST_CANCEL_BATCH' })}>Cancel interrupted batch</Button> : null}
+          {canResolveInterrupted && state.pod.phase === 'ready' ? <Button tone="danger" icon={X} onClick={() => dispatch({ type: 'REQUEST_CANCEL_BATCH' })}>Cancel interrupted batch</Button> : null}
           {settled ? <Button tone="primary" icon={Sparkles} onClick={() => dispatch({ type: 'NEW_BATCH' })}>New brief</Button> : null}
         </div>
       </section>

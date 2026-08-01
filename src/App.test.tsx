@@ -58,7 +58,7 @@ function productionAdapter() {
     startBatch: vi.fn(async () => undefined),
     pollBatch: vi.fn(async () => undefined),
     controlBatch: vi.fn(async () => undefined),
-    resolveAmbiguousStart: vi.fn(),
+    resolveAmbiguousStart: vi.fn(async () => undefined),
     dispose: vi.fn(),
   };
   const fake = immediateAdapter();
@@ -97,12 +97,33 @@ describe('ImageForge shell', () => {
     const user = userEvent.setup();
     const production = productionAdapter();
     const state = createDemoState();
+    state.batch!.canManage = true;
+    state.batch!.owner = 'Server Display Name';
     render(<App initialState={state} adapter={production.adapter} />);
 
     await user.click(screen.getByRole('button', { name: 'Pause after frame' }));
     expect(production.runtime.controlBatch).toHaveBeenCalledWith('pause', expect.objectContaining({ batch: expect.objectContaining({ phase: 'running' }) }));
     expect(screen.getByRole('button', { name: 'Pause after frame' })).toBeVisible();
     expect(production.adapter.runBatchClock).not.toHaveBeenCalled();
+  });
+
+  it('blocks duplicate starts and exposes explicit ambiguous-create recovery', async () => {
+    const user = userEvent.setup();
+    const production = productionAdapter();
+    render(<App initialState={createConfiguredInitialState()} adapter={production.adapter} />);
+    const listener = [...production.listeners][0];
+
+    act(() => listener({
+      type: 'create-recovery',
+      marker: { attemptId: 'attempt-1', podName: 'imageforge-attempt-1', gpuId: 'gpu-1', podId: null },
+    }));
+    expect(screen.getByText('Interrupted RunPod start needs reconciliation')).toBeVisible();
+    expect(screen.getAllByRole('button', { name: 'Start GPU' })[0]).toBeDisabled();
+
+    await user.click(screen.getByRole('button', { name: 'Resolve start' }));
+    expect(screen.getByRole('heading', { name: 'Confirm that no matching Pod exists' })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'I confirmed no Pod exists' }));
+    expect(production.runtime.resolveAmbiguousStart).toHaveBeenCalledOnce();
   });
 
   it('navigates all five real destinations', async () => {

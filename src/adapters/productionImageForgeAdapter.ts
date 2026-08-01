@@ -35,6 +35,14 @@ export interface ProductionDesktopPort extends GpuLifecycleNativePort, WorkerBat
   validateDestination(path: string): Promise<NativeDestinationMetadata>;
   credentialMetadata(): Promise<CredentialMetadataMap>;
   replaceCredential(kind: CredentialKind, value: string): Promise<CredentialMetadata>;
+  createMarkerMetadata(): Promise<{
+    pending: boolean;
+    attemptId: string | null;
+    podName: string | null;
+    gpuId: string | null;
+    podId: string | null;
+  }>;
+  resolveCreateMarker(attemptId: string, reconciledPodId: string | null): Promise<void>;
 }
 
 export type ProductionRuntimeEvent =
@@ -42,7 +50,8 @@ export type ProductionRuntimeEvent =
   | { type: 'batch'; batch: BatchState; assets: LibraryAsset[] }
   | { type: 'busy'; batch: BatchState }
   | { type: 'idle' }
-  | { type: 'error'; scope: 'pod' | 'batch'; message: string };
+  | { type: 'create-recovery'; marker: PodState['createRecovery'] }
+  | { type: 'error'; scope: 'pod' | 'batch'; message: string; retryable: boolean };
 
 export interface ProductionRuntimeFacade {
   subscribe(listener: (event: ProductionRuntimeEvent) => void): () => void;
@@ -55,11 +64,12 @@ export interface ProductionRuntimeFacade {
     action: 'pause' | 'resume' | 'cancel' | 'retry_failed',
     state: AppState,
   ): Promise<void>;
-  resolveAmbiguousStart(): void;
+  resolveAmbiguousStart(): Promise<void>;
   dispose(): void;
 }
 
 class ProductionRuntime implements ProductionRuntimeFacade {
+  readonly #port: ProductionDesktopPort;
   readonly #gpu: GpuLifecycleCoordinator;
   readonly #worker: WorkerBatchCoordinator;
   readonly #listeners = new Set<(event: ProductionRuntimeEvent) => void>();
@@ -69,6 +79,7 @@ class ProductionRuntime implements ProductionRuntimeFacade {
   #unsubscribeWorker: () => void;
 
   constructor(port: ProductionDesktopPort) {
+    this.#port = port;
     this.#gpu = new GpuLifecycleCoordinator(port);
     this.#worker = new WorkerBatchCoordinator(port);
     this.#unsubscribeGpu = this.#gpu.subscribe((snapshot) => this.#onPodSnapshot(snapshot));
@@ -82,17 +93,24 @@ class ProductionRuntime implements ProductionRuntimeFacade {
 
   async refresh(state: AppState): Promise<void> {
     this.#captureState(state);
+    let snapshot: RunPodSnapshot;
     try {
       const count = state.batch?.prompts.length || state.draft.prompts.length || 450;
-      const snapshot = await this.#gpu.refresh(
+      snapshot = await this.#gpu.refresh(
         state.setup.studioProfile,
         count,
         state.settings.slowEmergencyGpuEnabled,
       );
-      if (snapshot.phase === 'ready') await this.#worker.poll();
     } catch (error) {
+      await this.#emitCurrentCreateMarker();
       this.#emitError('pod', error, 'ImageForge could not refresh RunPod safely.');
       throw error;
+    }
+    await this.#reconcileCreateMarker(snapshot);
+    if (snapshot.phase === 'ready') {
+      // A worker outage must not obscure the still-live billed Pod. The worker
+      // coordinator emits a retryable batch event and the UI keeps Stop visible.
+      await this.#worker.poll();
     }
   }
 
@@ -100,16 +118,23 @@ class ProductionRuntime implements ProductionRuntimeFacade {
     this.#captureState(state);
     try {
       const count = state.batch?.prompts.length || state.draft.prompts.length || 450;
-      await this.#gpu.start(
+      const marker = await this.#portMarker();
+      if (marker !== null) {
+        this.#emit({ type: 'create-recovery', marker });
+        throw new Error('Resolve the interrupted RunPod create before starting another GPU.');
+      }
+      const snapshot = await this.#gpu.start(
         state.setup.studioProfile,
         count,
         state.settings.slowEmergencyGpuEnabled,
       );
-      await this.#worker.poll();
+      await this.#reconcileCreateMarker(snapshot);
     } catch (error) {
+      await this.#emitCurrentCreateMarker();
       this.#emitError('pod', error, 'ImageForge could not start a GPU safely.');
       throw error;
     }
+    await this.#worker.poll();
   }
 
   async stopGpu(state: AppState): Promise<void> {
@@ -143,7 +168,9 @@ class ProductionRuntime implements ProductionRuntimeFacade {
     try {
       await this.#worker.poll();
     } catch (error) {
-      this.#emitError('batch', error, 'ImageForge could not synchronize the worker manifest.');
+      // WorkerBatchCoordinator already emitted one classified, redacted
+      // failure event. Keep polling ownership single and avoid duplicate UI
+      // errors for the same failed request.
       throw error;
     }
   }
@@ -161,8 +188,16 @@ class ProductionRuntime implements ProductionRuntimeFacade {
     }
   }
 
-  resolveAmbiguousStart(): void {
-    this.#gpu.resolveAmbiguousStart();
+  async resolveAmbiguousStart(): Promise<void> {
+    const marker = await this.#portMarker();
+    if (marker === null) throw new Error('There is no interrupted RunPod create to resolve.');
+    try {
+      this.#gpu.resolveAmbiguousStart();
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes('no unresolved GPU start')) throw error;
+    }
+    await this.#port.resolveCreateMarker(marker.attemptId, null);
+    this.#emit({ type: 'create-recovery', marker: null });
   }
 
   dispose(): void {
@@ -191,6 +226,46 @@ class ProductionRuntime implements ProductionRuntimeFacade {
     }
   }
 
+  async #portMarker(): Promise<NonNullable<PodState['createRecovery']> | null> {
+    const metadata = await this.#port.createMarkerMetadata();
+    if (!metadata.pending) return null;
+    if (metadata.attemptId === null) {
+      throw new Error('The native RunPod create marker is incomplete.');
+    }
+    return {
+      attemptId: metadata.attemptId,
+      podName: metadata.podName,
+      gpuId: metadata.gpuId,
+      podId: metadata.podId,
+    };
+  }
+
+  async #emitCurrentCreateMarker(): Promise<void> {
+    try {
+      this.#emit({ type: 'create-recovery', marker: await this.#portMarker() });
+    } catch {
+      // The original lifecycle failure remains the authoritative error.
+    }
+  }
+
+  async #reconcileCreateMarker(snapshot: RunPodSnapshot): Promise<void> {
+    const marker = await this.#portMarker();
+    if (marker === null) {
+      this.#emit({ type: 'create-recovery', marker: null });
+      return;
+    }
+    const exactMatches = snapshot.pods.filter((pod) =>
+      (marker.podId !== null && pod.id === marker.podId) ||
+      (marker.podId === null && marker.podName !== null && pod.name === marker.podName),
+    );
+    if (exactMatches.length === 1) {
+      await this.#port.resolveCreateMarker(marker.attemptId, exactMatches[0].id);
+      this.#emit({ type: 'create-recovery', marker: null });
+      return;
+    }
+    this.#emit({ type: 'create-recovery', marker });
+  }
+
   #onPodSnapshot(snapshot: RunPodSnapshot): void {
     if (this.#pod === null) return;
     this.#pod = projectPodSnapshot(snapshot, this.#pod);
@@ -207,7 +282,7 @@ class ProductionRuntime implements ProductionRuntimeFacade {
       return;
     }
     if (event.type === 'error') {
-      this.#emit({ type: 'error', scope: 'batch', message: event.message });
+      this.#emit({ type: 'error', scope: 'batch', message: event.message, retryable: event.retryable });
       return;
     }
     const context = this.#presentation ?? {
@@ -226,7 +301,8 @@ class ProductionRuntime implements ProductionRuntimeFacade {
 
   #emitError(scope: 'pod' | 'batch', error: unknown, fallback: string): void {
     const message = error instanceof Error && error.message ? error.message : fallback;
-    this.#emit({ type: 'error', scope, message });
+    const retryable = typeof error === 'object' && error !== null && 'retryable' in error && error.retryable === true;
+    this.#emit({ type: 'error', scope, message, retryable });
   }
 }
 

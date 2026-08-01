@@ -4,6 +4,7 @@ import {
   batchCounts,
   canStartBatch,
   createConfiguredInitialState,
+  createDemoState,
   createInitialState,
   defaultDestinationForPlatform,
 } from './reducer';
@@ -210,5 +211,36 @@ describe('appReducer', () => {
     state = appReducer(state, { type: 'RUNTIME_BATCH_IDLE' });
     expect(state.batch).toBeNull();
     expect(state.activeView).toBe('create');
+  });
+
+  it('keeps durable work recoverable across transient worker errors and explicit Pod termination', () => {
+    let state = createDemoState();
+    state = appReducer(state, {
+      type: 'RUNTIME_ERROR',
+      scope: 'batch',
+      message: 'Worker status temporarily unavailable.',
+      retryable: true,
+    });
+    expect(state.pod).toMatchObject({ phase: 'reconnecting', health: 'degraded' });
+    expect(state.batch?.phase).toBe('running');
+
+    state = appReducer(state, { type: 'RUNTIME_BATCH_IDLE' });
+    expect(state.pod).toMatchObject({ phase: 'ready', health: 'healthy' });
+
+    state = createDemoState();
+    state = appReducer(state, {
+      type: 'SYNC_RUNTIME_POD',
+      pod: {
+        ...state.pod,
+        phase: 'offline',
+        phaseProgress: 0,
+        statusDetail: 'GPU is safely offline',
+        health: 'offline',
+        podId: null,
+        matchingPodIds: [],
+      },
+    });
+    expect(state.batch?.phase).toBe('interrupted');
+    expect(state.batch?.prompts.some((prompt) => prompt.status === 'generating')).toBe(false);
   });
 });

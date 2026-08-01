@@ -55,6 +55,8 @@ function port(overrides: Partial<ProductionDesktopPort> = {}): ProductionDesktop
     bindProfile: vi.fn(async () => undefined),
     authorizeStart: vi.fn(async () => undefined),
     clearStartAuthorization: vi.fn(async () => undefined),
+    createMarkerMetadata: vi.fn(async () => ({ pending: false, attemptId: null, podName: null, gpuId: null, podId: null })),
+    resolveCreateMarker: vi.fn(async () => undefined),
     clearWorkerSession: vi.fn(async () => undefined),
     chooseDestination: vi.fn(async (path) => ({ path, writable: true })),
     validateDestination: vi.fn(async (path) => ({ path, writable: true })),
@@ -136,5 +138,45 @@ describe('production ImageForge adapter', () => {
       'native runtime facade',
     );
     expect(() => adapter.validateBatch(() => undefined)).toThrow('native runtime facade');
+  });
+
+  it('emits one retryable redacted event for one failed worker poll', async () => {
+    const native = port({
+      status: vi.fn(async () => ({
+        status: 503,
+        body: { error: { code: 'worker_unavailable', message: 'Worker is warming.', details: null } },
+      })),
+    });
+    const adapter = createProductionImageForgeAdapter(native);
+    const events: ProductionRuntimeEvent[] = [];
+    adapter.runtime!.subscribe((event) => events.push(event));
+
+    await expect(adapter.runtime!.pollBatch(createConfiguredInitialState())).rejects.toThrow('Worker is warming.');
+    expect(events).toEqual([{
+      type: 'error',
+      scope: 'batch',
+      message: 'Worker is warming.',
+      retryable: true,
+    }]);
+  });
+
+  it('clears a restart-persistent create marker only through explicit resolution', async () => {
+    const native = port({
+      createMarkerMetadata: vi.fn(async () => ({
+        pending: true,
+        attemptId: 'attempt-1',
+        podName: 'imageforge-attempt-1',
+        gpuId: 'gpu-1',
+        podId: null,
+      })),
+    });
+    const adapter = createProductionImageForgeAdapter(native);
+    const events: ProductionRuntimeEvent[] = [];
+    adapter.runtime!.subscribe((event) => events.push(event));
+
+    await adapter.runtime!.resolveAmbiguousStart();
+    expect(native.resolveCreateMarker).toHaveBeenCalledWith('attempt-1', null);
+    expect(events.at(-1)).toEqual({ type: 'create-recovery', marker: null });
+    expect(native.authorizeStart).not.toHaveBeenCalled();
   });
 });

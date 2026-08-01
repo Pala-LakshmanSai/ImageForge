@@ -37,7 +37,8 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
       else if (event.type === 'batch') dispatch({ type: 'SYNC_RUNTIME_BATCH', batch: event.batch, assets: event.assets });
       else if (event.type === 'busy') dispatch({ type: 'SYNC_RUNTIME_BUSY', batch: event.batch });
       else if (event.type === 'idle') dispatch({ type: 'RUNTIME_BATCH_IDLE' });
-      else dispatch({ type: 'RUNTIME_ERROR', scope: event.scope, message: event.message });
+      else if (event.type === 'create-recovery') dispatch({ type: 'SYNC_CREATE_RECOVERY', marker: event.marker });
+      else dispatch({ type: 'RUNTIME_ERROR', scope: event.scope, message: event.message, retryable: event.retryable });
     });
   }, [runtime]);
 
@@ -48,9 +49,14 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
 
   useEffect(() => {
     let active = true;
-    void adapter.credentialMetadata().then((credentials) => {
-      if (active) dispatch({ type: 'SET_CREDENTIAL_METADATA', credentials });
-    });
+    void adapter.credentialMetadata().then(
+      (credentials) => {
+        if (active) dispatch({ type: 'SET_CREDENTIAL_METADATA', credentials });
+      },
+      () => {
+        if (active) dispatch({ type: 'SHOW_TOAST', tone: 'error', title: 'Credential vault unavailable', message: 'ImageForge could not read redacted credential metadata.' });
+      },
+    );
     return () => { active = false; };
   }, [adapter]);
 
@@ -124,7 +130,7 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
   }, [adapter, runtime, state.batch?.phase, state.settings.simulationSpeed]);
 
   useEffect(() => {
-    if (!runtime || state.pod.phase !== 'ready') return;
+    if (!runtime || !['ready', 'reconnecting'].includes(state.pod.phase)) return;
     const poll = () => void runtime.pollBatch(stateRef.current).catch(() => undefined);
     poll();
     const timer = window.setInterval(poll, 1_500);
@@ -161,6 +167,14 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
       void runtime.controlBatch('cancel', current).catch(() => undefined);
       return;
     }
+    if (action.type === 'CONFIRM_RESOLVE_CREATE') {
+      dispatch(action);
+      void runtime.resolveAmbiguousStart().catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : 'The interrupted RunPod create could not be resolved.';
+        dispatch({ type: 'RUNTIME_ERROR', scope: 'pod', message });
+      });
+      return;
+    }
     if (action.type === 'REFRESH_STATUS') {
       dispatch(action);
       void runtime.refresh(current).catch(() => undefined);
@@ -186,6 +200,17 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
             <span>{state.pod.matchingPodIds.join(' · ')}. ImageForge will never terminate either automatically.</span>
           </div>
           <Button compact tone="secondary" onClick={() => dispatch({ type: 'NAVIGATE', view: 'settings' })}>Review Pods</Button>
+        </aside>
+      ) : null}
+
+      {state.pod.createRecovery ? (
+        <aside className="duplicate-warning" role="alert">
+          <AlertTriangle size={18} />
+          <div>
+            <strong>Interrupted RunPod start needs reconciliation</strong>
+            <span>No additional GPU can start. ImageForge is looking for {state.pod.createRecovery.podName ?? 'the exact attempted Pod'} without guessing.</span>
+          </div>
+          <Button compact tone="secondary" onClick={() => uiDispatch({ type: 'REQUEST_RESOLVE_CREATE' })}>Resolve start</Button>
         </aside>
       ) : null}
 
@@ -222,6 +247,21 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
                 <div className="modal__actions">
                   <Button data-autofocus onClick={() => dispatch({ type: 'DISMISS_DIALOG' })}>Keep GPU running</Button>
                   <Button tone="danger" onClick={() => dispatch({ type: 'CONFIRM_STOP_POD' })}>Terminate compute</Button>
+                </div>
+              </>
+            ) : state.dialog.type === 'resolve-create' ? (
+              <>
+                <p className="eyebrow">Interrupted GPU start</p>
+                <h2 id="modal-title">Confirm that no matching Pod exists</h2>
+                <p>
+                  Check RunPod for <strong>{state.pod.createRecovery?.podName ?? 'the attempted ImageForge Pod'}</strong>. Continue only if that exact Pod was not created or is no longer active.
+                </p>
+                <div className="modal__notice">
+                  ImageForge blocks every additional paid start until this marker is reconciled. It never guesses after an uncertain create response.
+                </div>
+                <div className="modal__actions">
+                  <Button data-autofocus onClick={() => dispatch({ type: 'DISMISS_DIALOG' })}>Keep blocked</Button>
+                  <Button tone="danger" onClick={() => uiDispatch({ type: 'CONFIRM_RESOLVE_CREATE' })}>I confirmed no Pod exists</Button>
                 </div>
               </>
             ) : state.dialog.type === 'cancel-batch' ? (

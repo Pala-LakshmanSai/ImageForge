@@ -48,6 +48,7 @@ function emptyPod(): PodState {
     lastCheckedAt: null,
     errorMessage: null,
     lifecycleSequence: 0,
+    createRecovery: null,
   };
 }
 
@@ -65,6 +66,7 @@ function readyPod(): PodState {
     lastCheckedAt: '2026-08-01T08:34:12.000Z',
     errorMessage: null,
     lifecycleSequence: 0,
+    createRecovery: null,
   };
 }
 
@@ -567,6 +569,12 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...toast(state, 'success', 'Destination connected', `Verified write access to ${action.path}`),
       };
     case 'START_POD':
+      if (state.pod.createRecovery) {
+        return {
+          ...state,
+          ...toast(state, 'warning', 'Resolve the interrupted start first', 'ImageForge will not risk creating a duplicate billed Pod.'),
+        };
+      }
       if (!['offline', 'error'].includes(state.pod.phase)) return state;
       return {
         ...state,
@@ -598,9 +606,46 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         pod: { ...action.pod, lifecycleSequence: state.pod.lifecycleSequence },
+        ...(
+          action.pod.phase === 'offline' &&
+          state.batch &&
+          ['running', 'paused', 'validating'].includes(state.batch.phase)
+            ? {
+                batch: {
+                  ...state.batch,
+                  phase: 'interrupted' as const,
+                  prompts: state.batch.prompts.map((prompt) =>
+                    ['generating', 'retrying', 'ready', 'downloading'].includes(prompt.status)
+                      ? { ...prompt, status: 'pending' as const, failureReason: undefined }
+                      : prompt,
+                  ),
+                  statusMessage: 'Interrupted manifest saved · restart a GPU to resume or cancel',
+                },
+              }
+            : {}
+        ),
+      };
+    case 'SYNC_CREATE_RECOVERY':
+      return {
+        ...state,
+        pod: { ...state.pod, createRecovery: action.marker },
+        ...(action.marker
+          ? toast(
+              state,
+              'warning',
+              'GPU start needs reconciliation',
+              'No additional GPU can start until the interrupted RunPod create is resolved.',
+            )
+          : {}),
       };
     case 'REQUEST_STOP_POD':
       return { ...state, dialog: { type: 'stop-pod' } };
+    case 'REQUEST_RESOLVE_CREATE':
+      return state.pod.createRecovery
+        ? { ...state, dialog: { type: 'resolve-create' } }
+        : state;
+    case 'CONFIRM_RESOLVE_CREATE':
+      return { ...state, dialog: null };
     case 'CONFIRM_STOP_POD':
       return {
         ...state,
@@ -659,6 +704,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           id: `batch-${action.startedAt.slice(0, 10).replaceAll('-', '')}-${String(prompts.length).padStart(3, '0')}`,
           name: state.draft.name.trim() || 'Untitled batch',
           owner: state.settings.userName,
+          canManage: true,
           phase: 'validating',
           prompts,
           destination: state.draft.destination!,
@@ -701,6 +747,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         : state.usage;
       return {
         ...state,
+        pod: state.pod.phase === 'reconnecting'
+          ? { ...state.pod, phase: 'ready', health: 'healthy', phaseProgress: 100, errorMessage: null, statusDetail: 'Model warm · worker manifest synchronized' }
+          : state.pod,
         activeView: state.batch?.phase === 'validating' ? 'progress' : state.activeView,
         batch: action.batch,
         library,
@@ -723,13 +772,31 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return state.batch?.phase === 'locked'
         ? {
             ...state,
+            pod: state.pod.phase === 'reconnecting'
+              ? { ...state.pod, phase: 'ready', health: 'healthy', phaseProgress: 100, errorMessage: null, statusDetail: 'Model warm · accepting one batch' }
+              : state.pod,
             activeView: 'create',
             batch: null,
             ...toast(state, 'success', 'ImageForge is available', 'The other batch released the shared worker lock.'),
           }
-        : state;
+        : state.pod.phase === 'reconnecting'
+          ? { ...state, pod: { ...state.pod, phase: 'ready', health: 'healthy', phaseProgress: 100, errorMessage: null, statusDetail: 'Model warm · accepting one batch' } }
+          : state;
     case 'RUNTIME_ERROR':
-      return action.scope === 'pod'
+      return action.scope === 'batch' && action.retryable
+        ? {
+            ...state,
+            pod: {
+              ...state.pod,
+              phase: 'reconnecting',
+              health: 'degraded',
+              phaseProgress: 30,
+              statusDetail: action.message,
+              errorMessage: action.message,
+            },
+            ...toast(state, 'warning', 'Reconnecting to the worker', 'The durable manifest and verified downloads remain safe.'),
+          }
+        : action.scope === 'pod'
         ? {
             ...state,
             pod: podDetails('error', 100, action.message, state.pod),
@@ -787,7 +854,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       if (
         !state.batch ||
         state.batch.phase !== 'interrupted' ||
-        state.batch.owner !== state.settings.userName ||
+        (state.batch.canManage === false || (state.batch.canManage === undefined && state.batch.owner !== state.settings.userName)) ||
         state.pod.phase !== 'ready'
       ) return state;
       let started = false;

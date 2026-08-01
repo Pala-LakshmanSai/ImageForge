@@ -109,12 +109,21 @@ export interface PodState {
   lastCheckedAt: string | null;
   errorMessage: string | null;
   lifecycleSequence: number;
+  createRecovery: {
+    attemptId: string;
+    podName: string | null;
+    gpuId: string | null;
+    podId: string | null;
+  } | null;
 }
 
 export interface BatchState {
   id: string;
   name: string;
   owner: string;
+  /** Authoritative worker permission. Production controls never infer this
+   * from the editable display name. */
+  canManage?: boolean;
   phase: BatchPhase;
   prompts: BatchPrompt[];
   destination: string;
@@ -182,6 +191,7 @@ export type DialogState =
   | { type: 'stop-pod' }
   | { type: 'cancel-batch' }
   | { type: 'clear-library' }
+  | { type: 'resolve-create' }
   | null;
 
 export interface ToastState {
@@ -216,8 +226,11 @@ export type AppAction =
   | { type: 'START_POD' }
   | { type: 'SET_POD_PHASE'; phase: PodPhase; progress: number; detail: string; podId?: string; gpu?: string; vram?: string; hourlyRate?: number }
   | { type: 'SYNC_RUNTIME_POD'; pod: PodState }
+  | { type: 'SYNC_CREATE_RECOVERY'; marker: PodState['createRecovery'] }
   | { type: 'REQUEST_STOP_POD' }
   | { type: 'CONFIRM_STOP_POD' }
+  | { type: 'REQUEST_RESOLVE_CREATE' }
+  | { type: 'CONFIRM_RESOLVE_CREATE' }
   | { type: 'POD_STOPPED' }
   | { type: 'REFRESH_STATUS'; checkedAt: string }
   | { type: 'START_BATCH'; startedAt: string }
@@ -226,7 +239,7 @@ export type AppAction =
   | { type: 'SYNC_RUNTIME_BATCH'; batch: BatchState; assets: LibraryAsset[] }
   | { type: 'SYNC_RUNTIME_BUSY'; batch: BatchState }
   | { type: 'RUNTIME_BATCH_IDLE' }
-  | { type: 'RUNTIME_ERROR'; scope: 'pod' | 'batch'; message: string }
+  | { type: 'RUNTIME_ERROR'; scope: 'pod' | 'batch'; message: string; retryable?: boolean }
   | { type: 'TOGGLE_BATCH_PAUSE' }
   | { type: 'REQUEST_CANCEL_BATCH' }
   | { type: 'CONFIRM_CANCEL_BATCH' }
