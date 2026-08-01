@@ -155,13 +155,61 @@ describe('WorkerBatchCoordinator', () => {
   });
 
   it('reconciles a matching local receipt without downloading again', async () => {
-    const port = fakePort({ readReceipts: vi.fn(async () => [receipt()]) });
+    const port = fakePort({
+      createBatch: vi.fn(async () => ({ status: 201, body: manifest('downloaded') })),
+      getBatch: vi.fn(async () => ({ status: 200, body: manifest('downloaded') })),
+      readReceipts: vi.fn(async () => [receipt()]),
+    });
     const coordinator = new WorkerBatchCoordinator(port);
     const event = await coordinator.create(['A documentary shipyard at dawn'], 700);
 
     expect(event.type).toBe('manifest');
     expect(port.downloadArtifact).not.toHaveBeenCalled();
     expect(port.getBatch).not.toHaveBeenCalled();
+  });
+
+  it('re-acknowledges a durable local receipt when the worker still reports ready', async () => {
+    let localReceipts: LocalDownloadReceipt[] = [];
+    const downloadArtifact = vi.fn(async () => {
+      localReceipts = [receipt()];
+      throw new WorkerBatchError(
+        'receipt_acknowledgement_failed',
+        'The worker did not confirm the receipt.',
+        503,
+      );
+    });
+    const firstPort = fakePort({
+      readReceipts: vi.fn(async () => localReceipts),
+      downloadArtifact,
+    });
+    const firstCoordinator = new WorkerBatchCoordinator(firstPort);
+    await expect(firstCoordinator.create(['A documentary shipyard at dawn'], 700)).rejects.toMatchObject({
+      code: 'receipt_acknowledgement_failed',
+    });
+
+    const secondDownload = vi.fn(async () => receipt());
+    let manifestReads = 0;
+    const secondPort = fakePort({
+      createBatch: vi.fn(async () => ({ status: 201, body: manifest('ready') })),
+      getBatch: vi.fn(async () => ({
+        status: 200,
+        body: manifest(manifestReads++ === 0 ? 'ready' : 'downloaded'),
+      })),
+      readReceipts: vi.fn(async () => localReceipts),
+      downloadArtifact: secondDownload,
+    });
+    const restarted = new WorkerBatchCoordinator(secondPort, batchId);
+    const event = await restarted.poll();
+
+    expect(event.type).toBe('manifest');
+    expect(secondDownload).toHaveBeenCalledOnce();
+    expect(secondDownload).toHaveBeenCalledWith({
+      batchId,
+      index: 1,
+      expectedSha256: 'a'.repeat(64),
+      expectedSizeBytes: 2_048,
+    });
+    expect(secondPort.getBatch).toHaveBeenCalledTimes(2);
   });
 
   it('verifies the local ledger once per connected session, then reuses cached receipts', async () => {

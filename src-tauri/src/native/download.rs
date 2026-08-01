@@ -134,13 +134,27 @@ impl Downloader {
                 .try_into()
                 .unwrap_or(u64::MAX),
         };
+        // The verified file and receipt are durable before the worker mutation
+        // on purpose. A crash or transient acknowledgement failure can then be
+        // recovered by `reconcile_receipts`; the worker endpoint is idempotent
+        // for an already-downloaded image. The renderer must still use the
+        // worker manifest's `downloaded` state as proof of acknowledgement.
         self.persist_receipt(&receipt).await?;
+        self.acknowledge_receipt(&session, &receipt).await?;
+        Ok(receipt)
+    }
+
+    async fn acknowledge_receipt(
+        &self,
+        session: &WorkerSessionPin,
+        receipt: &DownloadReceipt,
+    ) -> NativeResult<()> {
         let acknowledgement = self
             .worker
             .acknowledge_with_pin(
-                &session,
-                request.batch_id,
-                request.index,
+                session,
+                receipt.batch_id,
+                receipt.index,
                 &receipt.sha256,
                 receipt.size_bytes,
             )
@@ -148,7 +162,7 @@ impl Downloader {
         if !(200..300).contains(&acknowledgement.status) {
             return Err(worker_acknowledgement_error(&acknowledgement.body));
         }
-        Ok(receipt)
+        Ok(())
     }
 
     async fn download_to_part(
@@ -362,19 +376,7 @@ impl Downloader {
         let session = self.worker.session().pin().await?;
         let ledger = self.read_verified_receipts(batch_id).await?;
         for receipt in &ledger.receipts {
-            let response = self
-                .worker
-                .acknowledge_with_pin(
-                    &session,
-                    batch_id,
-                    receipt.index,
-                    &receipt.sha256,
-                    receipt.size_bytes,
-                )
-                .await?;
-            if !(200..300).contains(&response.status) {
-                return Err(worker_acknowledgement_error(&response.body));
-            }
+            self.acknowledge_receipt(&session, receipt).await?;
         }
         Ok(ledger)
     }

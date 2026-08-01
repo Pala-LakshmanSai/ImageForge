@@ -270,8 +270,33 @@ export class WorkerBatchCoordinator {
         );
       }
       const local = byIndex.get(image.index);
-      if (local?.sha256 === image.sha256 && local.sizeBytes === image.sizeBytes) continue;
+      const localMatches = local?.sha256 === image.sha256 && local.sizeBytes === image.sizeBytes;
+      if (localMatches && image.status === 'downloaded') continue;
+      // A local receipt is durable before the native layer sends the worker
+      // acknowledgement. If that acknowledgement fails (or the process dies
+      // in between), the worker can still report this image as `ready` while
+      // the local ledger already contains the verified JPEG. Re-run the
+      // idempotent native download/ack path in that state; it sees the final
+      // file, verifies it, and retries only the missing worker mutation.
+      // Never treat a matching local receipt as proof of acknowledgement until
+      // the worker manifest itself reports `downloaded`.
       if (local !== undefined) {
+        if (localMatches && image.status === 'ready') {
+          const receipt = validateReceipt(
+            await this.#port.downloadArtifact({
+              batchId: manifest.batchId,
+              index: image.index,
+              expectedSha256: image.sha256,
+              expectedSizeBytes: image.sizeBytes,
+            }),
+            manifest.batchId,
+          );
+          byIndex.set(receipt.index, receipt);
+          this.#receiptCache.set(manifest.batchId, byIndex);
+          receipts = [...byIndex.values()].sort((left, right) => left.index - right.index);
+          downloaded = true;
+          continue;
+        }
         throw new WorkerBatchError(
           'local_receipt_conflict',
           `Local frame ${image.index} does not match the worker manifest.`,
