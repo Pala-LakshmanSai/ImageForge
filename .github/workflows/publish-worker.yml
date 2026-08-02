@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   publish:
@@ -22,32 +21,16 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - name: Normalize image name
-        id: image
-        shell: bash
-        # The original imageforge-worker package is linked to a separate
-        # repository and rejects the ImageForge repository's GITHUB_TOKEN.
-        # Publish the production image under a package owned by this repo so
-        # the workflow's packages:write permission is effective.
-        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/imageforge-worker-prod" >> "$GITHUB_OUTPUT"
-
-      - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and publish
+      - name: Build worker image (publish from imageforge-worker repository)
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: ./worker
           file: ./worker/Dockerfile
           platforms: linux/amd64
-          push: true
+          push: false
           tags: |
-            ${{ steps.image.outputs.name }}:sha-${{ github.sha }}
+            imageforge-worker:ci-${{ github.sha }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
@@ -56,7 +39,6 @@ jobs:
           cache-from: type=gha,scope=imageforge-worker
           cache-to: type=gha,mode=max,scope=imageforge-worker
 
-      - name: Print immutable image reference
+      - name: Report publish ownership
         run: |
-          echo "Image digest: ${{ steps.build.outputs.digest }}"
-          echo "Use this exact reference in RunPod: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}"
+          echo "Worker source validation passed. The public immutable runtime image is published from Pala-LakshmanSai/imageforge-worker."
