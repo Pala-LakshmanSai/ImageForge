@@ -181,7 +181,7 @@ jobs:
             sha256 = $hash
             signing = 'unsigned beta installer'
             notarization = 'not applicable'
-            native_smoke = 'install, WebView2 detection, launch with native window handle, cleanup'
+            native_smoke = 'install, WebView2, onboarding, reference add/remove/re-add, fake batch, folder reveal, cleanup'
           } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 -LiteralPath (Join-Path $bundleDir 'ImageForge-windows-release-metadata.json')
 
       - name: Upload Windows installer
@@ -223,7 +223,7 @@ jobs:
         run: |
           set -euo pipefail
           app_path="$GITHUB_WORKSPACE/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/ImageForge.app"
-          dmg_path="$GITHUB_WORKSPACE/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge_0.1.0_aarch64.dmg"
+          dmg_path="$(find "$GITHUB_WORKSPACE/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg" -maxdepth 1 -type f -name 'ImageForge_*_aarch64.dmg' -print | head -n 1)"
           smoke_result="$RUNNER_TEMP/imageforge-native-smoke-result.txt"
           binary_path="$(find "$app_path/Contents/MacOS" -maxdepth 1 -type f -perm -111 -print | head -n 1)"
           if [ -z "$binary_path" ] || [ ! -x "$binary_path" ]; then
@@ -253,7 +253,7 @@ jobs:
         run: |
           set -euo pipefail
           bundle_dir="$GITHUB_WORKSPACE/src-tauri/target/aarch64-apple-darwin/release/bundle"
-          dmg_path="$bundle_dir/dmg/ImageForge_0.1.0_aarch64.dmg"
+          dmg_path="$(find "$bundle_dir/dmg" -maxdepth 1 -type f -name 'ImageForge_*_aarch64.dmg' -print | head -n 1)"
           version="$(node -p "require('./package.json').version")"
           hash="$(shasum -a 256 "$dmg_path" | awk '{print $1}')"
           cat > "$bundle_dir/dmg/ImageForge-macos-release-metadata.json" <<EOF
@@ -267,7 +267,7 @@ jobs:
             "sha256": "$hash",
             "signing": "ad-hoc signed beta",
             "notarization": "not notarized",
-            "native_smoke": "codesign, DMG verification, launch, process liveness"
+            "native_smoke": "codesign, DMG verification, onboarding, reference add/remove/re-add, fake batch, folder reveal"
           }
           EOF
 
@@ -277,6 +277,6 @@ jobs:
           name: imageforge-macos-aarch64-beta
           path: |
             src-tauri/target/aarch64-apple-darwin/release/bundle/macos/ImageForge.app
-            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge_0.1.0_aarch64.dmg
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge_*_aarch64.dmg
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge-macos-release-metadata.json
           if-no-files-found: error

@@ -432,7 +432,7 @@ the recovery poll observes it.
   signing/notarization metadata. The native workflow smoke runs on unlocked
   platform runners; this locked Mac could verify the rebuilt DMG's strict
   signature and `hdiutil` checksum but could not complete its WebKit UI smoke.
-- Rebuilt current Apple-silicon DMG SHA-256:
+- Pre-version-alignment Apple-silicon DMG SHA-256:
   `357e74ffc29dd1c858028c2d8bd32a4a65a6fbadeefc211a2144d6f629336847`.
-  It is ad-hoc signed and not notarized. The public GitHub prerelease remains
-  unchanged until an explicitly authorized publish step.
+  It is ad-hoc signed and not notarized. Desktop release identity is now aligned
+  at `0.1.4`; the final versioned hashes are recorded after the native workflow.

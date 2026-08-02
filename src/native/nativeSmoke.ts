@@ -56,6 +56,17 @@ async function attachReference(): Promise<void> {
   });
 }
 
+async function ensureOutputFolder(): Promise<void> {
+  const picker = await waitFor('output destination control', () => document.querySelector<HTMLButtonElement>('.folder-picker'));
+  if (/Choose output folder/.test(visibleText(picker))) {
+    picker.click();
+    await waitFor('verified output destination', () => {
+      const current = document.querySelector<HTMLButtonElement>('.folder-picker');
+      return current && !/Choose output folder/.test(visibleText(current)) ? true : null;
+    });
+  }
+}
+
 async function record(passed: boolean, detail: string): Promise<void> {
   await invoke('native_smoke_result', { passed, detail: detail.slice(0, 240) });
 }
@@ -77,7 +88,7 @@ export async function runNativeSmoke(): Promise<void> {
     await clickButton('connection test', /Run connection test/);
     await waitFor('setup dialog to close', () => document.querySelector('[role="dialog"]') === null ? true : null);
     await clickButton('sample brief', /Load sample brief/);
-    await clickButton('output folder chooser', /Choose output folder/);
+    await ensureOutputFolder();
     await attachReference();
     await clickButton('reference removal', /Remove smoke-reference\.png/);
     await waitFor('reference removal to finish', () => document.querySelector('[aria-label="1 batch references"]') === null ? true : null);
