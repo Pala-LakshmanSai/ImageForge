@@ -21,6 +21,7 @@ export function SetupAssistant({
   initialStep = 0,
   canClose = true,
   locked = false,
+  credentialOnlyKind,
 }: {
   state: AppState;
   dispatch: Dispatch<AppAction>;
@@ -29,8 +30,11 @@ export function SetupAssistant({
   initialStep?: number;
   canClose?: boolean;
   locked?: boolean;
+  credentialOnlyKind?: CredentialKind;
 }) {
-  const [step, setStep] = useState(Math.min(STEPS.length - 1, Math.max(0, initialStep)));
+  const credentialOnlyStep = credentialOnlyKind === 'runpodApiKey' ? 1 : 2;
+  const credentialOnly = credentialOnlyKind !== undefined;
+  const [step, setStep] = useState(credentialOnly ? credentialOnlyStep : Math.min(STEPS.length - 1, Math.max(0, initialStep)));
   const [writeChecked, setWriteChecked] = useState(state.setup.destinationValidated);
   const [choosing, setChoosing] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -69,7 +73,7 @@ export function SetupAssistant({
   }
 
   async function saveCredential(kind: CredentialKind, value: string) {
-    if (locked) return;
+    if (locked && !credentialOnly) return;
     const metadata = await adapter.replaceCredential(kind, value);
     dispatch({
       type: 'SET_CREDENTIAL_METADATA',
@@ -78,11 +82,31 @@ export function SetupAssistant({
   }
 
   async function continueSetup() {
-    if (locked) {
+    if (locked && !credentialOnly) {
       setError('Finish or cancel the active ImageForge batch before changing connection settings.');
       return;
     }
     setError(null);
+    if (credentialOnly) {
+      const input = credentialOnlyKind === 'runpodApiKey' ? apiKeyRef.current : workerTokenRef.current;
+      const value = input?.value.trim() ?? '';
+      if (input) input.value = '';
+      if (!value) {
+        setError(`Paste the ${credentialOnlyKind === 'runpodApiKey' ? 'RunPod API key' : 'worker token'} before saving.`);
+        return;
+      }
+      setBusy(true);
+      try {
+        await saveCredential(credentialOnlyKind, value);
+        dispatch({ type: 'SHOW_TOAST', tone: 'success', title: 'Worker credential replaced', message: 'Try the batch again. The new token stays in the operating-system vault.' });
+        onClose?.();
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : 'Could not save that credential.');
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
     if (step === 0) {
       if (!state.settings.userName.trim()) {
         setError('Enter the name teammates should see on an active batch.');
@@ -185,7 +209,7 @@ export function SetupAssistant({
 
       <div ref={contentRef} className="setup-content">
         {canClose ? <IconButton className="setup-close" label="Close setup assistant" icon={X} onClick={onClose} /> : null}
-        <div className="setup-step-count">Step {step + 1} of {STEPS.length}</div>
+        <div className="setup-step-count">{credentialOnly ? 'Credential replacement' : `Step ${step + 1} of ${STEPS.length}`}</div>
         {step === 0 ? (
           <div className="setup-step" key="identity-step">
             <Eyebrow>Identify the batch owner</Eyebrow>
@@ -198,7 +222,7 @@ export function SetupAssistant({
             <Eyebrow>Secure RunPod access</Eyebrow>
             <h1 id="setup-title">Connect RunPod.</h1>
             <p>Use a restricted API key where available. ImageForge records only configured status and a redacted suffix after the vault handoff.</p>
-            <label className="setup-field"><span>RunPod API key</span><input key="runpod-api-key" ref={apiKeyRef} disabled={locked} data-autofocus autoFocus type="password" autoComplete="off" placeholder={state.setup.credentials.runpodApiKey.configured ? `Configured · •••• ${state.setup.credentials.runpodApiKey.suffix}` : 'Paste restricted key'} /><small>The deterministic shell discards the complete value after the adapter returns redacted metadata.</small></label>
+            <label className="setup-field"><span>RunPod API key</span><input aria-label="RunPod API key" key="runpod-api-key" ref={apiKeyRef} disabled={locked} data-autofocus autoFocus type="password" autoComplete="off" placeholder={state.setup.credentials.runpodApiKey.configured ? `Configured · •••• ${state.setup.credentials.runpodApiKey.suffix}` : 'Paste restricted key'} /><small>The deterministic shell discards the complete value after the adapter returns redacted metadata.</small></label>
             <div className="setup-safe-note"><KeyRound size={17} /><span><strong>{state.setup.credentials.runpodApiKey.configured ? 'RunPod key configured' : 'Vault handoff required'}</strong><small>{state.setup.credentials.runpodApiKey.provider}</small></span></div>
           </div>
         ) : step === 2 ? (
@@ -206,8 +230,8 @@ export function SetupAssistant({
             <Eyebrow>Import studio connection</Eyebrow>
             <h1 id="setup-title">Bring in the studio profile.</h1>
             <p>The non-secret profile describes the template, volume, seven-GPU EU-RO-1 policy, worker port, and pinned model preset.</p>
-            <label className="setup-field"><span>Connection profile</span><textarea key="studio-profile" readOnly={locked} data-autofocus value={state.setup.studioProfile} onChange={(event) => dispatch({ type: 'SET_STUDIO_PROFILE', profile: event.target.value })} /></label>
-            <label className="setup-field"><span>Worker token</span><input key="worker-token" ref={workerTokenRef} disabled={locked} type="password" autoComplete="off" placeholder={state.setup.credentials.workerToken.configured ? `Configured · •••• ${state.setup.credentials.workerToken.suffix}` : 'Paste personal worker token'} /><small>Stored separately; never included in the profile or a URL.</small></label>
+            <label className="setup-field"><span>Connection profile</span><textarea key="studio-profile" readOnly={locked || credentialOnly} data-autofocus={!credentialOnly} value={state.setup.studioProfile} onChange={(event) => dispatch({ type: 'SET_STUDIO_PROFILE', profile: event.target.value })} /></label>
+            <label className="setup-field"><span>Worker token</span><input aria-label="Worker token" key="worker-token" ref={workerTokenRef} disabled={locked && !credentialOnly} data-autofocus={credentialOnly} type="password" autoComplete="off" placeholder={state.setup.credentials.workerToken.configured ? `Configured · •••• ${state.setup.credentials.workerToken.suffix}` : 'Paste personal worker token'} /><small>Stored separately; never included in the profile or a URL.</small></label>
           </div>
         ) : (
           <div className="setup-step" key="downloads-step">
@@ -223,9 +247,11 @@ export function SetupAssistant({
 
         {error ? <p className="setup-error" role="alert">{error}</p> : null}
         <footer className="setup-actions">
-          <Button icon={ArrowLeft} disabled={step === 0 || busy} onClick={() => { setError(null); setStep((value) => Math.max(0, value - 1)); }}>Back</Button>
+          <Button icon={ArrowLeft} disabled={credentialOnly || step === 0 || busy} onClick={() => { setError(null); setStep((value) => Math.max(0, value - 1)); }}>Back</Button>
           <span>Your credentials are never shown in exported diagnostics.</span>
-          {step < STEPS.length - 1 ? (
+          {credentialOnly ? (
+            <Button tone="primary" icon={ShieldCheck} pending={busy} disabled={busy} onClick={() => void continueSetup()}>Save {credentialOnlyKind === 'runpodApiKey' ? 'RunPod API key' : 'worker credential'}</Button>
+          ) : step < STEPS.length - 1 ? (
             <Button tone="primary" icon={ArrowRight} pending={busy} disabled={locked || busy || (step === 0 && !state.settings.userName.trim())} onClick={() => void continueSetup()}>Continue</Button>
           ) : (
             <Button tone="primary" icon={ShieldCheck} pending={busy} disabled={locked || !writeChecked || busy} onClick={() => void finish()}>Run connection test</Button>

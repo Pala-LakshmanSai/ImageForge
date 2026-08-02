@@ -19,7 +19,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { useState } from 'react';
-import type { OperationalScenario } from '../domain/types';
+import type { CredentialKind, OperationalScenario } from '../domain/types';
 import { aspectRatioOption } from '../domain/aspectRatio';
 import { Button, Eyebrow, PhaseBadge } from '../components/primitives';
 import { SetupAssistant } from '../components/SetupAssistant';
@@ -53,12 +53,14 @@ function SettingSectionTitle({ icon: Icon, eyebrow, title }: { icon: typeof User
 export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
   const productionLocked = adapter.mode === 'production' && (
     state.pod.podId !== null ||
-    (state.batch !== null && !['complete', 'cancelled'].includes(state.batch.phase))
+    (state.batch !== null && !['complete', 'partial_failure', 'cancelled', 'error'].includes(state.batch.phase))
   );
+  const activeBatch = state.batch !== null && !['complete', 'partial_failure', 'cancelled', 'error'].includes(state.batch.phase);
   const [choosingDestination, setChoosingDestination] = useState(false);
   const [scenario, setScenario] = useState<OperationalScenario>('running');
   const [showSetup, setShowSetup] = useState(false);
   const [setupInitialStep, setSetupInitialStep] = useState(0);
+  const [credentialOnlyKind, setCredentialOnlyKind] = useState<CredentialKind | undefined>();
 
   async function chooseDefaultDestination() {
     if (productionLocked) return;
@@ -74,8 +76,9 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
     }
   }
 
-  function openSetup(step = 0) {
+  function openSetup(step = 0, kind?: CredentialKind) {
     setSetupInitialStep(step);
+    setCredentialOnlyKind(kind);
     setShowSetup(true);
   }
 
@@ -129,7 +132,7 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
                 <span className="credential-card__icon"><LockKeyhole size={18} /></span>
                 <div><strong>Per-user worker credential</strong><small>{state.setup.credentials.workerToken.configured ? `Configured · suffix •••• ${state.setup.credentials.workerToken.suffix} · never placed in a URL` : `Not configured · ${state.setup.credentials.workerToken.provider}`}</small></div>
                 <PhaseBadge tone={state.setup.credentials.workerToken.configured ? 'success' : 'warning'}>{state.setup.credentials.workerToken.configured ? 'configured' : 'required'}</PhaseBadge>
-                <Button compact disabled={productionLocked} onClick={() => openSetup(2)}>Replace</Button>
+                <Button compact disabled={activeBatch} onClick={() => openSetup(2, 'workerToken')}>Replace</Button>
               </article>
             </div>
             <div className="redaction-note"><EyeOff size={17} /><span><strong>Screenshot-safe by design</strong><small>Secrets are excluded from UI state, logs, analytics, crash reports, and project files.</small></span></div>
@@ -197,7 +200,7 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
           </section> : null}
         </div>
       </div>
-      {showSetup ? <SetupAssistant key={`setup-${setupInitialStep}`} state={state} dispatch={dispatch} adapter={adapter} initialStep={setupInitialStep} locked={productionLocked} onClose={() => setShowSetup(false)} /> : null}
+      {showSetup ? <SetupAssistant key={`setup-${setupInitialStep}-${credentialOnlyKind ?? 'full'}`} state={state} dispatch={dispatch} adapter={adapter} initialStep={setupInitialStep} locked={productionLocked} credentialOnlyKind={credentialOnlyKind} onClose={() => setShowSetup(false)} /> : null}
     </div>
   );
 }

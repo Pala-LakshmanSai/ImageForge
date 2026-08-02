@@ -42,7 +42,7 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
       else if (event.type === 'busy') dispatch({ type: 'SYNC_RUNTIME_BUSY', batch: event.batch });
       else if (event.type === 'idle') dispatch({ type: 'RUNTIME_BATCH_IDLE' });
       else if (event.type === 'create-recovery') dispatch({ type: 'SYNC_CREATE_RECOVERY', marker: event.marker });
-      else dispatch({ type: 'RUNTIME_ERROR', scope: event.scope, message: event.message, retryable: event.retryable });
+      else dispatch({ type: 'RUNTIME_ERROR', scope: event.scope, code: event.code, message: event.message, retryable: event.retryable });
     });
   }, [runtime]);
 
@@ -318,6 +318,7 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
         <div className={`toast toast--${state.toast.tone}`} role="status" aria-live="polite">
           {state.toast.tone === 'success' ? <CheckCircle2 size={19} /> : state.toast.tone === 'error' ? <XCircle size={19} /> : state.toast.tone === 'warning' ? <AlertTriangle size={19} /> : <Info size={19} />}
           <div><strong>{state.toast.title}</strong><span>{state.toast.message}</span></div>
+          {state.toast.action ? <Button compact tone="secondary" onClick={() => { dispatch({ type: 'NAVIGATE', view: state.toast!.action!.view }); dispatch({ type: 'DISMISS_TOAST' }); }}>{state.toast.action.label}</Button> : null}
           <IconButton label="Dismiss notification" icon={X} onClick={() => dispatch({ type: 'DISMISS_TOAST' })} />
         </div>
       ) : null}

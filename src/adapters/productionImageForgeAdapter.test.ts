@@ -160,6 +160,7 @@ describe('production ImageForge adapter', () => {
     expect(events).toEqual([{
       type: 'error',
       scope: 'batch',
+      code: 'worker_unavailable',
       message: 'Worker is warming.',
       retryable: true,
     }]);

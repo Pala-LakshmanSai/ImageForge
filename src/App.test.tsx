@@ -326,4 +326,53 @@ describe('ImageForge shell', () => {
     await user.keyboard('{Escape}');
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
+
+  it('offers worker credential replacement after an authentication failure', async () => {
+    const user = userEvent.setup();
+    const production = productionAdapter();
+    const state = createDemoState();
+    state.activeView = 'progress';
+    render(<App initialState={state} adapter={production.adapter} />);
+    const listener = [...production.listeners][0];
+
+    act(() => listener({
+      type: 'error',
+      scope: 'batch',
+      code: 'authentication_required',
+      message: 'A valid worker bearer credential is required.',
+      retryable: false,
+    }));
+
+    expect(screen.getByRole('button', { name: 'Replace worker credential' })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Replace worker credential' }));
+    expect(screen.getByRole('heading', { name: 'Make the desk yours.' })).toBeVisible();
+  });
+
+  it('allows replacing the worker credential while an idle GPU remains attached', async () => {
+    const user = userEvent.setup();
+    const production = productionAdapter();
+    let state = createConfiguredInitialState();
+    state.activeView = 'settings';
+    state = appReducer(state, {
+      type: 'SET_POD_PHASE',
+      phase: 'ready',
+      progress: 100,
+      detail: 'Model warm',
+      podId: 'pod-ui-test',
+      gpu: 'RTX 4090',
+      vram: '24 GB',
+      hourlyRate: 0.54,
+    });
+    render(<App initialState={state} adapter={production.adapter} />);
+
+    const replaceButtons = screen.getAllByRole('button', { name: 'Replace' });
+    expect(replaceButtons[1]).toBeEnabled();
+    await user.click(replaceButtons[1]);
+    const workerToken = screen.getByLabelText('Worker token');
+    await user.type(workerToken, 'worker-secret-new');
+    await user.click(screen.getByRole('button', { name: 'Save worker credential' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.getByText('Worker credential replaced')).toBeVisible();
+  });
 });

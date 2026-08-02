@@ -60,7 +60,7 @@ export type ProductionRuntimeEvent =
   | { type: 'busy'; batch: BatchState }
   | { type: 'idle' }
   | { type: 'create-recovery'; marker: PodState['createRecovery'] }
-  | { type: 'error'; scope: 'pod' | 'batch'; message: string; retryable: boolean };
+  | { type: 'error'; scope: 'pod' | 'batch'; code?: string; message: string; retryable: boolean };
 
 export interface ProductionRuntimeFacade {
   subscribe(listener: (event: ProductionRuntimeEvent) => void): () => void;
@@ -341,7 +341,13 @@ class ProductionRuntime implements ProductionRuntimeFacade {
       return;
     }
     if (event.type === 'error') {
-      this.#emit({ type: 'error', scope: 'batch', message: event.message, retryable: event.retryable });
+      this.#emit({
+        type: 'error',
+        scope: 'batch',
+        message: event.message,
+        retryable: event.retryable,
+        ...(event.code ? { code: event.code } : {}),
+      });
       return;
     }
     const context = this.#presentation ?? {

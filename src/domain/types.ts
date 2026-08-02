@@ -218,6 +218,10 @@ export interface ToastState {
   tone: 'success' | 'warning' | 'info' | 'error';
   title: string;
   message: string;
+  action?: {
+    label: string;
+    view: ViewId;
+  };
 }
 
 export interface AppState {
@@ -261,7 +265,7 @@ export type AppAction =
   | { type: 'SYNC_RUNTIME_BATCH'; batch: BatchState; assets: LibraryAsset[] }
   | { type: 'SYNC_RUNTIME_BUSY'; batch: BatchState }
   | { type: 'RUNTIME_BATCH_IDLE' }
-  | { type: 'RUNTIME_ERROR'; scope: 'pod' | 'batch'; message: string; retryable?: boolean }
+  | { type: 'RUNTIME_ERROR'; scope: 'pod' | 'batch'; code?: string; message: string; retryable?: boolean }
   | { type: 'TOGGLE_BATCH_PAUSE' }
   | { type: 'REQUEST_CANCEL_BATCH' }
   | { type: 'CONFIRM_CANCEL_BATCH' }
@@ -279,7 +283,7 @@ export type AppAction =
   | { type: 'RESET_WORKSPACE' }
   | { type: 'REQUEST_CLEAR_LIBRARY' }
   | { type: 'CLEAR_LIBRARY' }
-  | { type: 'SHOW_TOAST'; tone: ToastState['tone']; title: string; message: string };
+  | { type: 'SHOW_TOAST'; tone: ToastState['tone']; title: string; message: string; action?: ToastState['action'] };
 
 export const TERMINAL_BATCH_PHASES: BatchPhase[] = [
   'complete',

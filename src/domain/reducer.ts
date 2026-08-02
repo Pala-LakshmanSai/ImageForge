@@ -13,6 +13,7 @@ import type {
   PodPhase,
   PodState,
   SettingsState,
+  ToastState,
   UsageRun,
 } from './types';
 
@@ -269,9 +270,10 @@ function toast(
   tone: AppState['toast'] extends infer _T ? 'success' | 'warning' | 'info' | 'error' : never,
   title: string,
   message: string,
+  action?: ToastState['action'],
 ): Pick<AppState, 'toast' | 'toastSequence'> {
   const id = state.toastSequence + 1;
-  return { toastSequence: id, toast: { id, tone, title, message } };
+  return { toastSequence: id, toast: { id, tone, title, message, ...(action ? { action } : {}) } };
 }
 
 function podDetails(
@@ -826,6 +828,10 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           ? { ...state, pod: { ...state.pod, phase: 'ready', health: 'healthy', phaseProgress: 100, errorMessage: null, statusDetail: 'Model warm · accepting one batch' } }
           : state;
     case 'RUNTIME_ERROR':
+      {
+      const credentialAction = action.scope === 'batch' && action.code === 'authentication_required'
+        ? { label: 'Replace worker credential', view: 'settings' as const }
+        : undefined;
       return action.scope === 'batch' && action.retryable
         ? {
             ...state,
@@ -850,8 +856,17 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         : {
             ...state,
             batch: state.batch ? { ...state.batch, phase: 'error', statusMessage: action.message } : null,
-            ...toast(state, 'error', 'Batch operation needs attention', action.message),
+            ...toast(
+              state,
+              'error',
+              'Batch operation needs attention',
+              action.code === 'authentication_required'
+                ? 'The saved worker credential was rejected. Replace it with the token configured for this worker.'
+                : action.message,
+              credentialAction,
+            ),
           };
+      }
     case 'TOGGLE_BATCH_PAUSE': {
       if (!state.batch || !['running', 'paused'].includes(state.batch.phase)) return state;
       const isPausing = state.batch.phase === 'running';
