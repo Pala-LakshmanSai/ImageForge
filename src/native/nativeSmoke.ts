@@ -122,10 +122,10 @@ export async function runNativeSmoke(): Promise<void> {
       }
       return true;
     });
-    await clickButton('per-image Download', /^Download Atlas of Quiet Work · 001$/);
+    await clickButton('per-image Download', /^Download Atlas of Quiet Work · 001\b/);
     await waitFor('Download success', () => document.body.textContent?.includes('Image downloaded') ? true : null);
-    await clickButton('image detail', /^Open details for Atlas of Quiet Work · 001$/);
-    await waitFor('image detail actions', () => buttonMatching(/^Show Atlas of Quiet Work · 001 in folder$/) ? true : null);
+    await clickButton('image detail', /^Open details for Atlas of Quiet Work · 001\b/);
+    await waitFor('image detail actions', () => buttonMatching(/^Show Atlas of Quiet Work · 001 in folder\b/) ? true : null);
     await record(true, 'onboarding, reference add/remove/re-add, fast fake batch, named minimal Library, per-image Download, image detail, and folder reveal passed');
   } catch (error) {
     await record(false, error instanceof Error ? error.message : 'Native smoke failed.');

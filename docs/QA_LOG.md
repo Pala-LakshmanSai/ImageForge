@@ -464,17 +464,18 @@ the recovery poll observes it.
   test profile was reset from `cartoon style` to a neutral editorial instruction
   while remaining off, so prompts are sent exactly as entered unless a user
   explicitly enables it.
-- Final local checks: desktop Vitest 124/124, RunPod client 95/95, Rust release
+- Final local checks: desktop Vitest 125/125, RunPod client 95/95, Rust release
   tests 57/57, root typecheck, production build, Rust formatting, and
   `git diff --check` passed. Independent review reported no remaining must-fix
   finding. The packaged app launched and the pre-polish candidate was inspected
   interactively with 21 sharp local cards, exact batch naming, and per-card
   Download controls. The packaged smoke now also checks a fast completed fake
   batch, named minimal Library, Download, image detail, and folder reveal on
-  both native CI runners. The exact local smoke could not advance while this Mac
-  was locked and timed out without a pass/fail marker, so CI is authoritative.
+  both native CI runners. Its complete deterministic renderer flow passes in
+  Vitest. The exact local smoke could not advance while this Mac was locked and
+  timed out without a pass/fail marker, so unlocked native CI is authoritative.
 - Final local Apple-silicon candidate:
   `/Volumes/ImageForgeBuild/cargo-target/release/bundle/dmg/ImageForge_0.1.5_aarch64.dmg`,
-  SHA-256 `92a452f96f133131f5f594f8eb397bc78fd8240a477dcf51243be812703fc9af`.
+  SHA-256 `07cea6fec3320b17e26d6cd3c191d0ac7f7045ffab89c15437d7a32201422113`.
   `codesign --verify --deep --strict` and `hdiutil verify` passed. This beta is
   ad-hoc signed and not notarized; no production signing claim is made.
