@@ -36,7 +36,7 @@ Current immutable worker release evidence (published 2026-08-01):
 
 - Repository: `Pala-LakshmanSai/imageforge-worker`
 - Source commit: `860badbf5359085494da09234e77cf1cd9349ecd`
-- Image: `ghcr.io/pala-lakshmansai/imageforge-worker@sha256:084f8494c901a21e52c0c2c1025ae0c972efe87f458cfdb339743341d6ef99e0`
+- Image: `ghcr.io/pala-lakshmansai/imageforge-worker@sha256:9bf602e6dd7106533b865b8f350ade7bf70237dc05512be14fa58c9856fe16b9`
 - Architecture: `linux/amd64`
 
 The GHCR package is public, so the template uses **No credentials** for image
