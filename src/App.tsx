@@ -54,9 +54,15 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
   }, [runtime]);
 
   useEffect(() => {
-    if (!runtime || !state.setup.completed) return;
+    // Safe preferences deliberately do not persist credential metadata. Wait
+    // for the native vault to confirm the RunPod key before network refresh;
+    // otherwise an upgraded ad-hoc build can spend the full timeout probing
+    // with a temporarily inaccessible keychain item. Worker-token metadata is
+    // not a gate because Pod discovery must still expose billed compute and
+    // its explicit Stop control when that separate credential needs repair.
+    if (!runtime || !state.setup.completed || !state.setup.credentials.runpodApiKey.configured) return;
     void runtime.refresh(stateRef.current).catch(() => undefined);
-  }, [runtime, state.setup.completed]);
+  }, [runtime, state.setup.completed, state.setup.credentials.runpodApiKey.configured]);
 
   useEffect(() => {
     let active = true;

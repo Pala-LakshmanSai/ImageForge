@@ -96,6 +96,28 @@ describe('ImageForge shell', () => {
     expect(production.adapter.runPodLifecycle).not.toHaveBeenCalled();
   });
 
+  it('waits for native RunPod credential metadata before startup refresh', async () => {
+    let resolveMetadata!: (credentials: CredentialMetadataMap) => void;
+    const metadata = new Promise<CredentialMetadataMap>((resolve) => { resolveMetadata = resolve; });
+    const production = productionAdapter();
+    const adapter = { ...production.adapter, credentialMetadata: vi.fn(() => metadata) };
+    const state = createConfiguredInitialState();
+    state.setup.credentials = {
+      runpodApiKey: { configured: false, suffix: null, provider: 'macOS Keychain' },
+      workerToken: { configured: false, suffix: null, provider: 'macOS Keychain' },
+    };
+    render(<App initialState={state} adapter={adapter} />);
+
+    await waitFor(() => expect(adapter.credentialMetadata).toHaveBeenCalledOnce());
+    expect(production.runtime.refresh).not.toHaveBeenCalled();
+
+    resolveMetadata({
+      runpodApiKey: { configured: true, suffix: 'K7P9', provider: 'macOS Keychain' },
+      workerToken: { configured: false, suffix: null, provider: 'macOS Keychain' },
+    });
+    await waitFor(() => expect(production.runtime.refresh).toHaveBeenCalledOnce());
+  });
+
   it('labels a read-only inventory refresh without implying that a GPU is starting', () => {
     let state = createConfiguredInitialState();
     state = appReducer(state, {
