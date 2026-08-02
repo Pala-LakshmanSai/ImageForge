@@ -1,0 +1,29 @@
+{
+  "contention": {
+    "batch_id": "a4e86c7f-9bf7-4bb1-af9d-fba22a0001a2",
+    "observer": "B",
+    "observer_create_error_code": "batch_busy",
+    "observer_create_status": 423,
+    "observer_endpoint": "https://ogwp1iw9v8kmd8-8000.proxy.runpod.net",
+    "observer_mutation_status": 423,
+    "observer_status_code": 200,
+    "prompt_count": 1,
+    "winner": "A",
+    "winner_create_status": 201,
+    "winner_endpoint": "https://i6i6fdc6ig2vi1-8000.proxy.runpod.net"
+  },
+  "finished_at_unix": 1785646056.778513,
+  "host_kernel": "25.3.0",
+  "image_digest": "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:f862e1ea8ece9f35101e7c47be55a5042c17e0eb3cf8414dd709ed73a59e33ed",
+  "mount_root": "/workspace/imageforge-gates/gate-1785645894",
+  "operator_instruction": "Stop the recorded winner Pod, then rerun with IMAGEFORGE_GATE_SURVIVOR=<live role>, IMAGEFORGE_GATE_OWNER=<original winner role>, and IMAGEFORGE_GATE_BATCH_ID=<recorded batch_id>.",
+  "pod_ids": {
+    "A": "i6i6fdc6ig2vi1",
+    "B": "ogwp1iw9v8kmd8"
+  },
+  "region": "EU-RO-1",
+  "run_id": "gate-1785645894",
+  "schema_version": 1,
+  "started_at_unix": 1785646053.352084,
+  "volume_id": "ukh207b26r"
+}

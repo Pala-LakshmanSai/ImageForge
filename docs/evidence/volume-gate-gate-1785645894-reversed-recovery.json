@@ -1,0 +1,97 @@
+{
+  "finished_at_unix": 1785646302.648627,
+  "host_kernel": "25.3.0",
+  "image_digest": "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:f862e1ea8ece9f35101e7c47be55a5042c17e0eb3cf8414dd709ed73a59e33ed",
+  "mount_root": "/workspace/imageforge-gates/gate-1785645894",
+  "pod_ids": {
+    "A": "ogwp1iw9v8kmd8",
+    "B": "srq9p4gahlomj9"
+  },
+  "recovery": {
+    "batch_id": "05213aa6-2cee-4d04-acf5-eaec843c2af0",
+    "manifest": {
+      "batch_id": "05213aa6-2cee-4d04-acf5-eaec843c2af0",
+      "cancel_requested": false,
+      "completed_at": "2026-08-02T04:51:17.396Z",
+      "created_at": "2026-08-02T04:51:16.039Z",
+      "images": [
+        {
+          "artifacts_cleanup_started_at": null,
+          "artifacts_deleted_at": null,
+          "attempt_history": [
+            {
+              "attempt": 1,
+              "error_code": null,
+              "finished_at": "2026-08-02T04:51:17.376Z",
+              "inference_ms": 1192.0979600399733,
+              "jpeg_encode_ms": 2.179528586566448,
+              "preview_encode_ms": 8.553966879844666,
+              "started_at": "2026-08-02T04:51:16.075Z",
+              "status": "succeeded"
+            }
+          ],
+          "attempts": 1,
+          "attempts_in_cycle": 1,
+          "error": null,
+          "filename": "artifacts/000001.jpg",
+          "finished_at": "2026-08-02T04:51:17.376Z",
+          "generation_ms": 1202.8314555063844,
+          "index": 1,
+          "preview_filename": "previews/000001.webp",
+          "preview_sha256": "f2dfa6e79a74b62a6fcf9a518f8539cd41c6fbe4937be30954b1f35b332ffc79",
+          "preview_size_bytes": 3074,
+          "prompt": "ImageForge isolated volume gate b5e25763-eba9-41ca-a274-75fa8599da59 frame 1",
+          "receipt": null,
+          "retry_rounds": 0,
+          "seed": 41000,
+          "sha256": "c1c2b75ea6dd0426adfc63e9d2166eadbab8b4b2eaacb45dace9bfa28f000098",
+          "size_bytes": 116682,
+          "started_at": "2026-08-02T04:51:16.075Z",
+          "status": "ready"
+        }
+      ],
+      "interrupted_at": null,
+      "owner": {
+        "display_name": "Lakshman",
+        "user_id": "lakshman"
+      },
+      "pause_requested": false,
+      "progress": {
+        "cancelled": 0,
+        "completed": 1,
+        "current_index": null,
+        "downloaded": 0,
+        "failed": 0,
+        "processed": 1,
+        "total": 1
+      },
+      "references": [],
+      "schema_version": 1,
+      "settings": {
+        "guidance": 1.0,
+        "height": 720,
+        "jpeg_quality": 95,
+        "model": "black-forest-labs/FLUX.2-klein-4B",
+        "precision": "bfloat16",
+        "preview_height": 180,
+        "preview_width": 320,
+        "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+        "steps": 4,
+        "width": 1280
+      },
+      "state": "completed",
+      "updated_at": "2026-08-02T04:51:17.396Z"
+    },
+    "samples": [
+      {
+        "active_batch": null,
+        "status": 200
+      }
+    ]
+  },
+  "region": "EU-RO-1",
+  "run_id": "gate-1785645894",
+  "schema_version": 1,
+  "started_at_unix": 1785646301.564615,
+  "volume_id": "ukh207b26r"
+}

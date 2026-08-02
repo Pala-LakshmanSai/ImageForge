@@ -262,5 +262,20 @@ the recovery poll observes it.
 - Worker source commit `dbb6b712317b824b113132f1128ee91b11a46c27` was rebuilt
   by workflow `30732102432` and published as
   `ghcr.io/pala-lakshmansai/imageforge-worker@sha256:f862e1ea8ece9f35101e7c47be55a5042c17e0eb3cf8414dd709ed73a59e33ed`.
-- The RunPod template must be repinned to that digest before the next paid
-  smoke; the earlier template digest was from a pre-aspect/reference worker.
+- The RunPod template `q8sfgixfy2` is now repinned to that exact digest. A paid
+  RTX 4090 EU-RO-1 smoke then passed health/model identity, 1:1 reference
+  generation (1024x1024), 9:16 generation (720x1280), checksum verification,
+  and the two-user HTTP-423 lock/cancel path.
+
+## Exact-image shared-volume qualification — run `gate-1785645894`
+
+- Two fresh EU-RO-1 Secure Pods on network volume `ukh207b26r` ran the exact
+  worker digest above. The first contention phase produced one HTTP 201 winner,
+  one HTTP 423 `batch_busy` observer, an authoritative shared status, and an
+  HTTP 423 observer mutation rejection. After the winner was explicitly
+  terminated, the survivor recovered the batch from the shared volume.
+- A second contention/recovery phase with the roles reversed passed the same
+  checks. All three paid gate Pods were explicitly terminated afterward; the
+  final RunPod list contained no active ImageForge Pod.
+- Evidence is captured locally in the operator workspace as
+  `imageforge-volume-gate-gate-1785645894*.json`; it contains no bearer tokens.
