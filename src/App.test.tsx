@@ -59,6 +59,7 @@ function productionAdapter() {
     stopGpu: vi.fn(async () => undefined),
     startBatch: vi.fn(async () => undefined),
     pollBatch: vi.fn(async () => undefined),
+    beginNewBatch: vi.fn(),
     controlBatch: vi.fn(async () => undefined),
     resolveAmbiguousStart: vi.fn(async () => undefined),
     dispose: vi.fn(),
@@ -122,6 +123,19 @@ describe('ImageForge shell', () => {
     expect(production.runtime.controlBatch).toHaveBeenCalledWith('pause', expect.objectContaining({ batch: expect.objectContaining({ phase: 'running' }) }));
     expect(screen.getByRole('button', { name: 'Pause after frame' })).toBeVisible();
     expect(production.adapter.runBatchClock).not.toHaveBeenCalled();
+  });
+
+  it('forgets a completed recovered batch before starting a new production brief', async () => {
+    const user = userEvent.setup();
+    const production = productionAdapter();
+    const state = createDemoState();
+    state.activeView = 'create';
+    state.batch = { ...state.batch!, phase: 'complete', statusMessage: '1 image verified in order' };
+    render(<App initialState={state} adapter={production.adapter} />);
+
+    await user.click(screen.getByRole('button', { name: 'New brief' }));
+    expect(production.runtime.beginNewBatch).toHaveBeenCalledOnce();
+    expect(screen.getByRole('heading', { name: 'Complete the setup' })).toBeVisible();
   });
 
   it('blocks duplicate starts and exposes explicit ambiguous-create recovery', async () => {

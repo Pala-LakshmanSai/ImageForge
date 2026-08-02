@@ -75,6 +75,8 @@ const REUSABLE_POD_STATUSES = new Set<ManagedPod["status"]>([
   "running",
 ]);
 
+const READ_ONLY_REFRESH_TIMEOUT_MULTIPLIER = 2;
+
 function defaultSleep(milliseconds: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted === true) {
@@ -305,7 +307,12 @@ export class RunPodLifecycleController {
   }
 
   refresh(options: RefreshOptions = {}): Promise<RunPodSnapshot> {
-    const deadline = createOperationDeadline(options.signal, this.#config.operationTimeoutMs);
+    // Refresh is the one composite read-only operation: inventory must settle
+    // before Pod discovery, so it may use two configured observation windows.
+    // Start/stop mutations retain the single-window bound.
+    const refreshTimeoutMs =
+      this.#config.operationTimeoutMs * READ_ONLY_REFRESH_TIMEOUT_MULTIPLIER;
+    const deadline = createOperationDeadline(options.signal, refreshTimeoutMs);
     const boundedOptions: RefreshOptions = {
       ...(options.expectedImageCount === undefined
         ? {}
@@ -320,7 +327,7 @@ export class RunPodLifecycleController {
         message: "RunPod refresh exceeded the operation timeout.",
         operation: "list_pods",
         retryable: true,
-        details: { timeoutMs: this.#config.operationTimeoutMs },
+        details: { timeoutMs: refreshTimeoutMs },
       });
       this.#publish({ ...this.#snapshot, phase: "error", error: safeErrorSummary(timeoutError) });
       throw timeoutError;
@@ -352,6 +359,8 @@ export class RunPodLifecycleController {
       gpuCount: this.#config.gpuCount,
       dataCenterId: this.#config.networkVolumeDataCenterId,
     };
+    // Dynamic-GPU Pod validation depends on approval identities populated by
+    // live inventory, so discovery must not begin until inventory settles.
     const [inventoryResult] = await Promise.allSettled([
       awaitWithAbort(
         this.#provider.listGpuInventory(inventoryRequest, options.signal),
@@ -367,6 +376,7 @@ export class RunPodLifecycleController {
         "list_pods",
       ),
     ]);
+    if (isSignalAborted(options.signal)) throw operationAborted("list_pods");
 
     try {
       if (podsResult.status === "rejected") {

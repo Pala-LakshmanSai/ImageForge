@@ -171,7 +171,13 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
       return;
     }
     const current = stateRef.current;
-    if (action.type === 'NEW_BATCH') clearRecoveryPointerRef.current = true;
+    if (action.type === 'NEW_BATCH') {
+      const terminalOrEmpty = current.batch === null || ['complete', 'partial_failure', 'cancelled', 'error'].includes(current.batch.phase);
+      if (terminalOrEmpty) {
+        clearRecoveryPointerRef.current = true;
+        runtime.beginNewBatch();
+      }
+    }
     if (action.type === 'TOGGLE_BATCH_PAUSE') {
       const control = current.batch?.phase === 'running' ? 'pause' : 'resume';
       void runtime.controlBatch(control, current).catch(() => undefined);

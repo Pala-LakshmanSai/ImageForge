@@ -42,6 +42,14 @@ async function fill(description: string, selector: string, value: string): Promi
   setInputValue(input, value);
 }
 
+async function clickSelector(description: string, selector: string): Promise<void> {
+  const button = await waitFor(description, () => {
+    const candidate = document.querySelector<HTMLButtonElement>(selector);
+    return candidate && !candidate.disabled ? candidate : null;
+  });
+  button.click();
+}
+
 async function attachReference(): Promise<void> {
   const input = await waitFor('reference-image input', () => document.querySelector<HTMLInputElement>('#reference-files'));
   const pngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZgpcAAAAASUVORK5CYII=';
@@ -84,7 +92,9 @@ export async function runNativeSmoke(): Promise<void> {
     await clickButton('RunPod setup continue', /^Continue$/);
     await fill('worker token field', 'input[aria-label="Worker token"]', 'smoke-worker-token-1234');
     await clickButton('worker setup continue', /^Continue$/);
-    await clickButton('downloads folder chooser', /Pictures\/ImageForge/);
+    // Match the semantic setup control instead of a platform-formatted path:
+    // macOS renders `/` separators while Windows renders `\` separators.
+    await clickSelector('downloads folder chooser', '.setup-folder');
     await clickButton('connection test', /Run connection test/);
     await waitFor('setup dialog to close', () => document.querySelector('[role="dialog"]') === null ? true : null);
     await clickButton('sample brief', /Load sample brief/);

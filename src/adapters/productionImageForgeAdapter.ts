@@ -69,6 +69,7 @@ export interface ProductionRuntimeFacade {
   stopGpu(state: AppState): Promise<void>;
   startBatch(batch: BatchState): Promise<void>;
   pollBatch(state: AppState): Promise<void>;
+  beginNewBatch(): void;
   controlBatch(
     action: 'pause' | 'resume' | 'cancel' | 'retry_failed',
     state: AppState,
@@ -200,6 +201,13 @@ class ProductionRuntime implements ProductionRuntimeFacade {
       // errors for the same failed request.
       throw error;
     }
+  }
+
+  beginNewBatch(): void {
+    this.#worker.forgetBatch();
+    this.#recoveredBatchId = null;
+    this.#reconciledRecoveredBatch = true;
+    this.#presentation = null;
   }
 
   async controlBatch(

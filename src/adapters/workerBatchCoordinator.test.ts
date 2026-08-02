@@ -98,6 +98,16 @@ function fakePort(overrides: Partial<WorkerBatchPort> = {}): WorkerBatchPort {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('WorkerBatchCoordinator', () => {
   it('creates immediately, downloads a ready JPEG, then refetches the acknowledged manifest', async () => {
     const port = fakePort();
@@ -258,6 +268,216 @@ describe('WorkerBatchCoordinator', () => {
     expect(port.status).toHaveBeenCalledOnce();
   });
 
+  it('starts a fresh authoritative poll after forgetting an in-flight poll', async () => {
+    const staleStatus = deferred<WorkerHttpResult>();
+    const statusCall = vi.fn()
+      .mockImplementationOnce(() => staleStatus.promise)
+      .mockResolvedValueOnce({ status: 200, body: status(false) });
+    const port = fakePort({
+      status: statusCall,
+      createBatch: vi.fn(async (): Promise<WorkerHttpResult> => ({
+        status: 423,
+        body: { error: { code: 'batch_busy', message: 'Lakshman is generating.', details: null } },
+      })),
+    });
+    const coordinator = new WorkerBatchCoordinator(port, batchId);
+
+    const stalePoll = coordinator.poll();
+    await vi.waitFor(() => expect(statusCall).toHaveBeenCalledOnce());
+    coordinator.forgetBatch();
+    await expect(coordinator.create(['A second brief'], 900)).resolves.toMatchObject({ type: 'busy' });
+    staleStatus.resolve({
+      status: 200,
+      body: { schema_version: 1, ready: true, active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false } },
+    });
+
+    await expect(stalePoll).resolves.toEqual({ type: 'idle' });
+    expect(statusCall).toHaveBeenCalledTimes(2);
+  });
+
+  it('starts status after a 423 instead of reusing an older same-generation poll', async () => {
+    const staleStatus = deferred<WorkerHttpResult>();
+    const statusCall = vi.fn()
+      .mockImplementationOnce(() => staleStatus.promise)
+      .mockResolvedValueOnce({ status: 200, body: status(false) });
+    const port = fakePort({
+      status: statusCall,
+      createBatch: vi.fn(async (): Promise<WorkerHttpResult> => ({
+        status: 423,
+        body: { error: { code: 'batch_busy', message: 'Lakshman is generating.', details: null } },
+      })),
+    });
+    const coordinator = new WorkerBatchCoordinator(port);
+
+    const earlierPoll = coordinator.poll();
+    await vi.waitFor(() => expect(statusCall).toHaveBeenCalledOnce());
+    const create = coordinator.create(['A second brief'], 900);
+    staleStatus.resolve({
+      status: 200,
+      body: { schema_version: 1, ready: true, active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false } },
+    });
+
+    await expect(earlierPoll).resolves.toEqual({ type: 'idle' });
+    await expect(create).resolves.toMatchObject({ type: 'busy' });
+    expect(statusCall).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not restore a forgotten batch from late create or control responses', async () => {
+    const createResult = deferred<WorkerHttpResult>();
+    const createPort = fakePort({ createBatch: vi.fn(() => createResult.promise) });
+    const creating = new WorkerBatchCoordinator(createPort);
+    const createEvents: unknown[] = [];
+    creating.subscribe((event) => createEvents.push(event));
+    const create = creating.create(['A delayed brief'], 700);
+    await vi.waitFor(() => expect(createPort.createBatch).toHaveBeenCalledOnce());
+    creating.forgetBatch();
+    createResult.resolve({ status: 201, body: manifest('ready') });
+
+    await expect(create).resolves.toEqual({ type: 'idle' });
+    expect(creating.batchId).toBeNull();
+    expect(createPort.readReceipts).not.toHaveBeenCalled();
+    expect(createPort.downloadArtifact).not.toHaveBeenCalled();
+    expect(createEvents).toEqual([]);
+
+    const controlResult = deferred<WorkerHttpResult>();
+    const controlPort = fakePort({ retryFailed: vi.fn(() => controlResult.promise) });
+    const controlling = new WorkerBatchCoordinator(controlPort, batchId);
+    const controlEvents: unknown[] = [];
+    controlling.subscribe((event) => controlEvents.push(event));
+    const control = controlling.control('retry_failed');
+    await vi.waitFor(() => expect(controlPort.retryFailed).toHaveBeenCalledOnce());
+    controlling.forgetBatch();
+    controlResult.resolve({ status: 200, body: manifest('generating') });
+
+    await expect(control).resolves.toEqual({ type: 'idle' });
+    expect(controlling.batchId).toBeNull();
+    expect(controlPort.readReceipts).not.toHaveBeenCalled();
+    expect(controlEvents).toEqual([]);
+  });
+
+  it('makes failures from forgotten create, control, and receipt work inert', async () => {
+    const createResult = deferred<WorkerHttpResult>();
+    const createPort = fakePort({ createBatch: vi.fn(() => createResult.promise) });
+    const creating = new WorkerBatchCoordinator(createPort);
+    const create = creating.create(['A delayed brief'], 700);
+    await vi.waitFor(() => expect(createPort.createBatch).toHaveBeenCalledOnce());
+    creating.forgetBatch();
+    createResult.reject(new Error('stale create failure'));
+    await expect(create).resolves.toEqual({ type: 'idle' });
+
+    const controlResult = deferred<WorkerHttpResult>();
+    const controlPort = fakePort({ retryFailed: vi.fn(() => controlResult.promise) });
+    const controlling = new WorkerBatchCoordinator(controlPort, batchId);
+    const control = controlling.control('retry_failed');
+    await vi.waitFor(() => expect(controlPort.retryFailed).toHaveBeenCalledOnce());
+    controlling.forgetBatch();
+    controlResult.reject(new Error('stale control failure'));
+    await expect(control).resolves.toEqual({ type: 'idle' });
+
+    const receiptResult = deferred<LocalDownloadReceipt[]>();
+    const receiptPort = fakePort({ readReceipts: vi.fn(() => receiptResult.promise) });
+    const synchronizing = new WorkerBatchCoordinator(receiptPort);
+    const events: unknown[] = [];
+    synchronizing.subscribe((event) => events.push(event));
+    const sync = synchronizing.create(['A delayed receipt read'], 700);
+    await vi.waitFor(() => expect(receiptPort.readReceipts).toHaveBeenCalledOnce());
+    synchronizing.forgetBatch();
+    receiptResult.reject(new Error('stale receipt failure'));
+    await expect(sync).resolves.toEqual({ type: 'idle' });
+    expect(events).toEqual([]);
+  });
+
+  it('sends pause before a stalled polling download is released', async () => {
+    const stalledDownload = deferred<LocalDownloadReceipt>();
+    const pauseBatch = vi.fn(async () => ({ status: 200, body: manifest('generating') }));
+    const port = fakePort({
+      pauseBatch,
+      downloadArtifact: vi.fn(() => stalledDownload.promise),
+    });
+    const coordinator = new WorkerBatchCoordinator(port, batchId);
+    const events: unknown[] = [];
+    coordinator.subscribe((event) => events.push(event));
+
+    const stalePoll = coordinator.poll();
+    await vi.waitFor(() => expect(port.downloadArtifact).toHaveBeenCalledOnce());
+    const pause = coordinator.control('pause');
+
+    await vi.waitFor(() => expect(pauseBatch).toHaveBeenCalledOnce());
+    await expect(pause).resolves.toMatchObject({
+      type: 'manifest',
+      manifest: { images: [{ status: 'generating' }] },
+    });
+    await vi.waitFor(() => expect(port.getBatch).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(port.downloadArtifact).toHaveBeenCalledOnce();
+    const reconciliation = coordinator.poll();
+
+    stalledDownload.resolve(receipt());
+    await expect(stalePoll).resolves.toEqual({ type: 'idle' });
+    await expect(reconciliation).resolves.toMatchObject({ type: 'manifest' });
+    expect(port.downloadArtifact).toHaveBeenCalledOnce();
+    expect(events).toEqual([
+      expect.objectContaining({ type: 'manifest', manifest: expect.objectContaining({ images: [expect.objectContaining({ status: 'generating' })] }) }),
+      expect.objectContaining({ type: 'manifest', manifest: expect.objectContaining({ images: [expect.objectContaining({ status: 'downloaded' })] }) }),
+    ]);
+  });
+
+  it('serializes create and owner-poll synchronization without losing newer ready state', async () => {
+    const receiptRead = deferred<LocalDownloadReceipt[]>();
+    let manifestRead = 0;
+    const port = fakePort({
+      readReceipts: vi.fn(() => receiptRead.promise),
+      getBatch: vi.fn(async () => ({
+        status: 200,
+        body: manifest(manifestRead++ === 0 ? 'ready' : 'downloaded'),
+      })),
+    });
+    const coordinator = new WorkerBatchCoordinator(port);
+    const events: unknown[] = [];
+    coordinator.subscribe((event) => events.push(event));
+
+    const create = coordinator.create(['A documentary shipyard at dawn'], 700);
+    await vi.waitFor(() => expect(port.readReceipts).toHaveBeenCalledOnce());
+    const poll = coordinator.poll();
+    receiptRead.resolve([]);
+
+    await expect(Promise.all([create, poll])).resolves.toEqual([
+      expect.objectContaining({ type: 'manifest' }),
+      expect.objectContaining({ type: 'manifest' }),
+    ]);
+    expect(port.downloadArtifact).toHaveBeenCalledOnce();
+    expect(port.getBatch).toHaveBeenCalledTimes(2);
+    expect(events).toHaveLength(2);
+    expect(events.at(-1)).toMatchObject({
+      type: 'manifest',
+      manifest: { images: [{ status: 'downloaded' }] },
+    });
+  });
+
+  it('commits an accepted create before a later idle poll', async () => {
+    const createResult = deferred<WorkerHttpResult>();
+    const port = fakePort({
+      createBatch: vi.fn(() => createResult.promise),
+      status: vi.fn(async () => ({
+        status: 200,
+        body: { schema_version: 1, ready: true, active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false } },
+      })),
+      getBatch: vi.fn(async () => ({ status: 404, body: { error: { code: 'batch_not_found', message: 'Missing.', details: null } } })),
+    });
+    const coordinator = new WorkerBatchCoordinator(port);
+    const eventTypes: string[] = [];
+    coordinator.subscribe((event) => eventTypes.push(event.type));
+
+    const create = coordinator.create(['An accepted brief'], 700);
+    await vi.waitFor(() => expect(port.createBatch).toHaveBeenCalledOnce());
+    const poll = coordinator.poll();
+    createResult.resolve({ status: 201, body: manifest('generating') });
+
+    await expect(create).resolves.toMatchObject({ type: 'manifest' });
+    await expect(poll).resolves.toEqual({ type: 'idle' });
+    expect(eventTypes).toEqual(['manifest', 'idle']);
+  });
+
   it('reconciles a terminal manifest after the worker releases its active lease', async () => {
     const port = fakePort({
       createBatch: vi.fn(async () => ({ status: 201, body: manifest('generating') })),
@@ -298,6 +518,20 @@ describe('WorkerBatchCoordinator', () => {
     expect(event.type).toBe('manifest');
     expect(port.getBatch).toHaveBeenCalledWith(batchId);
     expect(port.downloadArtifact).not.toHaveBeenCalled();
+  });
+
+  it('forgets a completed recovered batch before a new brief so polling cannot replay it', async () => {
+    const port = fakePort({
+      status: vi.fn(async () => ({
+        status: 200,
+        body: { schema_version: 1, ready: true, active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false } },
+      })),
+    });
+    const restarted = new WorkerBatchCoordinator(port, batchId);
+
+    restarted.forgetBatch();
+    await expect(restarted.poll()).resolves.toEqual({ type: 'idle' });
+    expect(port.getBatch).not.toHaveBeenCalled();
   });
 
   it('does not fetch a foreign owner manifest after that owner releases the lock', async () => {

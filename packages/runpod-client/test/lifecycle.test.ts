@@ -51,6 +51,103 @@ describe("RunPodLifecycleController refresh and start", () => {
     assert.equal(provider.calls.inventory[0]?.includeEmergencyTier, false);
   });
 
+  it("completes inventory before discovering a dynamic-GPU Pod", async () => {
+    const dynamicGpuId = "catalog-pro-4500-sequential-v1";
+    const provider = new FakeRunPodProvider({
+      inventory: [makeOffer({
+        gpuId: dynamicGpuId,
+        policyKey: "rtx_pro_4500_blackwell",
+        coldPriority: 1,
+        displayName: "RTX PRO 4500 Blackwell",
+        memoryGb: 32,
+      })],
+      pods: [makePod({
+        id: "dynamicsequential1",
+        status: "provisioning",
+        gpuId: dynamicGpuId,
+        gpuDisplayName: "RTX PRO 4500 Blackwell",
+      })],
+    });
+    const controller = makeController(provider);
+    const inventoryGate = deferred();
+    const inventoryStarted = deferred();
+    const originalListGpuInventory = provider.listGpuInventory.bind(provider);
+    const originalListImageForgePods = provider.listImageForgePods.bind(provider);
+    const events: string[] = [];
+
+    provider.listGpuInventory = (async (request, signal) => {
+      events.push("inventory:start");
+      inventoryStarted.resolve();
+      await inventoryGate.promise;
+      const inventory = await originalListGpuInventory(request, signal);
+      events.push("inventory:complete");
+      return inventory;
+    }) as typeof provider.listGpuInventory;
+    provider.listImageForgePods = (async (criteria, signal) => {
+      events.push("pods:start");
+      const pods = await originalListImageForgePods(criteria, signal);
+      events.push("pods:complete");
+      return pods;
+    }) as typeof provider.listImageForgePods;
+
+    const refresh = controller.refresh();
+    await inventoryStarted.promise;
+    const eventsBeforeInventoryCompleted = [...events];
+    inventoryGate.resolve();
+    const snapshot = await refresh;
+
+    assert.deepEqual(eventsBeforeInventoryCompleted, ["inventory:start"]);
+    assert.deepEqual(events, [
+      "inventory:start",
+      "inventory:complete",
+      "pods:start",
+      "pods:complete",
+    ]);
+    assert.deepEqual(snapshot.pods.map((pod) => pod.id), ["dynamicsequential1"]);
+  });
+
+  it("allows two sequential bounded stages to use the expanded refresh budget", async (test) => {
+    test.mock.timers.enable({ apis: ["setTimeout"] });
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()] });
+    const controller = makeController(provider, {
+      configOverrides: { operationTimeoutMs: 100 },
+    });
+    const inventoryStarted = deferred();
+    const inventoryCompleted = deferred();
+    const podDiscoveryStarted = deferred();
+    const podDiscoveryCompleted = deferred();
+    const originalListGpuInventory = provider.listGpuInventory.bind(provider);
+    const originalListImageForgePods = provider.listImageForgePods.bind(provider);
+
+    provider.listGpuInventory = (async (request, signal) => {
+      inventoryStarted.resolve();
+      await new Promise<void>((resolve) => setTimeout(resolve, 60));
+      const inventory = await originalListGpuInventory(request, signal);
+      inventoryCompleted.resolve();
+      return inventory;
+    }) as typeof provider.listGpuInventory;
+    provider.listImageForgePods = (async (criteria, signal) => {
+      podDiscoveryStarted.resolve();
+      await new Promise<void>((resolve) => setTimeout(resolve, 60));
+      const pods = await originalListImageForgePods(criteria, signal);
+      podDiscoveryCompleted.resolve();
+      return pods;
+    }) as typeof provider.listImageForgePods;
+
+    const refresh = controller.refresh();
+    await inventoryStarted.promise;
+    test.mock.timers.tick(60);
+    await inventoryCompleted.promise;
+    await podDiscoveryStarted.promise;
+    test.mock.timers.tick(60);
+    await podDiscoveryCompleted.promise;
+
+    const snapshot = await refresh;
+    assert.equal(snapshot.phase, "offline");
+    assert.equal(provider.calls.inventory.length, 1);
+    assert.equal(provider.calls.list.length, 1);
+  });
+
   it("does not regress an already-selected Pod to selecting during readiness polling", async () => {
     const pod = makePod({ id: "stablepoll1", status: "provisioning" });
     const provider = new FakeRunPodProvider({ inventory: [makeOffer()], pods: [pod] });
