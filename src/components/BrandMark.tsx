@@ -9,31 +9,34 @@ export function BrandMark({ size = 28 }: { size?: number }) {
       height={size}
       viewBox="0 0 32 32"
       role="img"
-      aria-label="ImageForge aperture and spark mark"
+      aria-label="ImageForge forged aperture mark"
     >
       <defs>
-        <linearGradient id={gradientId} x1="5" y1="4" x2="27" y2="29" gradientUnits="userSpaceOnUse">
+        <linearGradient id={gradientId} x1="4" y1="3" x2="29" y2="30" gradientUnits="userSpaceOnUse">
           <stop stopColor="#ff5969" />
+          <stop offset="0.45" stopColor="#ff3f72" />
+          <stop offset="0.72" stopColor="#9a55ff" />
           <stop offset="1" stopColor="#8d5cff" />
         </linearGradient>
+        <radialGradient id={`${gradientId}-core`} cx="0" cy="0" r="1" gradientTransform="translate(14 14) rotate(45) scale(8)" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#8deaff" stopOpacity=".95" />
+          <stop offset="1" stopColor="#2f6fff" stopOpacity="0" />
+        </radialGradient>
       </defs>
-      <path
-        d="M9 3.75h9.25L25.5 11v12.25a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5V8.75a5 5 0 0 1 5-5Z"
-        fill="none"
-        stroke={`url(#${gradientId})`}
-        strokeWidth="2.4"
-        strokeLinejoin="round"
-      />
-      <path d="m18.25 3.75.05 5.7c0 .9.72 1.62 1.62 1.62h5.58" fill="none" stroke="#ff7784" strokeWidth="2.2" />
-      <path
-        d="M9.25 17.7c0-3.17 2.57-5.74 5.75-5.74 2.2 0 4.1 1.23 5.07 3.04l-3.1.02-2.04 3.5-1.55-2.69-3.85 2.23"
-        fill="none"
-        stroke="#f7f4ef"
-        strokeWidth="1.9"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path d="m22.55 18.1.68 1.58 1.58.68-1.58.68-.68 1.58-.68-1.58-1.58-.68 1.58-.68.68-1.58Z" fill="#ff4b62" />
+      <rect x="1" y="1" width="30" height="30" rx="8" fill="#0c122b" stroke="#d8e4ff" strokeOpacity=".16" strokeWidth=".7" />
+      <circle cx="16" cy="16" r="10.2" fill="none" stroke={`url(#${gradientId})`} strokeWidth="2.35" />
+      <circle cx="16" cy="16" r="8.6" fill="#080d22" stroke="#f7f4ef" strokeOpacity=".13" strokeWidth=".35" />
+      <g fill="#f7f4ef" fillOpacity=".95">
+        <path d="M16 8.6c-2.25 0-4.06 1.81-4.06 4.06 0 1.34.65 2.53 1.66 3.25L16 11.72l2.4 4.19a4.02 4.02 0 0 0 1.66-3.25c0-2.25-1.81-4.06-4.06-4.06Z" />
+        <path d="M16 8.6c-2.25 0-4.06 1.81-4.06 4.06 0 1.34.65 2.53 1.66 3.25L16 11.72l2.4 4.19a4.02 4.02 0 0 0 1.66-3.25c0-2.25-1.81-4.06-4.06-4.06Z" transform="rotate(60 16 16)" />
+        <path d="M16 8.6c-2.25 0-4.06 1.81-4.06 4.06 0 1.34.65 2.53 1.66 3.25L16 11.72l2.4 4.19a4.02 4.02 0 0 0 1.66-3.25c0-2.25-1.81-4.06-4.06-4.06Z" transform="rotate(120 16 16)" />
+        <path d="M16 8.6c-2.25 0-4.06 1.81-4.06 4.06 0 1.34.65 2.53 1.66 3.25L16 11.72l2.4 4.19a4.02 4.02 0 0 0 1.66-3.25c0-2.25-1.81-4.06-4.06-4.06Z" transform="rotate(180 16 16)" />
+        <path d="M16 8.6c-2.25 0-4.06 1.81-4.06 4.06 0 1.34.65 2.53 1.66 3.25L16 11.72l2.4 4.19a4.02 4.02 0 0 0 1.66-3.25c0-2.25-1.81-4.06-4.06-4.06Z" transform="rotate(240 16 16)" />
+        <path d="M16 8.6c-2.25 0-4.06 1.81-4.06 4.06 0 1.34.65 2.53 1.66 3.25L16 11.72l2.4 4.19a4.02 4.02 0 0 0 1.66-3.25c0-2.25-1.81-4.06-4.06-4.06Z" transform="rotate(300 16 16)" />
+      </g>
+      <circle cx="16" cy="16" r="2.8" fill="#080d22" stroke="#f7f4ef" strokeOpacity=".84" strokeWidth=".55" />
+      <circle cx="15.5" cy="15.5" r="1.45" fill={`url(#${gradientId}-core)`} />
+      <path d="m25.1 5.3.48 1.18 1.18.48-1.18.48-.48 1.18-.48-1.18-1.18-.48 1.18-.48.48-1.18Z" fill="#77e9ff" />
     </svg>
   );
 }
