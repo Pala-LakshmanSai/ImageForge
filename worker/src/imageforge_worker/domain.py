@@ -24,6 +24,7 @@ from .constants import (
     OUTPUT_WIDTH,
     PREVIEW_HEIGHT,
     PREVIEW_WIDTH,
+    ASPECT_RATIO_DIMENSIONS,
 )
 
 
@@ -74,6 +75,7 @@ NONTERMINAL_IMAGE_STATES = {
 
 
 ReferenceMime = Literal["image/jpeg", "image/png", "image/webp"]
+AspectRatio = Literal["16:9", "1:1", "9:16", "4:3", "3:4"]
 
 
 class ReferenceInput(StrictModel):
@@ -130,6 +132,7 @@ class StoredReference(StrictModel):
 class CreateBatchRequest(StrictModel):
     prompts: list[str] = Field(min_length=1)
     base_seed: int = Field(default=0, ge=0, le=MAX_SEED)
+    aspect_ratio: AspectRatio = "16:9"
     references: list[ReferenceInput] = Field(default_factory=list, max_length=MAX_REFERENCES)
 
     @field_validator("prompts")
@@ -153,13 +156,23 @@ class GenerationSettings(StrictModel):
     model: Literal[MODEL_ID] = MODEL_ID
     revision: Literal[MODEL_REVISION] = MODEL_REVISION
     precision: Literal[MODEL_PRECISION] = MODEL_PRECISION
-    width: Literal[OUTPUT_WIDTH] = OUTPUT_WIDTH
-    height: Literal[OUTPUT_HEIGHT] = OUTPUT_HEIGHT
+    width: int = Field(default=OUTPUT_WIDTH, ge=64, le=2048, multiple_of=8)
+    height: int = Field(default=OUTPUT_HEIGHT, ge=64, le=2048, multiple_of=8)
     steps: Literal[INFERENCE_STEPS] = INFERENCE_STEPS
     guidance: Literal[GUIDANCE_SCALE] = GUIDANCE_SCALE
     jpeg_quality: Literal[JPEG_QUALITY] = JPEG_QUALITY
-    preview_width: Literal[PREVIEW_WIDTH] = PREVIEW_WIDTH
-    preview_height: Literal[PREVIEW_HEIGHT] = PREVIEW_HEIGHT
+    preview_width: int = Field(default=PREVIEW_WIDTH, ge=32, le=PREVIEW_WIDTH)
+    preview_height: int = Field(default=PREVIEW_HEIGHT, ge=32, le=PREVIEW_HEIGHT)
+
+    @classmethod
+    def for_aspect_ratio(cls, aspect_ratio: AspectRatio) -> GenerationSettings:
+        width, height = ASPECT_RATIO_DIMENSIONS[aspect_ratio]
+        # Keep previews proportional while bounding their long edge for cheap
+        # polling and download previews.
+        preview_scale = min(320 / width, 180 / height)
+        preview_width = max(64, min(PREVIEW_WIDTH, int(round(width * preview_scale))))
+        preview_height = max(64, min(PREVIEW_HEIGHT, int(round(height * preview_scale))))
+        return cls(width=width, height=height, preview_width=preview_width, preview_height=preview_height)
 
 
 class BatchOwner(StrictModel):

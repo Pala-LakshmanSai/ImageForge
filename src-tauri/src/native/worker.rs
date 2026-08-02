@@ -23,6 +23,12 @@ pub struct CreateBatchInput {
     pub base_seed: u64,
     #[serde(default)]
     pub references: Vec<ReferenceInput>,
+    #[serde(default = "default_aspect_ratio")]
+    pub aspect_ratio: String,
+}
+
+fn default_aspect_ratio() -> String {
+    "16:9".to_owned()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -430,6 +436,15 @@ fn validate_create_batch(input: &CreateBatchInput) -> NativeResult<()> {
             "Each prompt must contain text and no embedded null character.",
         ));
     }
+    if !matches!(
+        input.aspect_ratio.as_str(),
+        "16:9" | "1:1" | "9:16" | "4:3" | "3:4"
+    ) {
+        return Err(NativeError::new(
+            "batch_invalid",
+            "The selected aspect ratio is not supported.",
+        ));
+    }
     if input.references.len() > MAX_BATCH_REFERENCES
         || input
             .references
@@ -465,6 +480,7 @@ fn create_batch_payload(input: &CreateBatchInput) -> Value {
     json!({
         "prompts": input.prompts,
         "base_seed": input.base_seed,
+        "aspect_ratio": input.aspect_ratio,
         "references": references,
     })
 }
@@ -847,6 +863,7 @@ mod tests {
             prompts: vec!["A realistic editorial photograph".into()],
             base_seed: 42,
             references: vec![],
+            aspect_ratio: "16:9".into(),
         })
         .is_ok());
         let long_prompt = format!("DO-NOT-ECHO-THIS-{}", "x".repeat(5_000));
@@ -854,6 +871,7 @@ mod tests {
             prompts: vec![long_prompt],
             base_seed: 0,
             references: vec![],
+            aspect_ratio: "16:9".into(),
         })
         .is_ok());
         for prompts in [vec![], vec![" ".into()], vec!["contains\0null".into()]] {
@@ -861,6 +879,7 @@ mod tests {
                 prompts,
                 base_seed: 0,
                 references: vec![],
+                aspect_ratio: "16:9".into(),
             })
             .unwrap_err();
             assert_eq!(error.code, "batch_invalid");
@@ -924,9 +943,11 @@ mod tests {
                 mime_type: "image/png".into(),
                 bytes: vec![0x89, 0x50, 0x4e, 0x47],
             }],
+            aspect_ratio: "1:1".into(),
         });
         assert_eq!(payload["prompts"][0], "guided frame");
         assert_eq!(payload["base_seed"], 17);
+        assert_eq!(payload["aspect_ratio"], "1:1");
         assert_eq!(payload["references"][0]["name"], "anchor.png");
         assert_eq!(payload["references"][0]["mime_type"], "image/png");
         assert_eq!(payload["references"][0]["data_hex"], "89504e47");

@@ -8,6 +8,7 @@ import type {
   PodState,
   PromptStatus,
 } from '../domain/types';
+import { DEFAULT_ASPECT_RATIO } from '../domain/aspectRatio';
 import type { LocalDownloadReceipt } from './workerBatchCoordinator';
 import type {
   WorkerBatchState,
@@ -181,6 +182,7 @@ export function projectOwnedManifest(
     estimatedCost,
     lockMessage: null,
     statusMessage: statusMessage(manifest, phase),
+    aspectRatio: DEFAULT_ASPECT_RATIO,
   };
   const assets = prompts.flatMap((prompt): LibraryAsset[] => {
     if (prompt.status !== 'downloaded' || !prompt.filename || !prompt.checksum) return [];
@@ -217,6 +219,7 @@ export function projectBusyBatch(summary: WorkerBatchSummary): BatchState {
     estimatedCost: 0,
     lockMessage: `${summary.progress.completed} of ${summary.progress.total} images are generated.`,
     statusMessage: `${summary.owner.displayName} is generating ${summary.progress.completed} of ${summary.progress.total}`,
+    aspectRatio: DEFAULT_ASPECT_RATIO,
     reportedProgress: {
       total: summary.progress.total,
       completed: summary.progress.completed,

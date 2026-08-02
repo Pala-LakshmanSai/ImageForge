@@ -118,6 +118,7 @@ describe('safe preference persistence', () => {
       elapsedSeconds: 0,
       estimatedSecondsPerImage: 8.4,
       estimatedCost: 0,
+      aspectRatio: '16:9',
       lockMessage: null,
       statusMessage: 'running',
       canManage: true,

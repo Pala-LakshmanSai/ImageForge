@@ -1,3 +1,5 @@
+import type { AspectRatio } from './aspectRatio';
+
 export type ViewId = 'create' | 'progress' | 'library' | 'usage' | 'settings';
 
 export type PodPhase =
@@ -107,6 +109,7 @@ export interface DraftState {
   issues: ValidationIssue[];
   destination: string | null;
   references: BatchReference[];
+  aspectRatio: AspectRatio;
 }
 
 export interface PodState {
@@ -148,6 +151,7 @@ export interface BatchState {
   lockMessage: string | null;
   statusMessage: string;
   references?: BatchReference[];
+  aspectRatio: AspectRatio;
   reportedProgress?: {
     total: number;
     completed: number;
@@ -240,6 +244,7 @@ export type AppAction =
   | { type: 'SET_DESTINATION'; path: string }
   | { type: 'ADD_REFERENCE'; reference: BatchReference }
   | { type: 'REMOVE_REFERENCE'; id: string }
+  | { type: 'SET_ASPECT_RATIO'; aspectRatio: AspectRatio }
   | { type: 'START_POD' }
   | { type: 'SET_POD_PHASE'; phase: PodPhase; progress: number; detail: string; podId?: string; gpu?: string; vram?: string; hourlyRate?: number }
   | { type: 'SYNC_RUNTIME_POD'; pod: PodState }

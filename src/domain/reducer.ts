@@ -1,5 +1,6 @@
 import { parsePromptText, SAMPLE_PROMPTS } from './prompts';
 import { MAX_BATCH_REFERENCES } from './references';
+import { DEFAULT_ASPECT_RATIO } from './aspectRatio';
 import { DEFAULT_STUDIO_PROFILE, emptyCredentialMetadata } from '../adapters/imageForgeAdapter';
 import type {
   AppAction,
@@ -82,6 +83,7 @@ function emptyDraft(): DraftState {
     issues: [],
     destination: null,
     references: [],
+    aspectRatio: DEFAULT_ASPECT_RATIO,
   };
 }
 
@@ -202,6 +204,7 @@ function buildDemoBatch(phase: BatchState['phase'] = 'running'): BatchState {
     estimatedCost: 0.012,
     lockMessage: null,
     statusMessage: phase === 'paused' ? 'Paused after image 009' : 'Generating image 010 of 024',
+    aspectRatio: DEFAULT_ASPECT_RATIO,
   };
 }
 
@@ -220,6 +223,7 @@ export function createDemoState(): AppState {
       issues: [],
       destination: defaultDestinationForPlatform(),
       references: [],
+      aspectRatio: batch.aspectRatio,
     },
     settings: { ...DEFAULT_SETTINGS, userName: 'Lakshman' },
     setup: {
@@ -581,6 +585,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         draft: { ...state.draft, references: state.draft.references.filter((reference) => reference.id !== action.id) },
       };
+    case 'SET_ASPECT_RATIO':
+      if (state.batch && ['running', 'paused', 'validating', 'locked'].includes(state.batch.phase)) return state;
+      return { ...state, draft: { ...state.draft, aspectRatio: action.aspectRatio } };
     case 'START_POD':
       if (state.pod.createRecovery) {
         return {
@@ -749,6 +756,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           lockMessage: null,
           statusMessage: `Validating ${prompts.length} prompts and destination receipts`,
           references: state.draft.references,
+          aspectRatio: state.draft.aspectRatio,
         },
         toast: null,
       };

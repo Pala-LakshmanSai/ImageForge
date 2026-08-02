@@ -83,6 +83,14 @@ describe('appReducer', () => {
     expect(canStartBatch(state)).toBe(false);
   });
 
+  it('stores the selected aspect ratio on the submitted batch', () => {
+    let state = readyDraft(1);
+    state = appReducer(state, { type: 'SET_ASPECT_RATIO', aspectRatio: '9:16' });
+    expect(state.draft.aspectRatio).toBe('9:16');
+    state = appReducer(state, { type: 'START_BATCH', startedAt: '2026-08-01T10:00:00.000Z' });
+    expect(state.batch?.aspectRatio).toBe('9:16');
+  });
+
   it('pauses without advancing, resumes, and keeps completed files on cancellation', () => {
     let state = readyDraft(4);
     state = appReducer(state, { type: 'START_BATCH', startedAt: '2026-08-01T10:00:00.000Z' });
@@ -263,6 +271,7 @@ describe('appReducer', () => {
       elapsedSeconds: 0,
       estimatedSecondsPerImage: 8.4,
       estimatedCost: 0,
+      aspectRatio: '16:9' as const,
       lockMessage: '17 of 400 images are generated.',
       statusMessage: 'Sujal is generating 17 of 400',
       reportedProgress: { total: 400, completed: 17, failed: 0, cancelled: 0, currentIndex: 18 },

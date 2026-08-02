@@ -1,7 +1,7 @@
 from typing import Final
 
 API_SCHEMA_VERSION: Final = 1
-WORKER_VERSION: Final = "0.1.1"
+WORKER_VERSION: Final = "0.1.2"
 
 MODEL_ID: Final = "black-forest-labs/FLUX.2-klein-4B"
 MODEL_REVISION: Final = "e7b7dc27f91deacad38e78976d1f2b499d76a294"
@@ -9,6 +9,13 @@ MODEL_PRECISION: Final = "bfloat16"
 
 OUTPUT_WIDTH: Final = 1280
 OUTPUT_HEIGHT: Final = 720
+ASPECT_RATIO_DIMENSIONS: Final = {
+    "16:9": (1280, 720),
+    "1:1": (1024, 1024),
+    "9:16": (720, 1280),
+    "4:3": (1152, 864),
+    "3:4": (864, 1152),
+}
 INFERENCE_STEPS: Final = 4
 GUIDANCE_SCALE: Final = 1.0
 JPEG_QUALITY: Final = 95

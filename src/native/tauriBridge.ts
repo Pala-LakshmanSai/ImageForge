@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { BatchReference, CredentialKind, CredentialMetadata, CredentialMetadataMap } from '../domain/types';
+import type { AspectRatio } from '../domain/aspectRatio';
 
 export const NATIVE_RUNPOD_API_KEY_SENTINEL = '__IMAGEFORGE_NATIVE_VAULT__';
 
@@ -212,8 +213,9 @@ export function nativeWorkerCreateBatch(
   prompts: string[],
   baseSeed: number,
   references: NativeWorkerReference[] = [],
+  aspectRatio: AspectRatio = '16:9',
 ): Promise<NativeHttpResponse> {
-  return invoke('worker_create_batch', { input: { prompts, baseSeed, references } });
+  return invoke('worker_create_batch', { input: { prompts, baseSeed, references, aspectRatio } });
 }
 
 export function nativeWorkerGetBatch(batchId: string): Promise<NativeHttpResponse> {

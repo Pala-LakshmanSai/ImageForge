@@ -7,6 +7,7 @@ import {
 } from './workerContracts';
 import { MAX_BATCH_REFERENCES, MAX_REFERENCE_BYTES, MAX_REFERENCE_TOTAL_BYTES, isReferenceMimeType } from '../domain/references';
 import type { BatchReference } from '../domain/types';
+import type { AspectRatio } from '../domain/aspectRatio';
 
 export interface WorkerHttpResult {
   status: number;
@@ -25,7 +26,7 @@ export interface LocalDownloadReceipt {
 
 export interface WorkerBatchPort {
   status(): Promise<WorkerHttpResult>;
-  createBatch(prompts: string[], baseSeed: number, references?: WorkerReferencePayload[]): Promise<WorkerHttpResult>;
+  createBatch(prompts: string[], baseSeed: number, references?: WorkerReferencePayload[], aspectRatio?: AspectRatio): Promise<WorkerHttpResult>;
   getBatch(batchId: string): Promise<WorkerHttpResult>;
   pauseBatch(batchId: string): Promise<WorkerHttpResult>;
   resumeBatch(batchId: string): Promise<WorkerHttpResult>;
@@ -132,7 +133,7 @@ export class WorkerBatchCoordinator {
     else this.#receiptCache.delete(batchId);
   }
 
-  async create(prompts: readonly string[], baseSeed: number, references: readonly BatchReference[] = []): Promise<WorkerBatchEvent> {
+  async create(prompts: readonly string[], baseSeed: number, references: readonly BatchReference[] = [], aspectRatio: AspectRatio = '16:9'): Promise<WorkerBatchEvent> {
     if (
       prompts.length < 1 ||
       prompts.some((prompt) => !prompt.trim()) ||
@@ -159,6 +160,7 @@ export class WorkerBatchCoordinator {
       [...prompts],
       baseSeed,
       references.map(({ name, mimeType, bytes }) => ({ name, mimeType, bytes: [...bytes] })),
+      aspectRatio,
     );
     if (result.status === 423) {
       // The authoritative status contains owner/progress without exposing the

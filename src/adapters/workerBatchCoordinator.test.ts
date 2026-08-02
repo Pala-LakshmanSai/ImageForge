@@ -125,6 +125,7 @@ describe('WorkerBatchCoordinator', () => {
       ['A documentary shipyard at dawn'],
       700,
       [{ name: 'anchor.png', mimeType: 'image/png', bytes: [0x89, 0x50, 0x4e, 0x47] }],
+      '16:9',
     );
   });
 

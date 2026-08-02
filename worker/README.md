@@ -16,6 +16,8 @@ It never creates, stops, or terminates a Pod.
 - retries: one initial attempt and two automatic retries
 - prompts: any non-empty finite list; prompt text is preserved without a product
   count or per-prompt byte cap
+- aspect_ratio: one of `16:9`, `1:1`, `9:16`, `4:3`, or `3:4`; the worker
+  derives a fixed, model-safe output size for the selected delivery shape.
 - references: optional batch-level JPEG, PNG, or WebP images (up to 8 files,
   8 MiB each and 32 MiB total); manifests retain only safe metadata and checksums
 
@@ -133,7 +135,7 @@ digest, and results; any failure disqualifies that storage configuration.
 
 ## API behavior
 
-`POST /v1/batches` accepts `{"prompts":[...],"base_seed":0,"references":[{"name":"anchor.png","mime_type":"image/png","data_hex":"..."}]}`.
+`POST /v1/batches` accepts `{"prompts":[...],"base_seed":0,"aspect_ratio":"16:9","references":[{"name":"anchor.png","mime_type":"image/png","data_hex":"..."}]}`.
 References are optional, batch-level, and apply to every prompt; raw bytes are
 stored only as temporary worker files and never copied into prompt text or logs.
 Batch IDs and all paths are server generated. If a lease is already held, the server returns

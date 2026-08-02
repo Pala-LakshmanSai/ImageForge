@@ -19,6 +19,7 @@ import {
 import { useEffect, useRef, useState } from 'react';
 import { canStartBatch } from '../domain/reducer';
 import { isReferenceMimeType, MAX_BATCH_REFERENCES, MAX_REFERENCE_TOTAL_BYTES, normalizeReferenceName, validateReferenceBytes } from '../domain/references';
+import { ASPECT_RATIOS } from '../domain/aspectRatio';
 import type { BatchReference, ReferenceMimeType } from '../domain/types';
 import { TERMINAL_BATCH_PHASES } from '../domain/types';
 import { Button, Eyebrow, PhaseBadge } from '../components/primitives';
@@ -340,10 +341,30 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
             </header>
             <dl className="contract-grid">
               <div><dt>Model</dt><dd>FLUX.2 Klein 4B</dd></div>
-              <div><dt>Output</dt><dd>1280 × 720 JPEG</dd></div>
+              <div><dt>Output</dt><dd>{ASPECT_RATIOS.find((option) => option.value === state.draft.aspectRatio)?.width} × {ASPECT_RATIOS.find((option) => option.value === state.draft.aspectRatio)?.height} JPEG</dd></div>
               <div><dt>Precision</dt><dd>BF16</dd></div>
               <div><dt>Sampling</dt><dd>4 steps · 1.0 guidance</dd></div>
             </dl>
+            <div className="aspect-ratio-picker">
+              <div className="settings-field__label"><span>Aspect ratio</span><small>Choose the delivery shape for every image in this batch.</small></div>
+              <div className="aspect-ratio-grid" role="radiogroup" aria-label="Image aspect ratio">
+                {ASPECT_RATIOS.map((option) => (
+                  <button
+                    type="button"
+                    key={option.value}
+                    className={`aspect-ratio-option ${state.draft.aspectRatio === option.value ? 'aspect-ratio-option--selected' : ''}`}
+                    role="radio"
+                    aria-checked={state.draft.aspectRatio === option.value}
+                    onClick={() => dispatch({ type: 'SET_ASPECT_RATIO', aspectRatio: option.value })}
+                    disabled={destinationLocked}
+                  >
+                    <span className={`aspect-ratio-glyph aspect-ratio-glyph--${option.value.replace(':', '-')}`} aria-hidden="true" />
+                    <strong>{option.label}</strong>
+                    <small>{option.use}</small>
+                  </button>
+                ))}
+              </div>
+            </div>
             <label className="toggle-row">
               <span><strong>Editorial Realism suffix</strong><small>Visible style direction; never rewritten by an LLM.</small></span>
               <input

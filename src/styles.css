@@ -1243,6 +1243,25 @@ textarea:disabled {
   font-weight: 620;
 }
 
+.aspect-ratio-picker { display: flex; flex-direction: column; gap: 9px; margin: 0 0 15px; }
+.settings-field__label { display: flex; flex-direction: column; gap: 4px; }
+.settings-field__label > span { color: var(--text-soft); font-size: 10px; font-weight: 680; }
+.settings-field__label > small { color: var(--muted); font-size: 8.5px; line-height: 1.4; }
+.aspect-ratio-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
+.aspect-ratio-option { display: flex; min-width: 0; min-height: 88px; align-items: center; flex-direction: column; justify-content: center; gap: 5px; padding: 8px 4px; border: 1px solid var(--border); border-radius: 12px; background: rgba(5, 8, 20, 0.35); color: var(--text-soft); cursor: pointer; transition: border-color .18s ease, background .18s ease, transform .18s ease; }
+.aspect-ratio-option:hover:not(:disabled) { border-color: rgba(255, 80, 98, .55); transform: translateY(-1px); }
+.aspect-ratio-option--selected { border-color: rgba(255, 80, 98, .92); background: rgba(255, 57, 83, .14); box-shadow: 0 0 0 1px rgba(255, 80, 98, .18) inset; }
+.aspect-ratio-option strong { font: 700 10px/1 var(--font-mono); }
+.aspect-ratio-option small { overflow: hidden; max-width: 100%; color: var(--muted); font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
+.aspect-ratio-glyph { display: block; border: 1px solid currentColor; border-radius: 3px; color: #9eacdb; }
+.aspect-ratio-glyph--16-9 { width: 30px; height: 17px; }
+.aspect-ratio-glyph--1-1 { width: 22px; height: 22px; }
+.aspect-ratio-glyph--9-16 { width: 17px; height: 30px; }
+.aspect-ratio-glyph--4-3 { width: 27px; height: 20px; }
+.aspect-ratio-glyph--3-4 { width: 20px; height: 27px; }
+.aspect-ratio-option--selected .aspect-ratio-glyph { color: #ff5364; }
+@media (max-width: 760px) { .aspect-ratio-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+
 .toggle-row {
   position: relative;
   display: flex;

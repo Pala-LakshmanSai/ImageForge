@@ -106,6 +106,34 @@ async def test_ordered_artifacts_checksums_receipts_and_owner_isolation(
 
 
 @pytest.mark.anyio
+async def test_aspect_ratio_is_persisted_and_controls_encoded_dimensions(tmp_path: Path) -> None:
+    expected = {
+        "16:9": (1280, 720),
+        "1:1": (1024, 1024),
+        "9:16": (720, 1280),
+        "4:3": (1152, 864),
+        "3:4": (864, 1152),
+    }
+    async with worker_client(tmp_path / "volume") as (client, _, _):
+        for ratio, dimensions in expected.items():
+            created = await client.post(
+                "/v1/batches",
+                json={"prompts": [f"ratio {ratio}"], "aspect_ratio": ratio},
+                headers=auth(),
+            )
+            assert created.status_code == 201, created.text
+            manifest = await wait_for_batch(client, created.json()["batch_id"], state="completed")
+            artifact = await client.get(
+                f"/v1/batches/{created.json()['batch_id']}/artifacts/1", headers=auth()
+            )
+            assert artifact.status_code == 200
+            with Image.open(io.BytesIO(artifact.content)) as image:
+                assert image.size == dimensions
+            assert manifest["settings"]["width"] == dimensions[0]
+            assert manifest["settings"]["height"] == dimensions[1]
+
+
+@pytest.mark.anyio
 async def test_batch_references_are_decoded_forwarded_and_persisted_without_raw_bytes(
     tmp_path: Path,
 ) -> None:

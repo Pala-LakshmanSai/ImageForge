@@ -181,6 +181,7 @@ class ProductionRuntime implements ProductionRuntimeFacade {
         batch.prompts.map((prompt) => prompt.text),
         batch.prompts[0]?.seed ?? 0,
         batch.references ?? [],
+        batch.aspectRatio,
       );
     } catch (error) {
       this.#emitError('batch', error, 'ImageForge could not create the batch.');

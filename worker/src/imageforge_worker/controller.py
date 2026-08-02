@@ -239,6 +239,7 @@ class GenerationController:
                 state=BatchState.RUNNING,
                 created_at=now,
                 updated_at=now,
+                settings=GenerationSettings.for_aspect_ratio(request.aspect_ratio),
                 references=[reference.metadata for reference in prepared_references],
                 images=images,
                 progress=BatchProgress(total=len(images)),
