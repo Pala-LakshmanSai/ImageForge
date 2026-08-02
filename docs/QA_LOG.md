@@ -424,9 +424,9 @@ the recovery poll observes it.
   `Refreshing`; it no longer implies that a billed GPU start occurred.
 - Added an explicit `IMAGEFORGE_NATIVE_SMOKE=1` test-only mode. The bundled
   Tauri webview exercises first-run onboarding, fake GPU readiness, fake batch
-  launch, and folder reveal, and reports a pass marker through a narrow native
-  command. Production startup never enables this mode or selects the fake
-  adapter.
+  launch, reference-image add/remove/re-add, and folder reveal, and reports a
+  pass marker through a narrow native command. Production startup never enables
+  this mode or selects the fake adapter.
 - Desktop CI now builds and verifies both macOS Apple-silicon and Windows x64
   artifacts and emits per-artifact SHA-256, version, commit, architecture, and
   signing/notarization metadata. The native workflow smoke runs on unlocked

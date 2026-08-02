@@ -18,7 +18,10 @@ async function waitFor<T>(description: string, read: () => T | null, timeoutMs =
 
 function buttonMatching(pattern: RegExp): HTMLButtonElement | null {
   return Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
-    .find((button) => !button.disabled && pattern.test(visibleText(button))) ?? null;
+    .find((button) => {
+      const name = `${button.getAttribute('aria-label') ?? ''} ${button.getAttribute('title') ?? ''} ${visibleText(button)}`.trim();
+      return !button.disabled && pattern.test(name);
+    }) ?? null;
 }
 
 async function clickButton(description: string, pattern: RegExp): Promise<void> {
@@ -37,6 +40,20 @@ function setInputValue(input: HTMLInputElement | HTMLTextAreaElement, value: str
 async function fill(description: string, selector: string, value: string): Promise<void> {
   const input = await waitFor(description, () => document.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector));
   setInputValue(input, value);
+}
+
+async function attachReference(): Promise<void> {
+  const input = await waitFor('reference-image input', () => document.querySelector<HTMLInputElement>('#reference-files'));
+  const pngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZgpcAAAAASUVORK5CYII=';
+  const bytes = Uint8Array.from(window.atob(pngBase64), (character) => character.charCodeAt(0));
+  const transfer = new DataTransfer();
+  transfer.items.add(new File([bytes], 'smoke-reference.png', { type: 'image/png' }));
+  input.files = transfer.files;
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+  await waitFor('reference preview card', () => {
+    const grid = document.querySelector('[aria-label="1 batch references"]');
+    return grid?.textContent?.includes('smoke-reference.png') ? true : null;
+  });
 }
 
 async function record(passed: boolean, detail: string): Promise<void> {
@@ -61,11 +78,15 @@ export async function runNativeSmoke(): Promise<void> {
     await waitFor('setup dialog to close', () => document.querySelector('[role="dialog"]') === null ? true : null);
     await clickButton('sample brief', /Load sample brief/);
     await clickButton('output folder chooser', /Choose output folder/);
+    await attachReference();
+    await clickButton('reference removal', /Remove smoke-reference\.png/);
+    await waitFor('reference removal to finish', () => document.querySelector('[aria-label="1 batch references"]') === null ? true : null);
+    await attachReference();
     await clickButton('fake Start GPU control', /^Start GPU$/);
     await waitFor('fake GPU readiness', () => buttonMatching(/Stop GPU/) ? true : null);
     await clickButton('fake batch launch', /Generate \d+ ordered images/);
     await clickButton('folder reveal control', /Reveal folder/);
-    await record(true, 'onboarding, fake GPU lifecycle, fake batch launch, and folder reveal passed');
+    await record(true, 'onboarding, reference add/remove/re-add, fake GPU lifecycle, fake batch launch, and folder reveal passed');
   } catch (error) {
     await record(false, error instanceof Error ? error.message : 'Native smoke failed.');
   }

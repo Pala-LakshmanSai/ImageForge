@@ -225,9 +225,14 @@ jobs:
           app_path="$GITHUB_WORKSPACE/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/ImageForge.app"
           dmg_path="$GITHUB_WORKSPACE/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge_0.1.0_aarch64.dmg"
           smoke_result="$RUNNER_TEMP/imageforge-native-smoke-result.txt"
+          binary_path="$(find "$app_path/Contents/MacOS" -maxdepth 1 -type f -perm -111 -print | head -n 1)"
+          if [ -z "$binary_path" ] || [ ! -x "$binary_path" ]; then
+            echo 'ImageForge bundle executable was not found.' >&2
+            exit 1
+          fi
           codesign --verify --deep --strict --verbose=2 "$app_path"
           hdiutil verify "$dmg_path"
-          IMAGEFORGE_NATIVE_SMOKE=1 IMAGEFORGE_NATIVE_SMOKE_RESULT="$smoke_result" "$app_path/Contents/MacOS/ImageForge" &
+          IMAGEFORGE_NATIVE_SMOKE=1 IMAGEFORGE_NATIVE_SMOKE_RESULT="$smoke_result" "$binary_path" &
           app_pid=$!
           smoke_deadline=$((SECONDS + 60))
           while [ ! -f "$smoke_result" ] && [ "$SECONDS" -lt "$smoke_deadline" ]; do sleep 1; done
@@ -236,7 +241,7 @@ jobs:
             kill "$app_pid" 2>/dev/null || true
             exit 1
           fi
-          app_pid="$(pgrep -f "$app_path/Contents/MacOS/ImageForge" | head -n 1 || true)"
+          app_pid="$(pgrep -f "$binary_path" | head -n 1 || true)"
           if [ -z "$app_pid" ]; then
             echo 'ImageForge did not remain alive after launch.' >&2
             exit 1
