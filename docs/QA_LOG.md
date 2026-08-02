@@ -384,3 +384,11 @@ the recovery poll observes it.
   `worker/tests/test_endurance.py` passed separately in 8.56s: 450 ordered
   prompts, pause, second-client `batch_busy`, process restart, resume, and
   final artifact checksum/order validation.
+- Clean browser interaction pass after stopping concurrent build writers:
+  first-run setup, two local PNG references, preview metadata and removal,
+  re-add, fake RTX 4090 start, 24-prompt launch, streamed verified downloads,
+  cancellation with completed files retained, and explicit GPU termination
+  all passed; browser console warnings/errors were empty. A prior attempted
+  pass was reset by Vite full-page reloads caused by concurrent TypeScript
+  build output under `packages/runpod-client/dist`, not by the application;
+  the clean rerun had no reloads.
