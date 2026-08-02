@@ -98,7 +98,8 @@ export function SetupAssistant({
       setBusy(true);
       try {
         await saveCredential(credentialOnlyKind, value);
-        dispatch({ type: 'SHOW_TOAST', tone: 'success', title: 'Worker credential replaced', message: 'Try the batch again. The new token stays in the operating-system vault.' });
+        const label = credentialOnlyKind === 'runpodApiKey' ? 'RunPod API key' : 'Worker credential';
+        dispatch({ type: 'SHOW_TOAST', tone: 'success', title: `${label} replaced`, message: `The new ${label.toLowerCase()} stays in the operating-system vault.` });
         onClose?.();
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : 'Could not save that credential.');

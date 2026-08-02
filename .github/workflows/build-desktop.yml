@@ -90,6 +90,7 @@ jobs:
           }
 
           $installRoot = Join-Path $env:RUNNER_TEMP 'imageforge-native-smoke'
+          $smokeResult = Join-Path $env:RUNNER_TEMP 'imageforge-native-smoke-result.txt'
           $appProcess = $null
           try {
             if (Test-Path -LiteralPath $installRoot) {
@@ -117,7 +118,10 @@ jobs:
               throw "NSIS uninstaller was not found at $uninstaller."
             }
 
-            $appProcess = Start-Process -FilePath $installedExe -WorkingDirectory $installRoot -PassThru
+            $appProcess = Start-Process -FilePath $installedExe -WorkingDirectory $installRoot -PassThru -Environment @{
+              IMAGEFORGE_NATIVE_SMOKE = '1'
+              IMAGEFORGE_NATIVE_SMOKE_RESULT = $smokeResult
+            }
             Start-Sleep -Seconds 5
             $appProcess.Refresh()
             if ($appProcess.HasExited) {
@@ -127,6 +131,17 @@ jobs:
               throw 'ImageForge stayed alive but did not create a native application window.'
             }
             Write-Host "Native Windows launch smoke passed (PID $($appProcess.Id), window handle $($appProcess.MainWindowHandle))."
+            $smokeDeadline = (Get-Date).AddSeconds(60)
+            while (-not (Test-Path -LiteralPath $smokeResult) -and (Get-Date) -lt $smokeDeadline) {
+              Start-Sleep -Seconds 1
+            }
+            if (-not (Test-Path -LiteralPath $smokeResult)) {
+              throw 'Packaged Windows fake/onboarding smoke did not report a result.'
+            }
+            $smokeReport = Get-Content -Raw -LiteralPath $smokeResult
+            if ($smokeReport -notmatch '(?m)^PASS$') {
+              throw "Packaged Windows fake/onboarding smoke failed: $smokeReport"
+            }
           }
           finally {
             if ($null -ne $appProcess -and -not $appProcess.HasExited) {
@@ -145,9 +160,118 @@ jobs:
             }
           }
 
+      - name: Write Windows release metadata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundleDir = Join-Path $env:GITHUB_WORKSPACE 'src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis'
+          $installer = @(Get-ChildItem -LiteralPath $bundleDir -Filter '*-setup.exe' -File)
+          if ($installer.Count -ne 1) {
+            throw "Expected exactly one NSIS installer for metadata; found $($installer.Count)."
+          }
+          $package = Get-Content -Raw -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'package.json') | ConvertFrom-Json
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer[0].FullName).Hash.ToLowerInvariant()
+          [ordered]@{
+            product = 'ImageForge'
+            version = [string]$package.version
+            commit = $env:GITHUB_SHA
+            os = 'Windows'
+            architecture = 'x86_64'
+            artifact = $installer[0].Name
+            sha256 = $hash
+            signing = 'unsigned beta installer'
+            notarization = 'not applicable'
+            native_smoke = 'install, WebView2 detection, launch with native window handle, cleanup'
+          } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 -LiteralPath (Join-Path $bundleDir 'ImageForge-windows-release-metadata.json')
+
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:
           name: imageforge-windows-x64-nsis
-          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ImageForge-windows-release-metadata.json
+          if-no-files-found: error
+
+  macos:
+    name: macOS Apple silicon beta
+    runs-on: macos-14
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Run frontend tests
+        run: npm test
+
+      - name: Run TypeScript checks and production build
+        run: npm run typecheck && npm run build
+
+      - name: Build macOS Apple-silicon app and DMG
+        run: npm run tauri:build -- --target aarch64-apple-darwin --bundles app,dmg
+
+      - name: Verify, launch, and stop macOS artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_path="$GITHUB_WORKSPACE/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/ImageForge.app"
+          dmg_path="$GITHUB_WORKSPACE/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge_0.1.0_aarch64.dmg"
+          smoke_result="$RUNNER_TEMP/imageforge-native-smoke-result.txt"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          hdiutil verify "$dmg_path"
+          IMAGEFORGE_NATIVE_SMOKE=1 IMAGEFORGE_NATIVE_SMOKE_RESULT="$smoke_result" "$app_path/Contents/MacOS/ImageForge" &
+          app_pid=$!
+          smoke_deadline=$((SECONDS + 60))
+          while [ ! -f "$smoke_result" ] && [ "$SECONDS" -lt "$smoke_deadline" ]; do sleep 1; done
+          if [ ! -f "$smoke_result" ] || ! grep -q '^PASS$' "$smoke_result"; then
+            cat "$smoke_result" 2>/dev/null || true
+            kill "$app_pid" 2>/dev/null || true
+            exit 1
+          fi
+          app_pid="$(pgrep -f "$app_path/Contents/MacOS/ImageForge" | head -n 1 || true)"
+          if [ -z "$app_pid" ]; then
+            echo 'ImageForge did not remain alive after launch.' >&2
+            exit 1
+          fi
+          kill "$app_pid"
+
+      - name: Write macOS release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_dir="$GITHUB_WORKSPACE/src-tauri/target/aarch64-apple-darwin/release/bundle"
+          dmg_path="$bundle_dir/dmg/ImageForge_0.1.0_aarch64.dmg"
+          version="$(node -p "require('./package.json').version")"
+          hash="$(shasum -a 256 "$dmg_path" | awk '{print $1}')"
+          cat > "$bundle_dir/dmg/ImageForge-macos-release-metadata.json" <<EOF
+          {
+            "product": "ImageForge",
+            "version": "$version",
+            "commit": "$GITHUB_SHA",
+            "os": "macOS",
+            "architecture": "aarch64",
+            "artifact": "$(basename "$dmg_path")",
+            "sha256": "$hash",
+            "signing": "ad-hoc signed beta",
+            "notarization": "not notarized",
+            "native_smoke": "codesign, DMG verification, launch, process liveness"
+          }
+          EOF
+
+      - name: Upload macOS bundle and DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: imageforge-macos-aarch64-beta
+          path: |
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/ImageForge.app
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge_0.1.0_aarch64.dmg
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge-macos-release-metadata.json
           if-no-files-found: error

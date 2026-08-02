@@ -24,6 +24,7 @@ const NAV_ITEMS: Array<{ id: ViewId; label: string; icon: typeof Sparkles }> = [
 ];
 
 function podLabel(phase: PodPhase) {
+  if (phase === 'selecting') return 'checking inventory';
   return phase.replace('_', ' ');
 }
 
@@ -131,7 +132,7 @@ export function TopBar({ state, dispatch }: { state: AppState; dispatch: Dispatc
             disabled={podBusy || state.pod.createRecovery !== null}
             onClick={() => dispatch({ type: 'START_POD' })}
           >
-            {podBusy ? 'Starting' : 'Start GPU'}
+            {state.pod.phase === 'selecting' ? 'Refreshing' : podBusy ? 'Starting' : 'Start GPU'}
           </Button>
         )}
       </div>

@@ -87,6 +87,7 @@ export interface NativeRunPodCreateMarkerMetadata {
 declare global {
   interface Window {
     __TAURI_INTERNALS__?: unknown;
+    __IMAGEFORGE_NATIVE_SMOKE__?: boolean;
   }
 }
 

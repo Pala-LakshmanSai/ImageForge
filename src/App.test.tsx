@@ -95,6 +95,21 @@ describe('ImageForge shell', () => {
     expect(production.adapter.runPodLifecycle).not.toHaveBeenCalled();
   });
 
+  it('labels a read-only inventory refresh without implying that a GPU is starting', () => {
+    let state = createConfiguredInitialState();
+    state = appReducer(state, {
+      type: 'SET_POD_PHASE',
+      phase: 'selecting',
+      progress: 4,
+      detail: 'Checking approved Secure GPUs in EU-RO-1',
+    });
+    render(<App initialState={state} adapter={immediateAdapter()} />);
+
+    expect(screen.getByText('checking inventory')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Refreshing' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Starting' })).not.toBeInTheDocument();
+  });
+
   it('routes production batch controls to the authoritative runtime without optimistic fake state', async () => {
     const user = userEvent.setup();
     const production = productionAdapter();
@@ -374,5 +389,33 @@ describe('ImageForge shell', () => {
 
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(screen.getByText('Worker credential replaced')).toBeVisible();
+  });
+
+  it('allows replacing the RunPod API key while an idle GPU remains attached', async () => {
+    const user = userEvent.setup();
+    const production = productionAdapter();
+    let state = createConfiguredInitialState();
+    state.activeView = 'settings';
+    state = appReducer(state, {
+      type: 'SET_POD_PHASE',
+      phase: 'ready',
+      progress: 100,
+      detail: 'Model warm',
+      podId: 'pod-ui-test',
+      gpu: 'RTX 4090',
+      vram: '24 GB',
+      hourlyRate: 0.54,
+    });
+    render(<App initialState={state} adapter={production.adapter} />);
+
+    const replaceButtons = screen.getAllByRole('button', { name: 'Replace' });
+    expect(replaceButtons[0]).toBeEnabled();
+    await user.click(replaceButtons[0]);
+    const apiKey = screen.getByLabelText('RunPod API key');
+    await user.type(apiKey, 'runpod-secret-new');
+    await user.click(screen.getByRole('button', { name: 'Save RunPod API key' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.getByText('RunPod API key replaced')).toBeVisible();
   });
 });

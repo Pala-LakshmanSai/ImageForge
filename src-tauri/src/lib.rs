@@ -8,6 +8,7 @@ use native::{
 };
 use serde::Serialize;
 use serde_json::Value;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::webview::{NewWindowResponse, WebviewWindowBuilder};
@@ -466,13 +467,49 @@ async fn reconcile_receipts(
         .await
 }
 
+#[tauri::command]
+fn native_smoke_result(passed: bool, detail: String) -> NativeResult<()> {
+    if std::env::var("IMAGEFORGE_NATIVE_SMOKE").ok().as_deref() != Some("1") {
+        return Err(NativeError::new(
+            "native_smoke_disabled",
+            "Native smoke reporting is only available in an explicit test process.",
+        ));
+    }
+    if detail.len() > 240 || detail.chars().any(char::is_control) {
+        return Err(NativeError::new(
+            "native_smoke_invalid",
+            "Native smoke detail is invalid.",
+        ));
+    }
+    let path = std::env::var_os("IMAGEFORGE_NATIVE_SMOKE_RESULT").ok_or_else(|| {
+        NativeError::new(
+            "native_smoke_unconfigured",
+            "Native smoke result path is not configured.",
+        )
+    })?;
+    let result = if passed { "PASS" } else { "FAIL" };
+    fs::write(path, format!("{result}\n{detail}\n")).map_err(|_| {
+        NativeError::new(
+            "native_smoke_write_failed",
+            "The native smoke result could not be written.",
+        )
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let state = NativeState::new().expect("ImageForge secure native state failed to initialize");
     tauri::Builder::default()
         .manage(state)
         .setup(|app| {
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+            let smoke_mode = std::env::var("IMAGEFORGE_NATIVE_SMOKE").ok().as_deref() == Some("1");
+            let mut builder =
+                WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()));
+            if smoke_mode {
+                builder =
+                    builder.initialization_script("window.__IMAGEFORGE_NATIVE_SMOKE__ = true;");
+            }
+            builder
                 .title("ImageForge")
                 .inner_size(1440.0, 900.0)
                 .min_inner_size(900.0, 650.0)
@@ -518,6 +555,7 @@ pub fn run() {
             download_artifact,
             read_receipt_ledger,
             reconcile_receipts,
+            native_smoke_result,
         ])
         .run(tauri::generate_context!())
         .expect("ImageForge native host failed to start");

@@ -9,6 +9,8 @@ use std::sync::{Arc, Mutex};
 const SERVICE: &str = "com.imageforge.desktop";
 const MIN_SECRET_LENGTH: usize = 8;
 const MAX_SECRET_LENGTH: usize = 4096;
+const MIN_WORKER_TOKEN_LENGTH: usize = 16;
+const MAX_WORKER_TOKEN_LENGTH: usize = 512;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
@@ -118,16 +120,18 @@ fn validate_secret(value: &str) -> NativeResult<()> {
     Ok(())
 }
 
-fn validate_kind_specific(_kind: CredentialKind, value: &str) -> NativeResult<()> {
-    if !value.is_ascii()
-        || !value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'+' | b'/' | b'=')
-        })
+fn validate_kind_specific(kind: CredentialKind, value: &str) -> NativeResult<()> {
+    if kind == CredentialKind::WorkerToken
+        && (!(MIN_WORKER_TOKEN_LENGTH..=MAX_WORKER_TOKEN_LENGTH).contains(&value.len())
+            || !value.is_ascii()
+            || !value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'+' | b'/' | b'=')
+            }))
     {
         return Err(NativeError::new(
             "credential_invalid",
-            "Worker tokens must use the standard ASCII bearer-token alphabet.",
+            "Worker tokens must be 16–512 ASCII bearer-token characters.",
         ));
     }
     Ok(())
@@ -231,5 +235,22 @@ mod tests {
             assert_eq!(error.code, "credential_invalid");
             assert!(!error.message.contains(value));
         }
+    }
+
+    #[test]
+    fn worker_token_validation_matches_worker_runtime_limits() {
+        let vault = MemoryVault::default();
+        for value in ["a".repeat(15), "a".repeat(513)] {
+            let error = vault
+                .replace(CredentialKind::WorkerToken, &value)
+                .unwrap_err();
+            assert_eq!(error.code, "credential_invalid");
+        }
+        assert!(vault
+            .replace(CredentialKind::WorkerToken, &"a".repeat(16))
+            .is_ok());
+        assert!(vault
+            .replace(CredentialKind::RunpodApiKey, "shortkey")
+            .is_ok());
     }
 }

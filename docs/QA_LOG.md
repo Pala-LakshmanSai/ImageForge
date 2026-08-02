@@ -411,3 +411,28 @@ the recovery poll observes it.
 - The existing GitHub prerelease remains tied to `c5964ac` and its previously
   published hashes; the newer `b5df0bb` artifacts have not been silently
   substituted.
+
+## Cross-platform hardening — pending native workflow run
+
+- Fixed idle-Pod RunPod API-key recovery: replacing the API key is now allowed
+  while an attached Pod is idle and remains blocked during an active batch.
+  Worker-token validation now matches the worker's 16–512-character bearer
+  contract. The worker Docker healthcheck now requires both `phase=ready` and
+  `model.status=ready`, so a process in a boot-error phase cannot appear
+  healthy.
+- Read-only RunPod inventory refresh now says `checking inventory` /
+  `Refreshing`; it no longer implies that a billed GPU start occurred.
+- Added an explicit `IMAGEFORGE_NATIVE_SMOKE=1` test-only mode. The bundled
+  Tauri webview exercises first-run onboarding, fake GPU readiness, fake batch
+  launch, and folder reveal, and reports a pass marker through a narrow native
+  command. Production startup never enables this mode or selects the fake
+  adapter.
+- Desktop CI now builds and verifies both macOS Apple-silicon and Windows x64
+  artifacts and emits per-artifact SHA-256, version, commit, architecture, and
+  signing/notarization metadata. The native workflow smoke runs on unlocked
+  platform runners; this locked Mac could verify the rebuilt DMG's strict
+  signature and `hdiutil` checksum but could not complete its WebKit UI smoke.
+- Rebuilt current Apple-silicon DMG SHA-256:
+  `357e74ffc29dd1c858028c2d8bd32a4a65a6fbadeefc211a2144d6f629336847`.
+  It is ad-hoc signed and not notarized. The public GitHub prerelease remains
+  unchanged until an explicitly authorized publish step.

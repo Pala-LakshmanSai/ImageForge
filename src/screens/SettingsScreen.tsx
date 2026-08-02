@@ -126,7 +126,7 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
                 <span className="credential-card__icon"><KeyRound size={18} /></span>
                 <div><strong>RunPod restricted API key</strong><small>{state.setup.credentials.runpodApiKey.configured ? `Configured · suffix •••• ${state.setup.credentials.runpodApiKey.suffix} · ${state.setup.credentials.runpodApiKey.provider}` : `Not configured · ${state.setup.credentials.runpodApiKey.provider}`}</small></div>
                 <PhaseBadge tone={state.setup.credentials.runpodApiKey.configured ? 'success' : 'warning'}>{state.setup.credentials.runpodApiKey.configured ? 'configured' : 'required'}</PhaseBadge>
-                <Button compact disabled={productionLocked} onClick={() => openSetup(1)}>Replace</Button>
+                <Button compact disabled={activeBatch} onClick={() => openSetup(1, 'runpodApiKey')}>Replace</Button>
               </article>
               <article className="credential-card">
                 <span className="credential-card__icon"><LockKeyhole size={18} /></span>
@@ -200,7 +200,7 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
           </section> : null}
         </div>
       </div>
-      {showSetup ? <SetupAssistant key={`setup-${setupInitialStep}-${credentialOnlyKind ?? 'full'}`} state={state} dispatch={dispatch} adapter={adapter} initialStep={setupInitialStep} locked={productionLocked} credentialOnlyKind={credentialOnlyKind} onClose={() => setShowSetup(false)} /> : null}
+      {showSetup ? <SetupAssistant key={`setup-${setupInitialStep}-${credentialOnlyKind ?? 'full'}`} state={state} dispatch={dispatch} adapter={adapter} initialStep={setupInitialStep} locked={credentialOnlyKind ? activeBatch : productionLocked} credentialOnlyKind={credentialOnlyKind} onClose={() => setShowSetup(false)} /> : null}
     </div>
   );
 }
