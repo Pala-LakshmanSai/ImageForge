@@ -25,7 +25,11 @@ jobs:
       - name: Normalize image name
         id: image
         shell: bash
-        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/imageforge-worker" >> "$GITHUB_OUTPUT"
+        # The original imageforge-worker package is linked to a separate
+        # repository and rejects the ImageForge repository's GITHUB_TOKEN.
+        # Publish the production image under a package owned by this repo so
+        # the workflow's packages:write permission is effective.
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/imageforge-worker-prod" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
