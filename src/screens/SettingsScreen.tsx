@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { useState } from 'react';
 import type { OperationalScenario } from '../domain/types';
+import { aspectRatioOption } from '../domain/aspectRatio';
 import { Button, Eyebrow, PhaseBadge } from '../components/primitives';
 import { SetupAssistant } from '../components/SetupAssistant';
 import type { ScreenProps } from './types';
@@ -176,7 +177,7 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
 
           <section className="panel settings-panel">
             <SettingSectionTitle icon={Sparkles} eyebrow="Generation defaults" title="Portable render contract" />
-            <div className="fixed-contract"><div><span>Model</span><strong>black-forest-labs/<br />FLUX.2-klein-4B</strong></div><div><span>Precision</span><strong>BF16</strong></div><div><span>Frame</span><strong>1280 × 720</strong></div><div><span>Sampler</span><strong>4 steps · 1.0</strong></div></div>
+            <div className="fixed-contract"><div><span>Model</span><strong>black-forest-labs/<br />FLUX.2-klein-4B</strong></div><div><span>Precision</span><strong>BF16</strong></div><div><span>Frame</span><strong>{aspectRatioOption(state.draft.aspectRatio).label} · per batch</strong></div><div><span>Sampler</span><strong>4 steps · 1.0</strong></div></div>
             <label className="toggle-row"><span><strong>Editorial Realism suffix</strong><small>Visible, deterministic text appended to each prompt.</small></span><input type="checkbox" checked={state.settings.editorialSuffixEnabled} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'editorialSuffixEnabled', value: event.target.checked })} /><i /></label>
             <label className="settings-field"><span>Default appended prompt</span><textarea value={state.settings.editorialSuffix} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'editorialSuffix', value: event.target.value })} aria-describedby="settings-suffix-help" /><small id="settings-suffix-help">Saved as the default for every new batch. The switch controls whether it is appended.</small></label>
           </section>

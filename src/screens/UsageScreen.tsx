@@ -65,7 +65,7 @@ export function UsageScreen({ state, dispatch, adapter }: ScreenProps) {
       <div className="usage-kpis">
         <article><span className="usage-kpi__icon"><Coins size={19} /></span><div><small>Total measured cost</small><strong>${totals.cost.toFixed(3)}</strong><em>across {chartRuns.length} indexed runs</em></div></article>
         <article><span className="usage-kpi__icon"><Gauge size={19} /></span><div><small>Cost per verified image</small><strong>${costPerImage.toFixed(4)}</strong><em>failed slots excluded</em></div></article>
-        <article><span className="usage-kpi__icon"><Clock3 size={19} /></span><div><small>Average generation</small><strong>{avgSeconds.toFixed(1)}s</strong><em>1280 × 720 · four steps</em></div></article>
+        <article><span className="usage-kpi__icon"><Clock3 size={19} /></span><div><small>Average generation</small><strong>{avgSeconds.toFixed(1)}s</strong><em>Selected ratio per batch · four steps</em></div></article>
         <article><span className="usage-kpi__icon"><ShieldCheck size={19} /></span><div><small>Verified output</small><strong>{totals.images}</strong><em>{totals.failed} failed slots recorded</em></div></article>
       </div>
 

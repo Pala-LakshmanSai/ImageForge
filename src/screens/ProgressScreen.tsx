@@ -24,6 +24,7 @@ import {
 import { useEffect, useMemo, useState } from 'react';
 import { batchCounts } from '../domain/reducer';
 import type { BatchPrompt } from '../domain/types';
+import { aspectRatioOption } from '../domain/aspectRatio';
 import { SimulatedImage } from '../components/SimulatedImage';
 import { PreviewImage } from '../components/PreviewImage';
 import { VirtualPromptList } from '../components/VirtualPromptList';
@@ -298,7 +299,7 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
               <blockquote className="preview-prompt">“{selectedPrompt.text}”</blockquote>
               <dl className="preview-details">
                 <div><dt>Seed</dt><dd>{selectedPrompt.seed}</dd></div>
-                <div><dt>Frame</dt><dd>1280 × 720</dd></div>
+                <div><dt>Frame</dt><dd>{aspectRatioOption(state.batch?.aspectRatio ?? '16:9').label} · {aspectRatioOption(state.batch?.aspectRatio ?? '16:9').width} × {aspectRatioOption(state.batch?.aspectRatio ?? '16:9').height}</dd></div>
                 <div><dt>Time</dt><dd>{selectedPrompt.durationSeconds ? `${selectedPrompt.durationSeconds.toFixed(1)} s` : 'measuring'}</dd></div>
                 <div><dt>Receipt</dt><dd>{selectedPrompt.checksum ?? 'pending'}</dd></div>
               </dl>
