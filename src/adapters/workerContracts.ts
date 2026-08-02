@@ -1,3 +1,10 @@
+import { ASPECT_RATIOS } from '../domain/aspectRatio';
+import {
+  MAX_BATCH_REFERENCES,
+  MAX_REFERENCE_BYTES,
+  MAX_REFERENCE_TOTAL_BYTES,
+} from '../domain/references';
+
 const BATCH_STATES = [
   'running',
   'paused',
@@ -151,10 +158,12 @@ function renderSettings(value: unknown): WorkerRenderSettings {
   if (value === undefined) return { width: 1280, height: 720 };
   const item = record(value, 'settings');
   exactKeys(item, ['width', 'height'], 'settings');
-  return {
-    width: renderDimension(item.width, 'settings.width'),
-    height: renderDimension(item.height, 'settings.height'),
-  };
+  const width = renderDimension(item.width, 'settings.width');
+  const height = renderDimension(item.height, 'settings.height');
+  if (!ASPECT_RATIOS.some((option) => option.width === width && option.height === height)) {
+    throw new Error('settings dimensions are not an ImageForge render size.');
+  }
+  return { width, height };
 }
 
 function finite(value: unknown, label: string, minimum = 0): number {
@@ -206,6 +215,7 @@ function progress(value: unknown): WorkerProgress {
     parsed.failed > parsed.total ||
     parsed.cancelled > parsed.total ||
     parsed.processed > parsed.total ||
+    parsed.completed + parsed.failed + parsed.cancelled !== parsed.processed ||
     (parsed.currentIndex !== null && parsed.currentIndex > parsed.total)
   ) {
     throw new Error('progress counters are inconsistent.');
@@ -221,7 +231,7 @@ function summary(value: unknown): WorkerBatchSummary {
     'active_batch',
   );
   return {
-    batchId: string(item.batch_id, 'active_batch.batch_id'),
+    batchId: uuid(item.batch_id, 'active_batch.batch_id'),
     owner: owner(item.owner),
     state: enumeration(item.state, BATCH_STATES, 'active_batch.state'),
     progress: progress(item.progress),
@@ -255,16 +265,30 @@ function checksum(value: unknown, label: string): string {
   return parsed;
 }
 
+function uuid(value: unknown, label: string): string {
+  const parsed = string(value, label);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(parsed)) {
+    throw new Error(`${label} is not a valid batch UUID.`);
+  }
+  return parsed;
+}
+
 function referenceMetadata(value: unknown): WorkerReferenceMetadata {
   const item = record(value, 'manifest reference');
   exactKeys(item, ['name', 'mime_type', 'size_bytes', 'sha256', 'filename'], 'manifest reference');
   const mimeType = enumeration(item.mime_type, ['image/jpeg', 'image/png', 'image/webp'] as const, 'manifest reference.mime_type');
+  const name = string(item.name, 'manifest reference.name');
+  if (name.trim().length === 0 || name.length > 255 || /[\\/\0]/.test(name)) {
+    throw new Error('manifest reference name is invalid.');
+  }
   const filename = string(item.filename, 'manifest reference.filename');
-  if (!/^references\/\d{6}\.(?:jpe?g|png|webp)$/.test(filename)) throw new Error('manifest reference filename is invalid.');
+  if (!/^references\/\d{6}\.(?:jpg|png|webp)$/.test(filename)) throw new Error('manifest reference filename is invalid.');
+  const sizeBytes = integer(item.size_bytes, 'manifest reference.size_bytes', 1);
+  if (sizeBytes > MAX_REFERENCE_BYTES) throw new Error('manifest reference size is invalid.');
   return {
-    name: string(item.name, 'manifest reference.name'),
+    name,
     mimeType,
-    sizeBytes: integer(item.size_bytes, 'manifest reference.size_bytes', 1),
+    sizeBytes,
     sha256: checksum(item.sha256, 'manifest reference.sha256'),
     filename,
   };
@@ -300,19 +324,38 @@ function image(value: unknown, expectedIndex: number): WorkerImageRecord {
   if (filename !== null && filename !== `artifacts/${String(index).padStart(6, '0')}.jpg`) {
     throw new Error('image filename is not the server-generated ordered path.');
   }
+  const prompt = string(item.prompt, 'image.prompt');
+  if (!prompt.trim() || prompt.includes('\0')) throw new Error('image.prompt must contain safe text.');
+  const status = enumeration(item.status, IMAGE_STATES, 'image.status');
+  const sha256 = nullable(item.sha256, (candidate) => checksum(candidate, 'image.sha256'));
+  const sizeBytes = nullable(item.size_bytes, (candidate) => integer(candidate, 'image.size_bytes', 1));
+  const imageReceipt = receipt(item.receipt);
+  if (['ready', 'downloaded'].includes(status) && (filename === null || sha256 === null || sizeBytes === null)) {
+    throw new Error('ready image is missing its durable artifact metadata.');
+  }
+  if (status === 'downloaded' && imageReceipt === null) {
+    throw new Error('downloaded image is missing its receipt.');
+  }
+  if (imageReceipt !== null && (
+    status !== 'downloaded' ||
+    imageReceipt.sha256 !== sha256 ||
+    imageReceipt.sizeBytes !== sizeBytes
+  )) {
+    throw new Error('image receipt does not match its artifact.');
+  }
   return {
     index,
-    prompt: string(item.prompt, 'image.prompt'),
+    prompt,
     seed: integer(item.seed, 'image.seed'),
-    status: enumeration(item.status, IMAGE_STATES, 'image.status'),
+    status,
     attempts: integer(item.attempts, 'image.attempts'),
     retryRounds: integer(item.retry_rounds, 'image.retry_rounds'),
     filename,
-    sha256: nullable(item.sha256, (candidate) => checksum(candidate, 'image.sha256')),
-    sizeBytes: nullable(item.size_bytes, (candidate) => integer(candidate, 'image.size_bytes', 1)),
+    sha256,
+    sizeBytes,
     generationMs: nullable(item.generation_ms, (candidate) => finite(candidate, 'image.generation_ms')),
     error: safeError(item.error),
-    receipt: receipt(item.receipt),
+    receipt: imageReceipt,
   };
 }
 
@@ -338,6 +381,9 @@ export function parseWorkerStatus(value: unknown): WorkerStatus {
   }
   if (parsed.permissions.isOwner && activeBatch === null) {
     throw new Error('worker status cannot name an owner without an active batch.');
+  }
+  if (parsed.permissions.canManageActive && !parsed.permissions.isOwner) {
+    throw new Error('worker status cannot grant mutation access to a non-owner.');
   }
   return parsed;
 }
@@ -375,13 +421,34 @@ export function parseWorkerManifest(value: unknown): WorkerManifest {
     ? []
     : (() => {
         if (!Array.isArray(item.references)) throw new Error('worker manifest references are invalid.');
-        return item.references.map(referenceMetadata);
+        if (item.references.length > MAX_BATCH_REFERENCES) throw new Error('worker manifest references exceed the safe limit.');
+        const parsedReferences = item.references.map(referenceMetadata);
+        if (parsedReferences.reduce((total, reference) => total + reference.sizeBytes, 0) > MAX_REFERENCE_TOTAL_BYTES) {
+          throw new Error('worker manifest references exceed the total safe size.');
+        }
+        return parsedReferences;
       })();
   const parsedProgress = progress(item.progress);
   if (parsedProgress.total !== images.length) throw new Error('worker manifest total does not match its images.');
+  const completed = images.filter((image) => image.status === 'ready' || image.status === 'downloaded').length;
+  const downloaded = images.filter((image) => image.status === 'downloaded').length;
+  const failed = images.filter((image) => image.status === 'failed').length;
+  const cancelled = images.filter((image) => image.status === 'cancelled').length;
+  const generating = images.filter((image) => image.status === 'generating');
+  if (
+    parsedProgress.completed !== completed ||
+    parsedProgress.downloaded !== downloaded ||
+    parsedProgress.failed !== failed ||
+    parsedProgress.cancelled !== cancelled ||
+    parsedProgress.processed !== completed + failed + cancelled ||
+    parsedProgress.currentIndex !== (generating.length === 1 ? generating[0].index : null) ||
+    generating.length > 1
+  ) {
+    throw new Error('worker manifest progress does not match image states.');
+  }
   return {
     schemaVersion: 1,
-    batchId: string(item.batch_id, 'batch_id'),
+    batchId: uuid(item.batch_id, 'batch_id'),
     owner: owner(item.owner),
     state: enumeration(item.state, BATCH_STATES, 'state'),
     createdAt: string(item.created_at, 'created_at'),

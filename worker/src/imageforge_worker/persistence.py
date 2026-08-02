@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import errno
-import fcntl
 import hashlib
 import json
 import os
@@ -13,6 +12,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
 from .domain import (
     LOCK_HOLDING_STATES,
     SUCCESS_STATES,
@@ -23,6 +27,14 @@ from .domain import (
 )
 
 MINIMUM_RETENTION = timedelta(hours=24)
+_WINDOWS_PRESENCE_SLOTS = 256
+
+
+@dataclass(frozen=True, slots=True)
+class _HeldLock:
+    descriptor: int
+    offset: int
+    length: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,9 +96,9 @@ class FileManifestStore:
         self.root = root
         self.batches_root = root / "batches"
         self.fsync_writes = fsync_writes
-        self._worker_presence_descriptor: int | None = None
-        self._maintenance_presence_descriptor: int | None = None
-        self._active_lease_descriptor: int | None = None
+        self._worker_presence_descriptor: _HeldLock | None = None
+        self._maintenance_presence_descriptor: _HeldLock | None = None
+        self._active_lease_descriptor: _HeldLock | None = None
 
     @property
     def active_lease_held(self) -> bool:
@@ -106,7 +118,7 @@ class FileManifestStore:
             return True
         if self._maintenance_presence_descriptor is not None:
             return False
-        descriptor = self._try_acquire_lock(".worker-presence.lock", fcntl.LOCK_SH)
+        descriptor = self._try_acquire_lock(".worker-presence.lock", shared=True)
         if descriptor is None:
             return False
         self._worker_presence_descriptor = descriptor
@@ -124,7 +136,7 @@ class FileManifestStore:
             return True
         if self._worker_presence_descriptor is not None:
             return False
-        descriptor = self._try_acquire_lock(".worker-presence.lock", fcntl.LOCK_EX)
+        descriptor = self._try_acquire_lock(".worker-presence.lock", shared=False)
         if descriptor is None:
             return False
         self._maintenance_presence_descriptor = descriptor
@@ -138,7 +150,7 @@ class FileManifestStore:
     def try_acquire_active_lease(self) -> bool:
         if self._active_lease_descriptor is not None:
             return True
-        descriptor = self._try_acquire_lock(".active-batch.lock", fcntl.LOCK_EX)
+        descriptor = self._try_acquire_lock(".active-batch.lock", shared=False)
         if descriptor is None:
             return False
         self._active_lease_descriptor = descriptor
@@ -149,29 +161,77 @@ class FileManifestStore:
         self._active_lease_descriptor = None
         self._release_lock(descriptor)
 
-    def _try_acquire_lock(self, name: str, operation: int) -> int | None:
+    def _try_acquire_lock(self, name: str, *, shared: bool) -> _HeldLock | None:
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         flags = os.O_RDWR | os.O_CREAT
         if hasattr(os, "O_CLOEXEC"):
             flags |= os.O_CLOEXEC
         descriptor = os.open(self.root / name, flags, 0o600)
+        if os.name == "nt":
+            return self._try_acquire_windows_lock(
+                descriptor,
+                shared=shared,
+                presence=name == ".worker-presence.lock",
+            )
         try:
-            fcntl.flock(descriptor, operation | fcntl.LOCK_NB)
+            fcntl.flock(
+                descriptor,
+                (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB,
+            )
         except OSError as exc:
             os.close(descriptor)
             if exc.errno in {errno.EACCES, errno.EAGAIN}:
                 return None
             raise
-        return descriptor
+        return _HeldLock(descriptor, 0, 0)
 
     @staticmethod
-    def _release_lock(descriptor: int | None) -> None:
-        if descriptor is None:
+    def _try_acquire_windows_lock(
+        descriptor: int,
+        *,
+        shared: bool,
+        presence: bool,
+    ) -> _HeldLock | None:
+        """Use byte-range locks because Windows has no shared flock operation.
+
+        Each worker reserves one byte in the presence file. Maintenance takes the
+        whole 256-byte range, so it cannot start while any worker process is alive.
+        The active-batch file uses the same exclusive range mechanism with one byte.
+        """
+
+        required_size = _WINDOWS_PRESENCE_SLOTS if presence else 1
+        try:
+            if os.fstat(descriptor).st_size < required_size:
+                os.ftruncate(descriptor, required_size)
+            offsets = range(_WINDOWS_PRESENCE_SLOTS) if presence and shared else (0,)
+            length = 1 if presence and shared else required_size
+            for offset in offsets:
+                os.lseek(descriptor, offset, os.SEEK_SET)
+                try:
+                    msvcrt.locking(descriptor, msvcrt.LK_NBLCK, length)
+                except OSError as exc:
+                    if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                        continue
+                    raise
+                return _HeldLock(descriptor, offset, length)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        os.close(descriptor)
+        return None
+
+    @staticmethod
+    def _release_lock(lock: _HeldLock | None) -> None:
+        if lock is None:
             return
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            if os.name == "nt":
+                os.lseek(lock.descriptor, lock.offset, os.SEEK_SET)
+                msvcrt.locking(lock.descriptor, msvcrt.LK_UNLCK, lock.length)
+            else:
+                fcntl.flock(lock.descriptor, fcntl.LOCK_UN)
         finally:
-            os.close(descriptor)
+            os.close(lock.descriptor)
 
     def list_batch_ids(self) -> list[str]:
         if not self.batches_root.exists():

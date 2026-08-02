@@ -48,6 +48,8 @@ export interface NativeDownloadRequest {
   index: number;
   expectedSha256: string;
   expectedSizeBytes: number;
+  expectedWidth: number;
+  expectedHeight: number;
 }
 
 export interface NativeDownloadReceipt {

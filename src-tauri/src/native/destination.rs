@@ -235,7 +235,10 @@ impl DestinationStore {
 
         #[cfg(target_os = "macos")]
         {
-            let mut command = std::process::Command::new("open");
+            // Finder-launched apps do not inherit a user shell PATH. Use the
+            // system tool's stable absolute path so reveal remains functional
+            // and cannot resolve an unrelated executable from PATH.
+            let mut command = std::process::Command::new("/usr/bin/open");
             if canonical_target.is_file() {
                 command.arg("-R");
             }
@@ -249,7 +252,9 @@ impl DestinationStore {
         }
         #[cfg(target_os = "windows")]
         {
-            let mut command = std::process::Command::new("explorer.exe");
+            // Finder-launched/packaged apps must not resolve a shell helper
+            // through the current directory or an attacker-controlled PATH.
+            let mut command = std::process::Command::new(windows_explorer_path()?);
             if canonical_target.is_file() {
                 command.arg(format!("/select,{}", canonical_target.display()));
             } else {
@@ -423,6 +428,21 @@ fn default_record_path() -> NativeResult<PathBuf> {
     let base: Option<PathBuf> = None;
     base.map(|path| path.join("com.imageforge.desktop").join("destination.json"))
         .ok_or_else(destination_record_error)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_explorer_path() -> NativeResult<PathBuf> {
+    let root = std::env::var_os("SystemRoot")
+        .or_else(|| std::env::var_os("WINDIR"))
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(destination_reveal_error)?;
+    let executable = root.join("explorer.exe");
+    if executable.is_file() {
+        Ok(executable)
+    } else {
+        Err(destination_reveal_error())
+    }
 }
 
 fn validate_candidate(candidate: &Path) -> NativeResult<PathBuf> {
@@ -693,6 +713,17 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.volume.is_some());
         assert!(first.index.is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_reveal_uses_the_system_explorer_binary() {
+        let executable = windows_explorer_path().unwrap();
+        assert!(executable.is_absolute());
+        assert_eq!(
+            executable.file_name().and_then(|name| name.to_str()),
+            Some("explorer.exe")
+        );
     }
 
     #[test]

@@ -877,7 +877,16 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         dialog: null,
-        batch: { ...state.batch, phase: 'cancelled', statusMessage: 'Cancelled · completed downloads were kept' },
+        batch: {
+          ...state.batch,
+          phase: 'cancelled',
+          prompts: state.batch.prompts.map((prompt) =>
+            ['generating', 'retrying', 'ready', 'downloading'].includes(prompt.status)
+              ? { ...prompt, status: 'cancelled' as const, failureReason: undefined }
+              : prompt,
+          ),
+          statusMessage: 'Cancelled · completed downloads were kept',
+        },
         ...toast(state, 'warning', 'Batch cancelled', 'Completed images remain in the destination and library.'),
       };
     case 'RETRY_FAILED': {

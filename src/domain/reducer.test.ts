@@ -108,6 +108,26 @@ describe('appReducer', () => {
     expect(state.library).toHaveLength(1);
   });
 
+  it('marks every in-flight prompt cancelled while preserving verified downloads', () => {
+    let state = readyDraft(5);
+    state = appReducer(state, { type: 'START_BATCH', startedAt: '2026-08-01T10:00:00.000Z' });
+    state = {
+      ...state,
+      batch: {
+        ...state.batch!,
+        prompts: state.batch!.prompts.map((prompt, index) => ({
+          ...prompt,
+          status: (['downloaded', 'generating', 'retrying', 'ready', 'downloading'][index] ?? 'pending') as typeof prompt.status,
+        })),
+      },
+    };
+    state = appReducer(state, { type: 'REQUEST_CANCEL_BATCH' });
+    state = appReducer(state, { type: 'CONFIRM_CANCEL_BATCH' });
+    expect(state.batch?.prompts.map((prompt) => prompt.status)).toEqual([
+      'downloaded', 'cancelled', 'cancelled', 'cancelled', 'cancelled',
+    ]);
+  });
+
   it('completes a deterministic 450-prompt run in order and retries only failed slots', () => {
     let state = readyDraft(450);
     state = appReducer(state, { type: 'START_BATCH', startedAt: '2026-08-01T10:00:00.000Z' });

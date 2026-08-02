@@ -9,8 +9,8 @@ The source of truth is the private GitHub repository:
 git clone https://github.com/Pala-LakshmanSai/ImageForge.git
 cd ImageForge
 npm ci
-python3 -m venv worker/.venv
-worker/.venv/bin/pip install -e 'worker[dev]'
+python3.11 -m venv worker/.venv
+worker/.venv/bin/pip install -e 'worker[test]'
 npm run typecheck
 npm test -- --run --pool=forks --maxWorkers=1
 ```

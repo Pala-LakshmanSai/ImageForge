@@ -204,7 +204,7 @@ function podSteps(policy: GpuSelectionPolicy): Array<Omit<PodLifecycleUpdate, 'p
       at: 2_050,
       phase: 'warming',
       progress: 86,
-      detail: 'Warming four-step inference graph at 1280 × 720',
+      detail: 'Warming the four-step inference graph',
       ...selected,
     },
     {

@@ -47,6 +47,28 @@ jobs:
       - name: Build Windows NSIS installer
         run: npm run tauri:build -- --target x86_64-pc-windows-msvc --bundles nsis
 
+      - name: Verify WebView2 runtime on native runner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $runtimeRoots = @(
+            (Join-Path ${env:ProgramFiles(x86)} 'Microsoft\EdgeWebView\Application'),
+            (Join-Path $env:ProgramFiles 'Microsoft\EdgeWebView\Application'),
+            (Join-Path $env:LOCALAPPDATA 'Microsoft\EdgeWebView\Application')
+          )
+          $versions = @(
+            foreach ($root in $runtimeRoots) {
+              if (Test-Path -LiteralPath $root) {
+                Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' }
+              }
+            }
+          )
+          if ($versions.Count -eq 0) {
+            throw 'WebView2 Evergreen runtime was not found on the Windows runner.'
+          }
+          Write-Host "WebView2 runtime detected: $($versions[0].Name)"
+
       # Exercise the artifact on the same native Windows runner that produced
       # it.  The install root is disposable and explicit so this cannot touch
       # a runner-wide installation or leave an app process behind.
@@ -97,10 +119,14 @@ jobs:
 
             $appProcess = Start-Process -FilePath $installedExe -WorkingDirectory $installRoot -PassThru
             Start-Sleep -Seconds 5
+            $appProcess.Refresh()
             if ($appProcess.HasExited) {
               throw "ImageForge exited during the native launch smoke (exit code $($appProcess.ExitCode))."
             }
-            Write-Host "Native Windows launch smoke passed (PID $($appProcess.Id), alive after 5 seconds)."
+            if ($appProcess.MainWindowHandle -eq 0) {
+              throw 'ImageForge stayed alive but did not create a native application window.'
+            }
+            Write-Host "Native Windows launch smoke passed (PID $($appProcess.Id), window handle $($appProcess.MainWindowHandle))."
           }
           finally {
             if ($null -ne $appProcess -and -not $appProcess.HasExited) {

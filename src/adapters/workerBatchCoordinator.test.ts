@@ -10,7 +10,10 @@ import {
 const batchId = '11111111-1111-4111-8111-111111111111';
 const owner = { user_id: 'lakshman', display_name: 'Lakshman' };
 
-function manifest(status: 'ready' | 'downloaded' | 'generating' = 'ready') {
+function manifest(
+  status: 'ready' | 'downloaded' | 'generating' = 'ready',
+  settings: { width: number; height: number } = { width: 1280, height: 720 },
+) {
   const downloaded = status === 'downloaded';
   return {
     schema_version: 1,
@@ -23,6 +26,7 @@ function manifest(status: 'ready' | 'downloaded' | 'generating' = 'ready') {
     interrupted_at: null,
     pause_requested: false,
     cancel_requested: false,
+    settings,
     images: [{
       index: 1,
       prompt: 'A documentary shipyard at dawn',
@@ -107,8 +111,22 @@ describe('WorkerBatchCoordinator', () => {
       index: 1,
       expectedSha256: 'a'.repeat(64),
       expectedSizeBytes: 2_048,
+      expectedWidth: 1280,
+      expectedHeight: 720,
     });
     expect(port.getBatch).toHaveBeenCalledOnce();
+  });
+
+  it('forwards the worker manifest dimensions to native download verification', async () => {
+    const port = fakePort({
+      createBatch: vi.fn(async () => ({ status: 201, body: manifest('ready', { width: 720, height: 1280 }) })),
+    });
+    await new WorkerBatchCoordinator(port).create(['A portrait frame'], 700);
+
+    expect(port.downloadArtifact).toHaveBeenCalledWith(expect.objectContaining({
+      expectedWidth: 720,
+      expectedHeight: 1280,
+    }));
   });
 
   it('forwards batch-level image references without mutating their bytes', async () => {
@@ -209,6 +227,8 @@ describe('WorkerBatchCoordinator', () => {
       index: 1,
       expectedSha256: 'a'.repeat(64),
       expectedSizeBytes: 2_048,
+      expectedWidth: 1280,
+      expectedHeight: 720,
     });
     expect(secondPort.getBatch).toHaveBeenCalledTimes(2);
   });
@@ -260,6 +280,8 @@ describe('WorkerBatchCoordinator', () => {
       index: 1,
       expectedSha256: 'a'.repeat(64),
       expectedSizeBytes: 2_048,
+      expectedWidth: 1280,
+      expectedHeight: 720,
     });
   });
 

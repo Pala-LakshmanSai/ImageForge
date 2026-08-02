@@ -86,6 +86,50 @@ describe('strict worker renderer contracts', () => {
     expect(() => parseWorkerManifest(badIndex)).toThrow('contiguous');
   });
 
+  it('rejects progress that does not reconcile with image states', () => {
+    expect(() => parseWorkerManifest({
+      ...manifest(),
+      progress: { ...progress, failed: 1 },
+    })).toThrow('inconsistent');
+
+    const downloaded = manifest();
+    downloaded.state = 'completed';
+    downloaded.images[0].status = 'downloaded';
+    downloaded.progress = { ...progress, downloaded: 1 };
+    expect(() => parseWorkerManifest(downloaded)).toThrow('receipt');
+
+    const generating = {
+      ...manifest(),
+      progress: { ...progress, completed: 0, processed: 0, current_index: 1 },
+    };
+    generating.state = 'running';
+    generating.images[0].status = 'generating';
+    expect(parseWorkerManifest(generating).progress.currentIndex).toBe(1);
+  });
+
+  it('rejects unsupported render sizes, unsafe references, and ownerless mutation access', () => {
+    expect(() => parseWorkerManifest({
+      ...manifest(),
+      settings: { width: 1000, height: 1000 },
+    })).toThrow('render size');
+    expect(() => parseWorkerManifest({
+      ...manifest(),
+      references: [{
+        name: '../secret.png',
+        mime_type: 'image/png',
+        size_bytes: 1024,
+        sha256: 'a'.repeat(64),
+        filename: 'references/000001.png',
+      }],
+    })).toThrow('name');
+    expect(() => parseWorkerStatus({
+      schema_version: 1,
+      ready: true,
+      active_batch: null,
+      permissions: { can_create: true, can_manage_active: true, is_owner: false },
+    })).toThrow('mutation access');
+  });
+
   it('parses only the safe worker error envelope', () => {
     expect(
       parseWorkerApiError({

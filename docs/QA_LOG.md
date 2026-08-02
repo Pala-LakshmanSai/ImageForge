@@ -314,3 +314,56 @@ the recovery poll observes it.
   is not notarized; distribution remains explicitly ad-hoc/unsigned.
 - Frontend verification: 13 Vitest files, 84 tests passed; typecheck and
   production build passed.
+
+## Final working-tree audit — 2026-08-02
+
+- Frontend: 13 Vitest files, 88 tests passed; typecheck and production build
+  passed. RunPod client: 93 tests passed. Worker: 42 offline tests passed,
+  one paid-GPU test explicitly skipped, and Ruff passed.
+- Windows worker persistence now uses bounded byte-range leases: workers take
+  one presence slot, maintenance reserves the full presence range, and the
+  active-batch lease remains exclusive.
+- Native Rust: 41 library tests passed after adding actual in-memory image
+  decoding for JPEG/PNG/WebP references, all five render dimensions, and
+  corrupt existing-receipt coverage. `cargo check --lib`, formatting, and
+  `git diff --check` passed.
+- Human-style web-shell pass covered first-run setup, folder write test and
+  connection test, 9:16 selection, fake generation, pause, cancel, stale
+  in-flight-row regression, and a 451-prompt paste with no maximum warning.
+- Fresh macOS Apple-silicon release artifact from the target-specific output:
+  `/Volumes/ImageForgeBuild/final-cargo-target/aarch64-apple-darwin/release/bundle/dmg/ImageForge_0.1.0_aarch64.dmg`
+  SHA-256 `9f171efb89ee1cb38f629b67e2181b1ed173937c6572e3aa558483a7ba52386b`.
+  The generated app and the app mounted from this DMG both pass
+  `codesign --verify --deep --strict`; the artifact is explicitly ad-hoc and
+  not notarized. The fresh mounted binary launched and remained alive on
+  macOS; the interactive screen read was unavailable because the Mac locked.
+- Windows workflow hardening now checks WebView2 presence and requires a
+  native application window after launch, in addition to install/launch/
+  uninstall cleanup. A Windows runner remains required for the final artifact
+  execution; the Mac host cannot cross-build MSVC dependencies without the
+  Windows SDK headers.
+
+## Windows pass audit — 2026-08-02 working tree
+
+- Audited `tasks/004-integration-release.md`, `docs/RELEASE_REQUIREMENTS.md`,
+  `src-tauri/tauri.conf.json`, the Windows NSIS workflow, and all native
+  Windows credential, destination, and download paths. The Tauri window is
+  created in the native `setup` hook; the bundle includes `icon.ico`, uses the
+  default silent WebView2 bootstrapper mode, and stores non-secret state under
+  `%LOCALAPPDATA%\com.imageforge.desktop`. Credentials remain behind the
+  `windows-native` keyring backend.
+- Concrete Windows fixes in the current working tree: download requests now
+  carry manifest render dimensions and native verification accepts and matches
+  all five approved sizes (`1280x720`, `1024x1024`, `720x1280`, `1152x864`,
+  `864x1152`); folder reveal resolves the absolute system `explorer.exe`
+  path instead of searching `PATH`; the Windows workflow now verifies a
+  WebView2 runtime and a real application window after launch.
+- Focused frontend contract tests: 22/22 passed; full frontend suite: 13 test
+  files, 88 tests passed; typecheck and production build passed. Rust formatting
+  and `git diff --check` passed.
+- The Mac host has the `x86_64-pc-windows-msvc` Rust target installed, but a
+  direct Windows-target `cargo check` cannot run here because `aws-lc-sys`
+  requires the Windows SDK/MSVC headers (`windows.h`, `stdlib.h`). The
+  authoritative native `windows-latest` evidence remains run `30719056249`
+  (install, launch, uninstall) for commit `913496e`; that artifact predates
+  this working-tree audit and must be regenerated on Windows before release.

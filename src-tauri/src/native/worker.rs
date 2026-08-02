@@ -1,6 +1,7 @@
 use super::session::WorkerSessionPin;
 use super::{CredentialKind, CredentialVault, NativeError, NativeResult, WorkerSession};
 use futures_util::StreamExt;
+use image::{guess_format, load_from_memory_with_format, ImageFormat};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Client, Method, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -15,6 +16,7 @@ const MAX_PREVIEW_BYTES: usize = 4 * 1024 * 1024;
 const MAX_BATCH_REFERENCES: usize = 8;
 const MAX_REFERENCE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REFERENCE_TOTAL_BYTES: usize = 32 * 1024 * 1024;
+const MAX_REFERENCE_PIXELS: u64 = 64_000_000;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -496,26 +498,19 @@ fn validate_reference(reference: &ReferenceInput) -> bool {
     {
         return false;
     }
-    match reference.mime_type.as_str() {
-        "image/jpeg" => is_jpeg(&reference.bytes),
-        "image/png" => is_png(&reference.bytes),
-        "image/webp" => is_webp(&reference.bytes),
-        _ => false,
+    let expected_format = match reference.mime_type.as_str() {
+        "image/jpeg" => ImageFormat::Jpeg,
+        "image/png" => ImageFormat::Png,
+        "image/webp" => ImageFormat::WebP,
+        _ => return false,
+    };
+    if guess_format(&reference.bytes).ok() != Some(expected_format) {
+        return false;
     }
-}
-
-fn is_jpeg(bytes: &[u8]) -> bool {
-    bytes.len() > 4
-        && bytes[0..3] == [0xff, 0xd8, 0xff]
-        && bytes.windows(2).any(|pair| pair == [0xff, 0xd9])
-}
-
-fn is_png(bytes: &[u8]) -> bool {
-    bytes.len() >= 24
-        && bytes[..8] == [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
-        && &bytes[12..16] == b"IHDR"
-        && u32::from_be_bytes(bytes[16..20].try_into().unwrap()) > 0
-        && u32::from_be_bytes(bytes[20..24].try_into().unwrap()) > 0
+    let Ok(image) = load_from_memory_with_format(&reference.bytes, expected_format) else {
+        return false;
+    };
+    u64::from(image.width()) * u64::from(image.height()) <= MAX_REFERENCE_PIXELS
 }
 
 pub(crate) fn validate_index(index: u64) -> NativeResult<()> {
@@ -912,14 +907,18 @@ mod tests {
 
     #[test]
     fn reference_validation_requires_supported_decodable_headers_and_safe_names() {
-        let png = vec![
-            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, b'I', b'H', b'D', b'R', 0,
-            0, 0, 1, 0, 0, 0, 1,
-        ];
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            1,
+            1,
+            image::Rgba([0, 0, 0, 0]),
+        ))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
         assert!(validate_reference(&ReferenceInput {
             name: "anchor.png".into(),
             mime_type: "image/png".into(),
-            bytes: png
+            bytes: png.clone()
         }));
         assert!(!validate_reference(&ReferenceInput {
             name: "anchor.svg".into(),
@@ -935,6 +934,13 @@ mod tests {
             name: "empty.png".into(),
             mime_type: "image/png".into(),
             bytes: vec![]
+        }));
+        let mut truncated = png;
+        truncated.truncate(24);
+        assert!(!validate_reference(&ReferenceInput {
+            name: "truncated.png".into(),
+            mime_type: "image/png".into(),
+            bytes: truncated,
         }));
     }
 

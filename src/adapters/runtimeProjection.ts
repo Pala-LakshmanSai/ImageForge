@@ -45,7 +45,7 @@ function podDetail(snapshot: RunPodSnapshot, selected: PodView | undefined): str
     case 'provisioning': return `${selected?.gpuDisplayName ?? 'Approved GPU'} selected · provisioning compute`;
     case 'booting': return 'Attaching the persistent ImageForge network volume';
     case 'loading': return 'Loading FLUX.2 Klein 4B from the network volume · BF16';
-    case 'warming': return 'Warming the four-step 1280 × 720 inference graph';
+    case 'warming': return 'Warming the four-step inference graph';
     case 'ready': return 'Model warm · accepting one batch';
     case 'stopping': return 'Terminating the explicitly confirmed compute Pod';
     case 'reconnecting': return 'Reconnecting to the verified worker manifest';

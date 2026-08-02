@@ -38,6 +38,8 @@ export interface WorkerBatchPort {
     index: number;
     expectedSha256: string;
     expectedSizeBytes: number;
+    expectedWidth: number;
+    expectedHeight: number;
   }): Promise<LocalDownloadReceipt>;
 }
 
@@ -290,6 +292,8 @@ export class WorkerBatchCoordinator {
               index: image.index,
               expectedSha256: image.sha256,
               expectedSizeBytes: image.sizeBytes,
+              expectedWidth: manifest.settings.width,
+              expectedHeight: manifest.settings.height,
             }),
             manifest.batchId,
           );
@@ -311,6 +315,8 @@ export class WorkerBatchCoordinator {
           index: image.index,
           expectedSha256: image.sha256,
           expectedSizeBytes: image.sizeBytes,
+          expectedWidth: manifest.settings.width,
+          expectedHeight: manifest.settings.height,
         }),
         manifest.batchId,
       );

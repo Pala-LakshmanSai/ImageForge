@@ -22,6 +22,8 @@ pub struct DownloadRequest {
     pub index: u64,
     pub expected_sha256: String,
     pub expected_size_bytes: u64,
+    pub expected_width: u32,
+    pub expected_height: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -82,6 +84,7 @@ impl Downloader {
                 &final_path,
                 request.expected_size_bytes,
                 &request.expected_sha256,
+                Some((request.expected_width, request.expected_height)),
             )
             .await
             .map_err(|_| {
@@ -98,6 +101,7 @@ impl Downloader {
                 &part_path,
                 request.expected_size_bytes,
                 &request.expected_sha256,
+                Some((request.expected_width, request.expected_height)),
             )
             .await
             .map_err(|_| {
@@ -321,7 +325,12 @@ impl Downloader {
                     "An existing local receipt is unreadable; no file was overwritten.",
                 )
             })?;
-            if stored.batch_id == receipt.batch_id
+            let stored_filename = receipt_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            if validate_stored_receipt(&stored, receipt.batch_id, stored_filename).is_ok()
+                && stored.batch_id == receipt.batch_id
                 && stored.index == receipt.index
                 && stored.sha256 == receipt.sha256
                 && stored.size_bytes == receipt.size_bytes
@@ -424,7 +433,7 @@ impl Downloader {
             validate_stored_receipt(&receipt, batch_id, name)?;
             let final_path = self.destination.confine(Path::new(&receipt.filename))?;
             reject_symlink(&final_path)?;
-            verify_file(&final_path, receipt.size_bytes, &receipt.sha256)
+            verify_file(&final_path, receipt.size_bytes, &receipt.sha256, None)
                 .await
                 .map_err(|_| receipt_ledger_invalid())?;
             receipts.push(receipt);
@@ -445,6 +454,17 @@ fn validate_download_request(request: &DownloadRequest) -> NativeResult<()> {
         return Err(NativeError::new(
             "download_size_invalid",
             "The worker returned an invalid JPEG size.",
+        ));
+    }
+    if !is_supported_dimensions((
+        request.expected_width as u16,
+        request.expected_height as u16,
+    )) || request.expected_width > u16::MAX as u32
+        || request.expected_height > u16::MAX as u32
+    {
+        return Err(NativeError::new(
+            "download_dimensions_invalid",
+            "The worker returned unsupported render dimensions.",
         ));
     }
     Ok(())
@@ -537,7 +557,12 @@ async fn truncate(path: &Path) -> NativeResult<()> {
     file.sync_all().await.map_err(|_| destination_io_error())
 }
 
-async fn verify_file(path: &Path, expected_size: u64, expected_sha256: &str) -> NativeResult<()> {
+async fn verify_file(
+    path: &Path,
+    expected_size: u64,
+    expected_sha256: &str,
+    expected_dimensions: Option<(u32, u32)>,
+) -> NativeResult<()> {
     let mut file = secure_open_read(path).await?;
     let metadata = file.metadata().await.map_err(|_| destination_io_error())?;
     if !metadata.is_file() || metadata.len() != expected_size {
@@ -556,10 +581,19 @@ async fn verify_file(path: &Path, expected_size: u64, expected_sha256: &str) -> 
             "The local JPEG checksum did not match its receipt.",
         ));
     }
-    if jpeg_dimensions(&bytes) != Some((1280, 720)) {
+    let Some((width, height)) = jpeg_dimensions(&bytes) else {
         return Err(NativeError::new(
             "download_jpeg_invalid",
-            "The downloaded file is not an exact 1280 × 720 JPEG.",
+            "The downloaded file is not a structurally valid JPEG.",
+        ));
+    };
+    let dimensions = (width as u32, height as u32);
+    if !is_supported_dimensions((width, height))
+        || expected_dimensions.is_some_and(|expected| expected != dimensions)
+    {
+        return Err(NativeError::new(
+            "download_dimensions_invalid",
+            "The downloaded file does not match the selected render dimensions.",
         ));
     }
     Ok(())
@@ -814,6 +848,13 @@ fn jpeg_dimensions(bytes: &[u8]) -> Option<(u16, u16)> {
     None
 }
 
+fn is_supported_dimensions(dimensions: (u16, u16)) -> bool {
+    matches!(
+        dimensions,
+        (1280, 720) | (1024, 1024) | (720, 1280) | (1152, 864) | (864, 1152)
+    )
+}
+
 async fn reject_file_secret_reflection(path: &Path, secrets: &[String]) -> NativeResult<()> {
     let mut file = secure_open_read(path).await?;
     let mut bytes = Vec::new();
@@ -988,24 +1029,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verifies_exact_size_and_sha256() {
+    async fn verifies_size_sha256_and_every_approved_render_dimension() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("000001.jpg.part");
+        for dimensions in [
+            (1280, 720),
+            (1024, 1024),
+            (720, 1280),
+            (1152, 864),
+            (864, 1152),
+        ] {
+            let jpeg = structural_jpeg(dimensions.0, dimensions.1);
+            tokio::fs::write(&path, &jpeg).await.unwrap();
+            let checksum = hex::encode(Sha256::digest(&jpeg));
+            verify_file(
+                &path,
+                jpeg.len() as u64,
+                &checksum,
+                Some((dimensions.0 as u32, dimensions.1 as u32)),
+            )
+            .await
+            .unwrap();
+            if dimensions != (1280, 720) {
+                assert_eq!(
+                    verify_file(&path, jpeg.len() as u64, &checksum, Some((1280, 720)))
+                        .await
+                        .unwrap_err()
+                        .code,
+                    "download_dimensions_invalid"
+                );
+            }
+        }
         let jpeg = structural_jpeg(1280, 720);
         tokio::fs::write(&path, &jpeg).await.unwrap();
         let checksum = hex::encode(Sha256::digest(&jpeg));
-        verify_file(&path, jpeg.len() as u64, &checksum)
-            .await
-            .unwrap();
         assert_eq!(
-            verify_file(&path, (jpeg.len() - 1) as u64, &checksum)
+            verify_file(&path, (jpeg.len() - 1) as u64, &checksum, Some((1280, 720)))
                 .await
                 .unwrap_err()
                 .code,
             "download_checksum_mismatch"
         );
         assert_eq!(
-            verify_file(&path, jpeg.len() as u64, &"0".repeat(64))
+            verify_file(&path, jpeg.len() as u64, &"0".repeat(64), Some((1280, 720)))
                 .await
                 .unwrap_err()
                 .code,
@@ -1040,6 +1106,11 @@ mod tests {
             jpeg_dimensions(&structural_jpeg(1279, 720)),
             Some((1279, 720))
         );
+        assert!(is_supported_dimensions((1024, 1024)));
+        assert!(is_supported_dimensions((720, 1280)));
+        assert!(is_supported_dimensions((1152, 864)));
+        assert!(is_supported_dimensions((864, 1152)));
+        assert!(!is_supported_dimensions((1279, 720)));
         let mut missing_eoi = structural_jpeg(1280, 720);
         missing_eoi.pop();
         assert_eq!(jpeg_dimensions(&missing_eoi), None);
@@ -1073,6 +1144,8 @@ mod tests {
             index: 1,
             expected_sha256: "a".repeat(64),
             expected_size_bytes: 1024,
+            expected_width: 1280,
+            expected_height: 720,
         };
         assert!(validate_download_request(&valid).is_ok());
         assert_eq!(
@@ -1083,6 +1156,15 @@ mod tests {
             .unwrap_err()
             .code,
             "download_size_invalid"
+        );
+        assert_eq!(
+            validate_download_request(&DownloadRequest {
+                expected_width: 123,
+                ..valid
+            })
+            .unwrap_err()
+            .code,
+            "download_dimensions_invalid"
         );
     }
 
@@ -1208,6 +1290,52 @@ mod tests {
                 .unwrap()
                 .receipts,
             vec![receipt]
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_receipt_slot_requires_valid_schema_and_filename() {
+        let temporary = tempfile::tempdir().unwrap();
+        let destination_path = temporary.path().join("downloads");
+        let record_path = temporary.path().join("state").join("destination.json");
+        std::fs::create_dir(&destination_path).unwrap();
+        let destination = DestinationStore::new_for_test(record_path);
+        destination.validate_and_bind(&destination_path).unwrap();
+        let downloader = test_downloader(destination);
+        let batch_id = Uuid::new_v4();
+        let receipt_dir = ensure_relative_directory(
+            &downloader.destination,
+            &PathBuf::from(".imageforge")
+                .join("receipts")
+                .join(batch_id.to_string()),
+        )
+        .await
+        .unwrap();
+        let jpeg = structural_jpeg(1280, 720);
+        let receipt = DownloadReceipt {
+            schema_version: 1,
+            batch_id,
+            index: 1,
+            filename: format!("batches/{batch_id}/000001.jpg"),
+            sha256: hex::encode(Sha256::digest(&jpeg)),
+            size_bytes: jpeg.len() as u64,
+            verified_at_unix_ms: 1,
+        };
+        let corrupt = DownloadReceipt {
+            schema_version: 2,
+            filename: "batches/not-the-bound-batch/000001.jpg".into(),
+            ..receipt.clone()
+        };
+        tokio::fs::write(
+            receipt_dir.join("000001.json"),
+            serde_json::to_vec(&corrupt).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            downloader.persist_receipt(&receipt).await.unwrap_err().code,
+            "receipt_conflict"
         );
     }
 
