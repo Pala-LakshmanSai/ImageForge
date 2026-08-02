@@ -279,3 +279,38 @@ the recovery poll observes it.
   final RunPod list contained no active ImageForge Pod.
 - Evidence is captured locally in the operator workspace as
   `imageforge-volume-gate-gate-1785645894*.json`; it contains no bearer tokens.
+
+## Logo and desktop bundle repair — commit `a9fd340`
+
+- Replaced the placeholder mark with the original ImageForge forged-aperture
+  logo: coral-to-violet lens ring, six bright aperture blades, cyan spark, and
+  transparent corners. The React header mark and generated Tauri PNG/ICO/ICNS
+  assets use the same identity.
+- The mounted macOS DMG initially exposed a packaging defect: the Tauri bundle
+  did not declare an icon list, so `ImageForge.app` omitted `icon.icns` and
+  macOS fell back to its generic placeholder. The bundle configuration now
+  declares the generated icon assets explicitly.
+- Final mounted-app verification found
+  `Contents/Resources/icon.icns` with the same SHA-256 as
+  `src-tauri/icons/icon.icns`: `60d1f6e138d4ed927542f779ebb7efb9ffed34341f849b59d3a27812953d3dc5`.
+  The corrected DMG SHA-256 is
+  `52de27e64e7a2bf0896504a9e6b4ee96dc5e2341f2ae4ea482278063e869601e`.
+- The USB checkout also received an explicit `@types/node` dev dependency so
+  its test harness does not depend on an incidental transitive installation.
+
+## macOS Gatekeeper bundle repair — task `008`
+
+- Root cause: the prior DMG app had an ad-hoc linker signature that did not
+  seal bundle resources; `codesign --verify --deep --strict` reported
+  `code has no resources but signature indicates they must be present`.
+- `src-tauri/tauri.conf.json` now declares the explicit ad-hoc identity `-`
+  and disables hardened runtime when no Apple Developer identity is present.
+- Fresh build:
+  `/Volumes/ImageForgeBuild/final-cargo-target/release/bundle/dmg/ImageForge_0.1.0_aarch64.dmg`
+- DMG SHA-256:
+  `6b5fd0b719eeaa8016a921f3f6a524bd7ca81637f41efc3d90c23c9276b04f0a`.
+- Both the generated app and the app mounted from the DMG pass deep strict
+  code-sign verification. `spctl` still rejects the ad-hoc build because it
+  is not notarized; distribution remains explicitly ad-hoc/unsigned.
+- Frontend verification: 13 Vitest files, 84 tests passed; typecheck and
+  production build passed.
