@@ -63,6 +63,25 @@ describe("HttpWorkerHealthProbe", () => {
     );
   });
 
+  it("accepts an attached approved GPU while CUDA is still loading", async () => {
+    const probe = new HttpWorkerHealthProbe({
+      fetchTransport: (async () => jsonResponse({
+        ...healthPayload("gpu_load", 0.05),
+        gpu: {
+          state: "loading",
+          available: true,
+          approved: true,
+          name: "NVIDIA GeForce RTX 4090",
+          device_count: 1,
+        },
+      })) as FetchTransport,
+    });
+    assert.equal(
+      (await probe.getHealth(deriveRunPodProxyUrl("attachedgpu1", 8000))).phase,
+      "gpu_load",
+    );
+  });
+
   it("rejects non-RunPod proxy origins before making a request", async () => {
     let fetchCalls = 0;
     const probe = new HttpWorkerHealthProbe({
@@ -155,7 +174,7 @@ function healthPayload(phase: string, progress: number): Record<string, unknown>
   return {
     schema_version: 1,
     service: "imageforge-worker",
-    version: "0.1.0",
+    version: "0.1.2",
     process: { status: "ok", uptime_ms: 100 },
     model: {
       id: "black-forest-labs/FLUX.2-klein-4B",

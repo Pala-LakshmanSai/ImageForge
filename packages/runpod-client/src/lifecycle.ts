@@ -332,9 +332,15 @@ export class RunPodLifecycleController {
     const expectedImageCount = validateExpectedImageCount(
       options.expectedImageCount ?? this.#snapshot.expectedImageCount,
     );
+    // Readiness polling reuses refresh(), but once a Pod has been selected we
+    // must not regress the visible lifecycle to `selecting` on every poll.
+    // Keeping the active selection phase prevents the desktop UI from
+    // oscillating between 4% and 39% while the same Pod is booting/loading.
+    const hasActiveSelection = this.#snapshot.selectedPodId !== null &&
+      this.#snapshot.pods.some((pod) => pod.id === this.#snapshot.selectedPodId && isActivePod(pod));
     this.#publish({
       ...this.#snapshot,
-      phase: "selecting",
+      phase: hasActiveSelection ? this.#snapshot.phase : "selecting",
       expectedImageCount,
       error: null,
     });

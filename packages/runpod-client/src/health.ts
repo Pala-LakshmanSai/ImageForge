@@ -5,7 +5,8 @@ import { asBoolean, asNonEmptyString, asNumber, asRecord, asString } from "./val
 
 const RUNPOD_PROXY_HOST = /^[A-Za-z0-9][A-Za-z0-9-]{0,57}-8000\.proxy\.runpod\.net$/;
 const WORKER_SERVICE = "imageforge-worker";
-const WORKER_VERSION = "0.1.0";
+// Keep the desktop contract aligned with the portable worker release.
+const WORKER_VERSION = "0.1.2";
 const MODEL_ID = "black-forest-labs/FLUX.2-klein-4B";
 const MODEL_REVISION = "e7b7dc27f91deacad38e78976d1f2b499d76a294";
 const MODEL_PRECISION = "bfloat16";
@@ -143,6 +144,9 @@ export class HttpWorkerHealthProbe implements WorkerHealthProbe {
       const expectedModelStatus = phase === "ready" ? "ready" : phase === "error" ? "error" : "loading";
       const gpuReady = gpuState === "ready";
       const phaseRequiresGpu = phase === "warmup" || phase === "ready";
+      const gpuMetadataConsistent = deviceCount === 0
+        ? !gpuAvailable && !gpuApproved
+        : gpuAvailable && gpuApproved;
       if (
         phaseProgress < 0 ||
         phaseProgress > 1 ||
@@ -151,7 +155,7 @@ export class HttpWorkerHealthProbe implements WorkerHealthProbe {
         (deviceCount !== 0 && deviceCount !== 1) ||
         (gpuState !== "loading" && gpuState !== "ready") ||
         (gpuReady && (!gpuAvailable || !gpuApproved || deviceCount !== 1)) ||
-        (!gpuReady && (gpuAvailable || gpuApproved || deviceCount !== 0)) ||
+        !gpuMetadataConsistent ||
         (phaseRequiresGpu && !gpuReady) ||
         (phase === "ready" && phaseProgress !== 1)
       ) {

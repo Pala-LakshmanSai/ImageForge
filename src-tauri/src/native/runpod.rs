@@ -439,7 +439,9 @@ impl RunPodTransport {
                     let pod_id = validated.pod_id.as_deref().ok_or_else(rejected)?;
                     self.project_and_register_pod(&raw, pod_id, profile.as_ref().unwrap())?;
                     self.record_delete_grant(pod_id)?;
-                    serde_json::to_string(&project_pod(&raw)?).map_err(|_| response_invalid())?
+                    let dynamic = self.dynamic_catalog_for_pod(pod_id)?;
+                    serde_json::to_string(&project_pod_with_dynamic(&raw, &dynamic)?)
+                        .map_err(|_| response_invalid())?
                 }
                 RunPodOperation::TerminatePod => String::new(),
             };
@@ -617,7 +619,13 @@ impl RunPodTransport {
         let pods = raw.as_array().ok_or_else(response_invalid)?;
         let mut projected = Vec::with_capacity(pods.len());
         for pod in pods {
-            let value = project_pod(pod)?;
+            let dynamic = pod
+                .get("id")
+                .and_then(Value::as_str)
+                .map(|pod_id| self.dynamic_catalog_for_pod(pod_id))
+                .transpose()?
+                .unwrap_or_default();
+            let value = project_pod_with_dynamic(pod, &dynamic)?;
             if let Some(pod_id) = value.get("id").and_then(Value::as_str) {
                 if validate_managed_pod_value(
                     &value,
@@ -641,7 +649,12 @@ impl RunPodTransport {
         request_body: &Value,
         profile: &RunPodProfileBinding,
     ) -> NativeResult<String> {
-        let projected = project_pod(raw)?;
+        let raw_pod_id = raw
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(response_invalid)?;
+        let dynamic = self.dynamic_catalog_for_pod(raw_pod_id)?;
+        let projected = project_pod_with_dynamic(raw, &dynamic)?;
         let pod_id = projected
             .get("id")
             .and_then(Value::as_str)
@@ -681,7 +694,8 @@ impl RunPodTransport {
         pod_id: &str,
         profile: &RunPodProfileBinding,
     ) -> NativeResult<()> {
-        let projected = project_pod(raw)?;
+        let dynamic = self.dynamic_catalog_for_pod(pod_id)?;
+        let projected = project_pod_with_dynamic(raw, &dynamic)?;
         validate_managed_pod_value(
             &projected,
             pod_id,
@@ -1173,17 +1187,69 @@ const POD_PROJECTION_KEYS: &[&str] = &[
 ];
 
 fn project_pod(raw: &Value) -> NativeResult<Value> {
+    project_pod_with_dynamic(raw, &HashMap::new())
+}
+
+fn project_pod_with_dynamic(
+    raw: &Value,
+    dynamic_gpus: &HashMap<String, String>,
+) -> NativeResult<Value> {
     let object = raw.as_object().ok_or_else(response_invalid)?;
     let mut output = Map::new();
     for key in POD_PROJECTION_KEYS {
-        if let Some(value) = object.get(*key) {
-            let projected = match *key {
-                "networkVolume" => project_object(value, &["id", "dataCenterId"])?,
-                "gpu" => project_object(value, &["id", "displayName", "count"])?,
-                "machine" => project_object(value, &["secureCloud", "dataCenterId"])?,
-                _ => value.clone(),
-            };
-            output.insert((*key).to_owned(), projected);
+        let Some(value) = object.get(*key) else {
+            if *key == "interruptible" {
+                output.insert((*key).to_owned(), Value::Bool(false));
+            }
+            continue;
+        };
+        let projected = match *key {
+            "networkVolume" => project_object(value, &["id", "dataCenterId"])?,
+            // Some live on-demand REST responses omit `gpu` entirely while
+            // exposing the same identity as machine.gpuTypeId. The fallback
+            // below handles explicit null; the post-loop fallback handles an
+            // omitted field so a running Pod remains discoverable.
+            "gpu" if value.is_null() => {
+                let gpu_id = object
+                    .get("machine")
+                    .and_then(Value::as_object)
+                    .and_then(|machine| machine.get("gpuTypeId"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if gpu_id.is_empty() {
+                    Value::Null
+                } else {
+                    let display_name = dynamic_gpus
+                        .get(gpu_id)
+                        .cloned()
+                        .unwrap_or_else(|| gpu_id.to_owned());
+                    let count = object.get("gpuCount").cloned().unwrap_or(Value::from(1));
+                    serde_json::json!({"id": gpu_id, "displayName": display_name, "count": count})
+                }
+            }
+            "gpu" => project_object(value, &["id", "displayName", "count"])?,
+            "machine" => project_object(value, &["secureCloud", "dataCenterId", "gpuTypeId"])?,
+            _ => value.clone(),
+        };
+        output.insert((*key).to_owned(), projected);
+    }
+    if !output.contains_key("gpu") {
+        let gpu_id = object
+            .get("machine")
+            .and_then(Value::as_object)
+            .and_then(|machine| machine.get("gpuTypeId"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if !gpu_id.is_empty() {
+            let display_name = dynamic_gpus
+                .get(gpu_id)
+                .cloned()
+                .unwrap_or_else(|| gpu_id.to_owned());
+            let count = object.get("gpuCount").cloned().unwrap_or(Value::from(1));
+            output.insert(
+                "gpu".to_owned(),
+                serde_json::json!({"id": gpu_id, "displayName": display_name, "count": count}),
+            );
         }
     }
     Ok(Value::Object(output))
@@ -1369,6 +1435,7 @@ fn validate_create_pod(method: &Method, url: &Url, body: Option<&Value>) -> Nati
     const ALLOWED_KEYS: &[&str] = &[
         "name",
         "templateId",
+        "imageName",
         "networkVolumeId",
         "volumeMountPath",
         "ports",
@@ -1413,6 +1480,13 @@ fn validate_create_pod(method: &Method, url: &Url, body: Option<&Value>) -> Nati
             return Err(rejected());
         }
     }
+    let image_name = object
+        .get("imageName")
+        .and_then(Value::as_str)
+        .ok_or_else(rejected)?;
+    if !safe_image_reference(image_name) {
+        return Err(rejected());
+    }
     for key in ["minDiskBandwidthMBps", "minDownloadMbps", "minUploadMbps"] {
         if let Some(value) = object.get(key) {
             let value = value.as_f64().ok_or_else(rejected)?;
@@ -1443,6 +1517,19 @@ fn safe_gpu_identifier(value: &str) -> bool {
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'.' | b'_' | b'+' | b'-')
         })
+}
+
+fn safe_image_reference(value: &str) -> bool {
+    let Some((repository, digest)) = value.split_once("@sha256:") else {
+        return false;
+    };
+    repository.starts_with("ghcr.io/")
+        && repository.len() <= 384
+        && repository
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'/'))
+        && digest.len() == 64
+        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn normalize_catalog_name(value: &str) -> String {
@@ -1668,6 +1755,7 @@ mod tests {
         serde_json::json!({
             "name": "imageforge-request-123",
             "templateId": "imageforge-worker-v1",
+            "imageName": "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:f862e1ea8ece9f35101e7c47be55a5042c17e0eb3cf8414dd709ed73a59e33ed",
             "networkVolumeId": "if-models-production",
             "volumeMountPath": "/workspace",
             "ports": ["8000/http"],
@@ -2045,6 +2133,84 @@ mod tests {
             .project_and_register_pod_list(&serde_json::json!([raw]), &profile)
             .unwrap();
         assert!(!transport.create_marker_metadata().unwrap().pending);
+    }
+
+    #[test]
+    fn live_on_demand_shape_synthesizes_gpu_and_interruptible_defaults() {
+        let temporary = tempfile::tempdir().unwrap();
+        let transport = RunPodTransport::new_for_test(
+            Arc::new(MemoryVault::default()),
+            temporary.path().join("marker"),
+        )
+        .unwrap();
+        let raw = serde_json::json!({
+            "id": "live4090pod",
+            "name": "imageforge-live",
+            "templateId": "imageforge-worker-v1",
+            "volumeMountPath": "/workspace",
+            "networkVolume": {"id": "if-models-production", "dataCenterId": "EU-RO-1"},
+            "machine": {
+                "secureCloud": true,
+                "dataCenterId": "EU-RO-1",
+                "gpuTypeId": "NVIDIA GeForce RTX 4090"
+            },
+            "gpu": null,
+            "gpuCount": 1,
+            "ports": ["8000/http"]
+        });
+        let profile = RunPodProfileBinding {
+            template_id: "imageforge-worker-v1".into(),
+            network_volume_id: "if-models-production".into(),
+        };
+        let projected = project_pod(&raw).unwrap();
+        assert_eq!(projected["interruptible"], false);
+        assert_eq!(projected["gpu"]["id"], "NVIDIA GeForce RTX 4090");
+        assert_eq!(projected["gpu"]["count"], 1);
+        validate_managed_pod_value(
+            &projected,
+            "live4090pod",
+            &profile,
+            &transport.dynamic_catalog().unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn live_on_demand_shape_with_omitted_gpu_is_projected_for_reverification() {
+        let temporary = tempfile::tempdir().unwrap();
+        let transport = RunPodTransport::new_for_test(
+            Arc::new(MemoryVault::default()),
+            temporary.path().join("marker"),
+        )
+        .unwrap();
+        let raw = serde_json::json!({
+            "id": "live-omitted-gpu",
+            "name": "imageforge-live",
+            "templateId": "imageforge-worker-v1",
+            "volumeMountPath": "/workspace",
+            "interruptible": false,
+            "networkVolume": {"id": "if-models-production", "dataCenterId": "EU-RO-1"},
+            "machine": {
+                "secureCloud": true,
+                "dataCenterId": "EU-RO-1",
+                "gpuTypeId": "NVIDIA GeForce RTX 4090"
+            },
+            "gpuCount": 1,
+            "ports": ["8000/http"]
+        });
+        let profile = RunPodProfileBinding {
+            template_id: "imageforge-worker-v1".into(),
+            network_volume_id: "if-models-production".into(),
+        };
+        let projected = project_pod(&raw).unwrap();
+        assert_eq!(projected["gpu"]["id"], "NVIDIA GeForce RTX 4090");
+        validate_managed_pod_value(
+            &projected,
+            "live-omitted-gpu",
+            &profile,
+            &transport.dynamic_catalog().unwrap(),
+        )
+        .unwrap();
     }
 
     #[test]

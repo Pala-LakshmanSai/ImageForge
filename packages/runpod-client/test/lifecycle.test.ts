@@ -51,6 +51,21 @@ describe("RunPodLifecycleController refresh and start", () => {
     assert.equal(provider.calls.inventory[0]?.includeEmergencyTier, false);
   });
 
+  it("does not regress an already-selected Pod to selecting during readiness polling", async () => {
+    const pod = makePod({ id: "stablepoll1", status: "provisioning" });
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()], pods: [pod] });
+    const phases: string[] = [];
+    const controller = makeController(provider, { configOverrides: { refreshIntervalMs: 100 } });
+    controller.subscribe((snapshot) => phases.push(snapshot.phase));
+
+    await controller.refresh();
+    await controller.refresh();
+
+    const selectedIndex = phases.findIndex((phase) => phase === "provisioning");
+    assert.ok(selectedIndex >= 0);
+    assert.equal(phases.slice(selectedIndex + 1).includes("selecting"), false);
+  });
+
   it("does not create when all live approved inventory is unavailable", async () => {
     const provider = new FakeRunPodProvider({
       inventory: [makeOffer({ availability: "none" })],
