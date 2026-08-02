@@ -265,13 +265,20 @@ async def main() -> None:
             )
             evidence["contention"] = await contention(client, a, b)
             evidence["operator_instruction"] = (
-                "Stop the recorded winner Pod, then rerun with IMAGEFORGE_GATE_SURVIVOR=<live role>, IMAGEFORGE_GATE_OWNER=<original winner role>, and IMAGEFORGE_GATE_BATCH_ID=<recorded batch_id>."
+                "Stop the recorded winner Pod, then rerun with "
+                "IMAGEFORGE_GATE_SURVIVOR=<live role>, "
+                "IMAGEFORGE_GATE_OWNER=<original winner role>, and "
+                "IMAGEFORGE_GATE_BATCH_ID=<recorded batch_id>."
             )
     evidence["finished_at_unix"] = time.time()
     output = Path(
         os.environ.get("IMAGEFORGE_GATE_EVIDENCE", f"imageforge-volume-gate-{run_id}.json")
     )
-    output.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    await asyncio.to_thread(
+        output.write_text,
+        json.dumps(evidence, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     print(json.dumps({"ok": True, "evidence": str(output), "run_id": run_id}, indent=2))
 
 
