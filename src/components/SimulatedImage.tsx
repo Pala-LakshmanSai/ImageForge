@@ -76,7 +76,7 @@ export function SimulatedImage({ seed, prompt, compact = false }: { seed: number
         <>
           <path d="M0 324h640v36H0z" fill="#070a12" opacity=".5" />
           <text x="20" y="346" fill="#f7f4ef" opacity=".8" fontFamily="ui-monospace, monospace" fontSize="12" letterSpacing="1.5">
-            SIMULATED FRAME · SEED {seed}
+            SIMULATED FRAME
           </text>
         </>
       )}

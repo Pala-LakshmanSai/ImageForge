@@ -9,6 +9,8 @@ import {
   nativeClearRunPodStartAuthorization,
   nativeCredentialMetadata,
   nativeDownloadArtifact,
+  nativeExportArtifact,
+  nativeReadLocalArtifact,
   nativeReadReceiptLedger,
   nativeReconcileReceipts,
   nativeReplaceCredential,
@@ -28,6 +30,7 @@ import {
   nativeWorkerResumeBatch,
   nativeWorkerRetryFailed,
   nativeWorkerStatus,
+  asNativeError,
 } from './tauriBridge';
 
 /** Narrow renderer-side composition of the native commands. No secret or
@@ -64,7 +67,15 @@ export function createNativeProductionPort(): ProductionDesktopPort {
     },
     validateDestination,
     revealDestination: nativeRevealDestination,
-    fetchPreview: nativeWorkerFetchPreview,
+    fetchPreview: async (batchId, index) => {
+      try {
+        return await nativeReadLocalArtifact(batchId, index);
+      } catch (error) {
+        if (asNativeError(error).code !== 'local_artifact_unavailable') throw error;
+        return nativeWorkerFetchPreview(batchId, index);
+      }
+    },
+    downloadAsset: nativeExportArtifact,
     writeManifest: nativeWriteManifest,
     credentialMetadata: nativeCredentialMetadata,
     replaceCredential: (kind: CredentialKind, value: string): Promise<CredentialMetadata> =>
@@ -76,7 +87,9 @@ export function createNativeProductionPort(): ProductionDesktopPort {
     resumeBatch: nativeWorkerResumeBatch,
     cancelBatch: nativeWorkerCancelBatch,
     retryFailed: nativeWorkerRetryFailed,
-    readReceipts: async (batchId) => (await nativeReadReceiptLedger(batchId)).receipts,
+    readReceipts: async (batchId, batchName) => (
+      await nativeReadReceiptLedger(batchId, batchName)
+    ).receipts,
     reconcileReceipts: (batchId) => nativeReconcileReceipts(batchId),
     downloadArtifact: nativeDownloadArtifact,
   };

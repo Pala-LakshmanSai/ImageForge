@@ -181,7 +181,7 @@ jobs:
             sha256 = $hash
             signing = 'unsigned beta installer'
             notarization = 'not applicable'
-            native_smoke = 'install, WebView2, onboarding, reference add/remove/re-add, fake batch, folder reveal, cleanup'
+            native_smoke = 'install, WebView2, onboarding, reference add/remove/re-add, fast fake batch, named minimal Library, per-image Download, image detail, folder reveal, cleanup'
           } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 -LiteralPath (Join-Path $bundleDir 'ImageForge-windows-release-metadata.json')
 
       - name: Upload Windows installer
@@ -267,7 +267,7 @@ jobs:
             "sha256": "$hash",
             "signing": "ad-hoc signed beta",
             "notarization": "not notarized",
-            "native_smoke": "codesign, DMG verification, onboarding, reference add/remove/re-add, fake batch, folder reveal"
+            "native_smoke": "codesign, DMG verification, onboarding, reference add/remove/re-add, fast fake batch, named minimal Library, per-image Download, image detail, folder reveal"
           }
           EOF
 

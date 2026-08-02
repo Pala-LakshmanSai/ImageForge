@@ -2,9 +2,10 @@ mod native;
 
 use native::{
     CredentialKind, CredentialMetadata, CredentialVault, DestinationMetadata, DestinationSelection,
-    DestinationStore, DownloadReceipt, DownloadRequest, Downloader, KeyringVault, NativeError,
-    NativeResult, ReceiptLedger, RunPodCreateMarkerMetadata, RunPodHttpRequest, RunPodHttpResponse,
-    RunPodTransport, WorkerApi, WorkerHttpResponse, WorkerPreviewResponse, WorkerSession,
+    DestinationStore, DownloadReceipt, DownloadRequest, Downloader, ExportArtifactRequest,
+    KeyringVault, LocalArtifactResponse, NativeError, NativeResult, ReceiptLedger,
+    RunPodCreateMarkerMetadata, RunPodHttpRequest, RunPodHttpResponse, RunPodTransport, WorkerApi,
+    WorkerHttpResponse, WorkerPreviewResponse, WorkerSession,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -446,13 +447,64 @@ async fn download_artifact(
 }
 
 #[tauri::command]
+async fn read_local_artifact(
+    state: State<'_, NativeState>,
+    batch_id: String,
+    index: u64,
+) -> NativeResult<LocalArtifactResponse> {
+    state
+        .downloader
+        .read_local_artifact(parse_batch_id(&batch_id)?, index)
+        .await
+}
+
+#[tauri::command]
+async fn export_artifact(
+    state: State<'_, NativeState>,
+    request: ExportArtifactRequest,
+) -> NativeResult<Option<String>> {
+    let (suggested_name, artifact) = state.downloader.read_export_artifact(&request).await?;
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        let Some(selection) = rfd::AsyncFileDialog::new()
+            .set_title("Download ImageForge image")
+            .set_file_name(&suggested_name)
+            .add_filter("JPEG image", &["jpg", "jpeg"])
+            .save_file()
+            .await
+        else {
+            return Ok(None);
+        };
+        let selected_path = selection.path().to_path_buf();
+        let write_path = selected_path.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            native::download::write_export_file(&write_path, &artifact.bytes)
+        })
+        .await
+        .map_err(|_| {
+            NativeError::new("native_task_failed", "The image copy could not be saved.")
+        })??;
+        Ok(Some(selected_path.to_string_lossy().into_owned()))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (suggested_name, artifact);
+        Err(NativeError::new(
+            "platform_unsupported",
+            "Image download is available in the macOS and Windows apps.",
+        ))
+    }
+}
+
+#[tauri::command]
 async fn read_receipt_ledger(
     state: State<'_, NativeState>,
     batch_id: String,
+    batch_name: Option<String>,
 ) -> NativeResult<ReceiptLedger> {
     state
         .downloader
-        .read_receipt_ledger(parse_batch_id(&batch_id)?)
+        .read_receipt_ledger(parse_batch_id(&batch_id)?, batch_name.as_deref())
         .await
 }
 
@@ -553,6 +605,8 @@ pub fn run() {
             worker_retry_failed,
             worker_fetch_preview,
             download_artifact,
+            read_local_artifact,
+            export_artifact,
             read_receipt_ledger,
             reconcile_receipts,
             native_smoke_result,

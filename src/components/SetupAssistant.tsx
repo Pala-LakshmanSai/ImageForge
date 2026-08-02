@@ -238,11 +238,11 @@ export function SetupAssistant({
           <div className="setup-step" key="downloads-step">
             <Eyebrow>Direct-to-device delivery</Eyebrow>
             <h1 id="setup-title">Choose downloads.</h1>
-            <p>Full JPEGs, previews, and manifest receipts are written directly to this computer while later images continue generating.</p>
+            <p>Full-quality images are saved directly to this computer while later images continue generating.</p>
             <button className="setup-folder" type="button" data-autofocus autoFocus disabled={locked} onClick={() => void chooseFolder()}>
               <span><Folder size={22} /></span><div><strong>{choosing ? 'Opening native chooser…' : state.settings.defaultDestination}</strong><small>{writeChecked ? 'Write test passed · permission retained' : 'Choose a folder and run a write test'}</small></div><ArrowRight size={17} />
             </button>
-            {writeChecked ? <div className="setup-safe-note setup-safe-note--success"><Check size={17} /><span><strong>Folder verified</strong><small>The final connection check does not create a Pod.</small></span></div> : null}
+            {writeChecked ? <div className="setup-safe-note setup-safe-note--success"><Check size={17} /><span><strong>Folder ready</strong><small>The final connection check does not start a GPU.</small></span></div> : null}
           </div>
         )}
 

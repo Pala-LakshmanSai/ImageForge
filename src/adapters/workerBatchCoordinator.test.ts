@@ -83,6 +83,80 @@ function receipt(): LocalDownloadReceipt {
   };
 }
 
+type TerminalFixtureStatus = 'pending' | 'ready' | 'downloaded';
+
+function terminalSha256(index: number): string {
+  return index.toString(16).padStart(64, '0');
+}
+
+function terminalSizeBytes(index: number): number {
+  return 2_048 + index;
+}
+
+function terminalReceipt(index: number): LocalDownloadReceipt {
+  return {
+    schemaVersion: 1,
+    batchId,
+    index,
+    filename: `batches/${batchId}/${String(index).padStart(6, '0')}.jpg`,
+    sha256: terminalSha256(index),
+    sizeBytes: terminalSizeBytes(index),
+    verifiedAtUnixMs: 1_785_579_600_000 + index,
+  };
+}
+
+function terminalManifest(statuses: readonly TerminalFixtureStatus[]) {
+  const images = statuses.map((imageStatus, offset) => {
+    const index = offset + 1;
+    const generated = imageStatus !== 'pending';
+    const downloaded = imageStatus === 'downloaded';
+    return {
+      index,
+      prompt: `Ordered frame ${index}`,
+      seed: 699 + index,
+      status: imageStatus,
+      attempts: generated ? 1 : 0,
+      retry_rounds: 0,
+      filename: generated ? `artifacts/${String(index).padStart(6, '0')}.jpg` : null,
+      sha256: generated ? terminalSha256(index) : null,
+      size_bytes: generated ? terminalSizeBytes(index) : null,
+      generation_ms: generated ? 8_000 + index : null,
+      error: null,
+      receipt: downloaded
+        ? {
+            sha256: terminalSha256(index),
+            size_bytes: terminalSizeBytes(index),
+            acknowledged_at: '2026-08-01T10:01:00.000Z',
+          }
+        : null,
+    };
+  });
+  const completed = statuses.filter((imageStatus) => imageStatus !== 'pending').length;
+  const downloaded = statuses.filter((imageStatus) => imageStatus === 'downloaded').length;
+  return {
+    ...manifest('downloaded'),
+    images,
+    progress: {
+      total: statuses.length,
+      completed,
+      downloaded,
+      failed: 0,
+      cancelled: 0,
+      processed: completed,
+      current_index: null,
+    },
+  };
+}
+
+function releasedStatus() {
+  return {
+    schema_version: 1,
+    ready: true,
+    active_batch: null,
+    permissions: { can_create: true, can_manage_active: false, is_owner: false },
+  };
+}
+
 function fakePort(overrides: Partial<WorkerBatchPort> = {}): WorkerBatchPort {
   return {
     status: vi.fn(async () => ({ status: 200, body: status() })),
@@ -112,12 +186,19 @@ describe('WorkerBatchCoordinator', () => {
   it('creates immediately, downloads a ready JPEG, then refetches the acknowledged manifest', async () => {
     const port = fakePort();
     const coordinator = new WorkerBatchCoordinator(port);
-    const event = await coordinator.create(['A documentary shipyard at dawn'], 700);
+    const event = await coordinator.create(
+      ['A documentary shipyard at dawn'],
+      700,
+      [],
+      '16:9',
+      'Atlas of Quiet Work',
+    );
 
     expect(event.type).toBe('manifest');
     expect(port.createBatch).toHaveBeenCalledOnce();
     expect(port.downloadArtifact).toHaveBeenCalledWith({
       batchId,
+      batchName: 'Atlas of Quiet Work',
       index: 1,
       expectedSha256: 'a'.repeat(64),
       expectedSizeBytes: 2_048,
@@ -234,6 +315,7 @@ describe('WorkerBatchCoordinator', () => {
     expect(secondDownload).toHaveBeenCalledOnce();
     expect(secondDownload).toHaveBeenCalledWith({
       batchId,
+      batchName: undefined,
       index: 1,
       expectedSha256: 'a'.repeat(64),
       expectedSizeBytes: 2_048,
@@ -497,12 +579,117 @@ describe('WorkerBatchCoordinator', () => {
     expect(port.getBatch).toHaveBeenCalled();
     expect(port.downloadArtifact).toHaveBeenCalledWith({
       batchId,
+      batchName: 'Untitled batch',
       index: 1,
       expectedSha256: 'a'.repeat(64),
       expectedSizeBytes: 2_048,
       expectedWidth: 1280,
       expectedHeight: 720,
     });
+  });
+
+  it('downloads newly-ready artifacts exposed by terminal refetches before committing completion', async () => {
+    const firstTerminal = terminalManifest([
+      ...Array.from({ length: 21 }, () => 'downloaded' as const),
+      'ready',
+      'pending',
+      'pending',
+    ]);
+    const secondTerminal = terminalManifest([
+      ...Array.from({ length: 22 }, () => 'downloaded' as const),
+      'ready',
+      'ready',
+    ]);
+    const completedTerminal = terminalManifest(
+      Array.from({ length: 24 }, () => 'downloaded' as const),
+    );
+    const getBatch = vi.fn()
+      .mockResolvedValueOnce({ status: 200, body: firstTerminal })
+      .mockResolvedValueOnce({ status: 200, body: secondTerminal })
+      .mockResolvedValue({ status: 200, body: completedTerminal });
+    const downloadArtifact = vi.fn(async (
+      input: Parameters<WorkerBatchPort['downloadArtifact']>[0],
+    ) => terminalReceipt(input.index));
+    const port = fakePort({
+      status: vi.fn(async () => ({ status: 200, body: releasedStatus() })),
+      getBatch,
+      readReceipts: vi.fn(async () => (
+        Array.from({ length: 21 }, (_, offset) => terminalReceipt(offset + 1))
+      )),
+      downloadArtifact,
+    });
+    const coordinator = new WorkerBatchCoordinator(port, batchId);
+    coordinator.setBatchName('Atlas of Quiet Work');
+    const events: unknown[] = [];
+    coordinator.subscribe((event) => events.push(event));
+
+    const event = await coordinator.poll();
+
+    expect(event).toMatchObject({
+      type: 'manifest',
+      manifest: { state: 'completed', progress: { downloaded: 24, total: 24 } },
+    });
+    if (event.type === 'manifest') expect(event.receipts).toHaveLength(24);
+    expect(downloadArtifact.mock.calls.map(([input]) => input.index)).toEqual([22, 23, 24]);
+    expect(downloadArtifact.mock.calls.every(([input]) => input.batchName === 'Atlas of Quiet Work')).toBe(true);
+    expect(getBatch).toHaveBeenCalledTimes(3);
+    expect(events).toHaveLength(1);
+
+    await expect(coordinator.poll()).resolves.toMatchObject({
+      type: 'manifest',
+      manifest: { progress: { downloaded: 24, total: 24 } },
+    });
+    expect(downloadArtifact).toHaveBeenCalledTimes(3);
+    expect(port.readReceipts).toHaveBeenCalledOnce();
+    expect(getBatch).toHaveBeenCalledTimes(4);
+  });
+
+  it('bounds an unreflected terminal acknowledgement and completes on a later retry', async () => {
+    const readyTerminal = terminalManifest(['ready']);
+    const downloadedTerminal = terminalManifest(['downloaded']);
+    const getBatch = vi.fn()
+      .mockResolvedValueOnce({ status: 200, body: readyTerminal })
+      .mockResolvedValueOnce({ status: 200, body: readyTerminal })
+      .mockResolvedValueOnce({ status: 200, body: readyTerminal })
+      .mockResolvedValue({ status: 200, body: downloadedTerminal });
+    const downloadArtifact = vi.fn(async (
+      input: Parameters<WorkerBatchPort['downloadArtifact']>[0],
+    ) => terminalReceipt(input.index));
+    const port = fakePort({
+      status: vi.fn(async () => ({ status: 200, body: releasedStatus() })),
+      getBatch,
+      downloadArtifact,
+    });
+    const coordinator = new WorkerBatchCoordinator(port, batchId);
+    coordinator.setBatchName('Retryable terminal batch');
+    const events: unknown[] = [];
+    coordinator.subscribe((event) => events.push(event));
+
+    await expect(coordinator.poll()).rejects.toMatchObject({
+      code: 'terminal_reconciliation_pending',
+      retryable: true,
+    });
+    expect(getBatch).toHaveBeenCalledTimes(2);
+    expect(downloadArtifact).toHaveBeenCalledOnce();
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'error',
+        code: 'terminal_reconciliation_pending',
+        retryable: true,
+      }),
+    ]);
+
+    await expect(coordinator.poll()).resolves.toMatchObject({
+      type: 'manifest',
+      manifest: { state: 'completed', progress: { downloaded: 1, total: 1 } },
+    });
+    expect(getBatch).toHaveBeenCalledTimes(4);
+    expect(downloadArtifact).toHaveBeenCalledTimes(2);
+    expect(downloadArtifact).toHaveBeenLastCalledWith(
+      expect.objectContaining({ batchName: 'Retryable terminal batch', index: 1 }),
+    );
+    expect(events).toHaveLength(2);
+    expect(events.at(-1)).toMatchObject({ type: 'manifest' });
   });
 
   it('reconnects a persisted owned batch ID after renderer restart', async () => {
@@ -563,6 +750,39 @@ describe('WorkerBatchCoordinator', () => {
     coordinator.subscribe((event) => events.push(event));
     await expect(coordinator.poll()).rejects.toMatchObject({ code: 'worker_session_unavailable', retryable: true });
     expect(events).toEqual([expect.objectContaining({ type: 'error', code: 'worker_session_unavailable', retryable: true })]);
+  });
+
+  it('accepts a safe named-folder receipt and rejects path-shaped receipt names', async () => {
+    const namedReceipt = {
+      ...receipt(),
+      filename: 'batches/Atlas of Quiet Work/000001.jpg',
+    };
+    const namedPort = fakePort({
+      createBatch: vi.fn(async () => ({ status: 201, body: manifest('downloaded') })),
+      readReceipts: vi.fn(async () => [namedReceipt]),
+    });
+
+    await expect(new WorkerBatchCoordinator(namedPort).create(
+      ['A documentary shipyard at dawn'],
+      700,
+      [],
+      '16:9',
+      'Atlas of Quiet Work',
+    )).resolves.toMatchObject({
+      type: 'manifest',
+      receipts: [expect.objectContaining({ filename: namedReceipt.filename })],
+    });
+    expect(namedPort.readReceipts).toHaveBeenCalledWith(batchId, 'Atlas of Quiet Work');
+    expect(namedPort.downloadArtifact).not.toHaveBeenCalled();
+
+    const invalidPort = fakePort({
+      createBatch: vi.fn(async () => ({ status: 201, body: manifest('downloaded') })),
+      readReceipts: vi.fn(async () => [{ ...receipt(), filename: 'batches/../000001.jpg' }]),
+    });
+    await expect(new WorkerBatchCoordinator(invalidPort).create(
+      ['A documentary shipyard at dawn'],
+      700,
+    )).rejects.toMatchObject({ code: 'local_receipt_invalid' });
   });
 
   it('fails closed on conflicting receipts and malformed errors', async () => {

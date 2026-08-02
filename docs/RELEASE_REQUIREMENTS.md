@@ -16,7 +16,9 @@ weights never download to either editor's computer.
 - Native download-directory selection and persisted permission-safe path.
 - Authenticated RunPod and worker transport without exposing secrets to logs.
 - Resumable Range downloads to `.part`, SHA-256 verification, atomic rename, and
-  collision-safe ordered filenames.
+  collision-safe ordered filenames inside a durable user-named batch folder.
+- Receipt-bound full-quality Library reads and native per-image export with a
+  friendly filename, a native save dialog, and collision refusal.
 - Local settings, receipt ledger, diagnostics export, and install updates.
 
 ## Beta gate

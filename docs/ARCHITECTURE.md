@@ -6,9 +6,10 @@
 
 - React/TypeScript presentation and local state.
 - Tauri/Rust commands for OS dialogs, credential vault, downloads, checksums,
-  bounded authenticated WebP previews, local manifest storage, and RunPod
-  requests. Preview bytes are held in a session-local object URL only; worker
-  credentials never cross into the renderer.
+  bounded authenticated WebP previews, receipt-bound full JPEG reads and
+  exports, durable user-named batch-folder mappings, local manifest storage,
+  and RunPod requests. Image bytes are held in a bounded session-local object
+  URL cache only; worker credentials never cross into the renderer.
 - A `RunPodProvider` interface with fake and real implementations.
 - A `WorkerClient` interface with fake and HTTP implementations.
 
@@ -52,7 +53,12 @@ Image: `pending -> generating -> ready -> downloaded` with `generating -> retryi
 - The active batch owner may resume or cancel. A second user remains blocked
   until the interrupted lease is explicitly resolved.
 - The desktop compares its local receipt ledger with the server manifest and
-  requests only missing or checksum-mismatched files.
+  requests only missing or checksum-mismatched files. A terminal manifest is
+  reconciled to a bounded fixed point before the UI reports completion, so
+  newly exposed ready artifacts cannot remain waiting after polling stops.
+- The internal batch UUID remains the worker identity. Native storage maps it
+  durably to the sanitized user-entered batch name, migrates legacy UUID
+  folders atomically, and preserves that mapping across restart and resume.
 
 ## Security boundaries
 

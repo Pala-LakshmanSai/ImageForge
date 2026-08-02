@@ -3,10 +3,11 @@ import type { AppState, SettingsState } from '../domain/types';
 
 const STORAGE_KEY = 'imageforge.safe-preferences.v1';
 
-interface SafePreferencesV1 {
-  version: 1;
+interface SafePreferences {
+  version: 1 | 2;
   setupCompleted: true;
   lastOwnedBatchId: string | null;
+  lastOwnedBatchName: string | null;
   userName: string;
   defaultDestination: string;
   editorialSuffixEnabled: boolean;
@@ -23,13 +24,14 @@ function boundedString(value: unknown, maximum: number): string | null {
 
 const BATCH_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-function parse(value: unknown): SafePreferencesV1 | null {
+function parse(value: unknown): SafePreferences | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
   const item = value as Record<string, unknown>;
   const allowed = new Set([
     'version',
     'setupCompleted',
     'lastOwnedBatchId',
+    'lastOwnedBatchName',
     'userName',
     'defaultDestination',
     'editorialSuffixEnabled',
@@ -43,11 +45,21 @@ function parse(value: unknown): SafePreferencesV1 | null {
     ? null
     : boundedString(item.lastOwnedBatchId, 80);
   const lastOwnedBatchId = rawBatchId === null || BATCH_ID_PATTERN.test(rawBatchId) ? rawBatchId : null;
+  const validVersion = item.version === 1 || item.version === 2;
+  const lastOwnedBatchName = item.version === 2 && item.lastOwnedBatchName !== null
+    ? boundedString(item.lastOwnedBatchName, 80)
+    : null;
   if (
     Object.keys(item).some((key) => !allowed.has(key)) ||
-    item.version !== 1 ||
+    !validVersion ||
     item.setupCompleted !== true
     || (item.lastOwnedBatchId !== undefined && item.lastOwnedBatchId !== null && lastOwnedBatchId === null)
+    || (item.version === 1 && item.lastOwnedBatchName !== undefined)
+    || (item.version === 2 && (
+      item.lastOwnedBatchName === undefined
+      || (lastOwnedBatchId === null && item.lastOwnedBatchName !== null)
+      || (lastOwnedBatchName !== null && !lastOwnedBatchName.trim())
+    ))
   ) return null;
   const userName = boundedString(item.userName, 80);
   const destination = boundedString(item.defaultDestination, 2_048);
@@ -67,9 +79,10 @@ function parse(value: unknown): SafePreferencesV1 | null {
     parseStudioProfile(studioProfile) === null
   ) return null;
   return {
-    version: 1,
+    version: item.version as 1 | 2,
     setupCompleted: true,
     lastOwnedBatchId,
+    lastOwnedBatchName,
     userName,
     defaultDestination: destination,
     editorialSuffixEnabled: item.editorialSuffixEnabled,
@@ -82,7 +95,7 @@ function parse(value: unknown): SafePreferencesV1 | null {
 }
 
 export function hydrateSafePreferences(base: AppState, storage: Pick<Storage, 'getItem'>): AppState {
-  let persisted: SafePreferencesV1 | null = null;
+  let persisted: SafePreferences | null = null;
   try {
     const raw = storage.getItem(STORAGE_KEY);
     persisted = raw === null || raw.length > 32_768 ? null : parse(JSON.parse(raw) as unknown);
@@ -121,16 +134,17 @@ export function hydrateSafePreferences(base: AppState, storage: Pick<Storage, 'g
 export function persistSafePreferences(
   state: AppState,
   storage: Pick<Storage, 'setItem'>,
-  recoveryBatchIdOverride?: string | null,
+  recoveryOverride?: PersistedBatchRecovery | null,
 ): void {
-  const preferences: SafePreferencesV1 = {
-    version: 1,
+  const activeRecovery = state.batch?.canManage === true && BATCH_ID_PATTERN.test(state.batch.id)
+    ? { id: state.batch.id, name: state.batch.name.slice(0, 80) }
+    : null;
+  const recovery = recoveryOverride !== undefined ? recoveryOverride : activeRecovery;
+  const preferences: SafePreferences = {
+    version: 2,
     setupCompleted: true,
-    lastOwnedBatchId: recoveryBatchIdOverride !== undefined
-      ? recoveryBatchIdOverride
-      : state.batch?.canManage === true && BATCH_ID_PATTERN.test(state.batch.id)
-        ? state.batch.id
-        : null,
+    lastOwnedBatchId: recovery?.id ?? null,
+    lastOwnedBatchName: recovery?.name?.slice(0, 80) ?? null,
     userName: state.settings.userName.slice(0, 80),
     defaultDestination: state.settings.defaultDestination.slice(0, 2_048),
     editorialSuffixEnabled: state.settings.editorialSuffixEnabled,
@@ -145,9 +159,28 @@ export function persistSafePreferences(
   storage.setItem(STORAGE_KEY, JSON.stringify(preferences));
 }
 
-/** Batch IDs are recovery pointers, not prompt or credential data. They are
- * kept separately so bootstrap can reconcile a terminal manifest after a
- * renderer restart without persisting the prompt list. */
+export interface PersistedBatchRecovery {
+  id: string;
+  name: string | null;
+}
+
+/** Recovery stores only the worker UUID and user-entered batch name. Prompt
+ * text, image metadata, credentials, and Pod identity remain excluded. */
+export function readPersistedBatchRecovery(
+  storage: Pick<Storage, 'getItem'>,
+): PersistedBatchRecovery | null {
+  try {
+    const raw = storage.getItem(STORAGE_KEY);
+    if (raw === null || raw.length > 32_768) return null;
+    const persisted = parse(JSON.parse(raw) as unknown);
+    return persisted?.lastOwnedBatchId
+      ? { id: persisted.lastOwnedBatchId, name: persisted.lastOwnedBatchName }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function readPersistedBatchId(storage: Pick<Storage, 'getItem'>): string | null {
   try {
     const raw = storage.getItem(STORAGE_KEY);

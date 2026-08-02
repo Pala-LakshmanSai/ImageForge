@@ -61,6 +61,20 @@ export interface ConnectionTestResult {
   message: string;
 }
 
+export interface ValidatedImageResponse {
+  contentType: 'image/jpeg' | 'image/webp';
+  sha256: string;
+  sizeBytes: number;
+  bytes: number[];
+}
+
+export interface DownloadAssetRequest {
+  batchId: string;
+  index: number;
+  batchName: string;
+  checksum: string;
+}
+
 export interface StudioProfile {
   profile: string;
   templateId: string;
@@ -77,13 +91,16 @@ export interface ImageForgeAdapter {
   chooseDestination(defaultPath: string): Promise<string | null>;
   validateDestination(path: string): Promise<boolean>;
   revealPath(relativePath?: string): Promise<void>;
-  /** Fetches one worker-generated 320px WebP through the native vault. */
-  fetchPreview?(batchId: string, index: number): Promise<{
-    contentType: 'image/webp';
-    sha256: string;
-    sizeBytes: number;
-    bytes: number[];
-  }>;
+  /**
+   * Fetches one validated image through the native boundary. Production may
+   * return the receipt-bound local JPEG or a bounded worker WebP preview.
+   */
+  fetchPreview?(batchId: string, index: number): Promise<ValidatedImageResponse>;
+  /**
+   * Saves one exact receipt-bound JPEG. Native code owns filename
+   * sanitization, collision handling, and the save dialog.
+   */
+  downloadAsset?(request: DownloadAssetRequest): Promise<string | null>;
   writeManifest(batchId: string, content: string): Promise<string>;
   credentialMetadata(): Promise<CredentialMetadataMap>;
   replaceCredential(kind: CredentialKind, value: string): Promise<CredentialMetadata>;
@@ -233,6 +250,10 @@ export function createFakeImageForgeAdapter(initialCredentials?: CredentialMetad
     },
     async revealPath() {
       await Promise.resolve();
+    },
+    async downloadAsset(request) {
+      await Promise.resolve();
+      return request.batchName + ' - ' + String(request.index).padStart(3, '0') + '.jpg';
     },
     async writeManifest(batchId) {
       await Promise.resolve();

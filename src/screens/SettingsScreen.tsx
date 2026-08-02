@@ -31,13 +31,13 @@ const SCENARIOS: Array<{ id: OperationalScenario; label: string; note: string }>
   { id: 'loading', label: 'Loading', note: 'Model loading from volume' },
   { id: 'warming', label: 'Warming', note: 'Inference graph warmup' },
   { id: 'ready', label: 'Ready', note: 'Warm, no active batch' },
-  { id: 'running', label: 'Running', note: 'Ordered downloads in flight' },
+  { id: 'running', label: 'Running', note: 'Images generating and saving' },
   { id: 'paused', label: 'Paused', note: 'Owner retains batch lock' },
   { id: 'locked', label: 'Locked', note: 'Other user owns batch' },
   { id: 'duplicate_pods', label: 'Duplicate Pods', note: 'Manual cost warning' },
-  { id: 'reconnecting', label: 'Reconnecting', note: 'Durable resume path' },
+  { id: 'reconnecting', label: 'Reconnecting', note: 'Connection recovery' },
   { id: 'partial_failure', label: 'Partial failure', note: 'Retry failed slots only' },
-  { id: 'complete', label: 'Complete', note: 'All receipts verified' },
+  { id: 'complete', label: 'Complete', note: 'All images saved' },
   { id: 'error', label: 'Error', note: 'Safe, redacted diagnostic' },
 ];
 
@@ -100,10 +100,10 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
   return (
     <div className="screen settings-screen">
       <section className="page-heading">
-        <div><Eyebrow>Settings · this device</Eyebrow><h1>Make the desk yours.</h1><p>Identity, local delivery, redacted connection health, and explicit GPU control.</p></div>
+        <div><Eyebrow>This device</Eyebrow><h1>Settings</h1><p>Output folder, account details, GPU controls, and image defaults.</p></div>
         <div className="page-heading__actions">
-          <Button icon={Laptop} disabled={productionLocked} onClick={() => openSetup()}>Review setup</Button>
-          <PhaseBadge tone="success"><ShieldCheck size={13} /> secrets redacted</PhaseBadge>
+          <Button icon={Laptop} disabled={productionLocked} onClick={() => openSetup()}>Setup</Button>
+          <PhaseBadge tone="success"><ShieldCheck size={13} /> secrets hidden</PhaseBadge>
           <Button tone="primary" icon={Save} onClick={() => dispatch({ type: 'SAVE_SETTINGS' })}>Save preferences</Button>
         </div>
       </section>
@@ -111,35 +111,35 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
       <div className="settings-layout">
         <div className="settings-column">
           <section className="panel settings-panel">
-            <SettingSectionTitle icon={UserRound} eyebrow="Identity & delivery" title="Local production profile" />
+            <SettingSectionTitle icon={UserRound} eyebrow="Profile" title="Name and output" />
             <div className="settings-form-grid">
-              <label className="settings-field"><span>Display name</span><small>Visible when you hold the shared batch lock.</small><input value={state.settings.userName} maxLength={40} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'userName', value: event.target.value })} /></label>
-              <label className="settings-field"><span>Default destination</span><small>Full images and receipts stay on this device.</small><button type="button" className="settings-picker" disabled={productionLocked || choosingDestination} onClick={() => void chooseDefaultDestination()}><Folder size={16} /><strong>{choosingDestination ? 'Opening chooser…' : state.settings.defaultDestination}</strong><ChevronRight size={15} /></button></label>
+              <label className="settings-field"><span>Display name</span><small>Shown to the other user when you run a batch.</small><input value={state.settings.userName} maxLength={40} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'userName', value: event.target.value })} /></label>
+              <label className="settings-field"><span>Default output folder</span><small>Where completed images are saved on this device.</small><button type="button" className="settings-picker" disabled={productionLocked || choosingDestination} onClick={() => void chooseDefaultDestination()}><Folder size={16} /><strong>{choosingDestination ? 'Opening chooser…' : state.settings.defaultDestination}</strong><ChevronRight size={15} /></button></label>
             </div>
           </section>
 
           <section className="panel settings-panel">
-            <SettingSectionTitle icon={KeyRound} eyebrow="Secure connection" title="Credential health" />
-            <p className="settings-intro">React never receives a saved credential. These cards contain redacted metadata returned by the desktop vault abstraction.</p>
+            <SettingSectionTitle icon={KeyRound} eyebrow="Connection" title="Saved credentials" />
+            <p className="settings-intro">Credentials stay in your system vault. Only status and the last four characters appear here.</p>
             <div className="credential-list">
               <article className="credential-card">
                 <span className="credential-card__icon"><KeyRound size={18} /></span>
-                <div><strong>RunPod restricted API key</strong><small>{state.setup.credentials.runpodApiKey.configured ? `Configured · suffix •••• ${state.setup.credentials.runpodApiKey.suffix} · ${state.setup.credentials.runpodApiKey.provider}` : `Not configured · ${state.setup.credentials.runpodApiKey.provider}`}</small></div>
+                <div><strong>RunPod API key</strong><small>{state.setup.credentials.runpodApiKey.configured ? `Configured · ends in •••• ${state.setup.credentials.runpodApiKey.suffix} · ${state.setup.credentials.runpodApiKey.provider}` : `Not configured · ${state.setup.credentials.runpodApiKey.provider}`}</small></div>
                 <PhaseBadge tone={state.setup.credentials.runpodApiKey.configured ? 'success' : 'warning'}>{state.setup.credentials.runpodApiKey.configured ? 'configured' : 'required'}</PhaseBadge>
                 <Button compact disabled={activeBatch} onClick={() => openSetup(1, 'runpodApiKey')}>Replace</Button>
               </article>
               <article className="credential-card">
                 <span className="credential-card__icon"><LockKeyhole size={18} /></span>
-                <div><strong>Per-user worker credential</strong><small>{state.setup.credentials.workerToken.configured ? `Configured · suffix •••• ${state.setup.credentials.workerToken.suffix} · never placed in a URL` : `Not configured · ${state.setup.credentials.workerToken.provider}`}</small></div>
+                <div><strong>Worker access key</strong><small>{state.setup.credentials.workerToken.configured ? `Configured · ends in •••• ${state.setup.credentials.workerToken.suffix} · never shown in a URL` : `Not configured · ${state.setup.credentials.workerToken.provider}`}</small></div>
                 <PhaseBadge tone={state.setup.credentials.workerToken.configured ? 'success' : 'warning'}>{state.setup.credentials.workerToken.configured ? 'configured' : 'required'}</PhaseBadge>
                 <Button compact disabled={activeBatch} onClick={() => openSetup(2, 'workerToken')}>Replace</Button>
               </article>
             </div>
-            <div className="redaction-note"><EyeOff size={17} /><span><strong>Screenshot-safe by design</strong><small>Secrets are excluded from UI state, logs, analytics, crash reports, and project files.</small></span></div>
+            <div className="redaction-note"><EyeOff size={17} /><span><strong>Secrets stay hidden</strong><small>They are excluded from the screen, logs, crash reports, and project files.</small></span></div>
           </section>
 
           <section className="panel settings-panel">
-            <SettingSectionTitle icon={MonitorCog} eyebrow="Interface" title="Display & feedback" />
+            <SettingSectionTitle icon={MonitorCog} eyebrow="Interface" title="Appearance" />
             <div className="setting-rows">
               <label className="select-row"><span><strong>Theme</strong><small>Both modes preserve the dark production-console contrast.</small></span><select value={state.settings.theme} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'theme', value: event.target.value as 'midnight' | 'ink' })}><option value="midnight">Midnight cobalt</option><option value="ink">Deep ink</option></select></label>
               <label className="select-row"><span><strong>Information density</strong><small>Compact keeps long prompt-list reviews efficient.</small></span><select value={state.settings.density} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'density', value: event.target.value as 'comfortable' | 'compact' })}><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select></label>
@@ -149,10 +149,10 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
 
         <div className="settings-column">
           <section className="panel settings-panel">
-            <SettingSectionTitle icon={Server} eyebrow="RunPod attachment" title="One GPU, discovered live" />
+            <SettingSectionTitle icon={Server} eyebrow="GPU control" title="One GPU at a time" />
             <div className="pod-attachment-card">
-              <div className="pod-attachment-card__top"><span><Zap size={20} /></span><div><strong>{state.pod.gpu ?? 'No active compute'}</strong><small>{state.pod.podId ? `${state.pod.podId} · disposable session ID` : 'A fresh Pod ID is discovered after each explicit start.'}</small></div><PhaseBadge tone={state.pod.phase === 'ready' ? 'success' : state.pod.phase === 'error' ? 'danger' : 'neutral'}>{state.pod.phase}</PhaseBadge></div>
-              <dl><div><dt>Fallback pool</dt><dd>7 ordinary EU-RO-1 GPUs</dd></div><div><dt>Selection</dt><dd>Atomic ordered fallback</dd></div><div><dt>Template</dt><dd>q8sfgixfy2 · pinned worker</dd></div><div><dt>Port</dt><dd>8000 / HTTPS proxy</dd></div></dl>
+              <div className="pod-attachment-card__top"><span><Zap size={20} /></span><div><strong>{state.pod.gpu ?? 'No active compute'}</strong><small>{state.pod.podId ? `${state.pod.hourlyRate === null ? 'Rate unavailable' : `$${state.pod.hourlyRate.toFixed(2)}/hr`} · active compute` : 'Starts only when you click Start GPU.'}</small></div><PhaseBadge tone={state.pod.phase === 'ready' ? 'success' : state.pod.phase === 'error' ? 'danger' : 'neutral'}>{state.pod.phase}</PhaseBadge></div>
+              <dl><div><dt>Approved GPUs</dt><dd>{state.settings.slowEmergencyGpuEnabled ? '8 types' : '7 types'}</dd></div><div><dt>Region</dt><dd>EU-RO-1 Secure</dd></div><div><dt>Selection</dt><dd>{state.settings.gpuPreference === 'best_value' ? 'Best measured value' : 'Fastest measured'}</dd></div><div><dt>Shutdown</dt><dd>Manual only</dd></div></dl>
             </div>
             <div className="setting-rows pod-preferences">
               <label className="select-row"><span><strong>GPU preference</strong><small>Ranks the compatible pool; it never pins one GPU model.</small></span><select value={state.settings.gpuPreference} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'gpuPreference', value: event.target.value as 'best_value' | 'fastest' })}><option value="best_value">Best whole-batch value</option><option value="fastest">Fastest measured</option></select></label>
@@ -161,7 +161,7 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
             {state.pod.matchingPodIds.length > 1 ? (
               <div className="duplicate-pod-card" role="alert"><AlertTriangle size={19} /><div><strong>Duplicate hourly spend detected</strong><small>{state.pod.matchingPodIds.join(' · ')}. Neither Pod will be silently deleted.</small></div></div>
             ) : null}
-            <div className="manual-only-card"><ShieldCheck size={18} /><div><strong>Termination is manual only</strong><small>No completed-job event, idle timer, app exit, background monitor, or connectivity failure can terminate a Pod.</small></div></div>
+            <div className="manual-only-card"><ShieldCheck size={18} /><div><strong>GPU stops only when you confirm</strong><small>Finishing a batch, closing the app, idling, or losing connection will not stop it.</small></div></div>
             {state.pod.podId ? <Button tone="danger" onClick={() => dispatch({ type: 'REQUEST_STOP_POD' })}>Stop GPU with confirmation</Button> : <Button tone="primary" icon={Zap} disabled={!['offline', 'error'].includes(state.pod.phase) || state.pod.createRecovery !== null} onClick={() => dispatch({ type: 'START_POD' })}>Start GPU explicitly</Button>}
             <Button icon={Check} disabled={productionLocked} onClick={() => void testConnection()}>Run read-only connection test</Button>
             <details className="advanced-settings">
@@ -179,10 +179,10 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
           </section>
 
           <section className="panel settings-panel">
-            <SettingSectionTitle icon={Sparkles} eyebrow="Generation defaults" title="Portable render contract" />
+            <SettingSectionTitle icon={Sparkles} eyebrow="Image defaults" title="Output and style" />
             <div className="fixed-contract"><div><span>Model</span><strong>black-forest-labs/<br />FLUX.2-klein-4B</strong></div><div><span>Precision</span><strong>BF16</strong></div><div><span>Frame</span><strong>{aspectRatioOption(state.draft.aspectRatio).label} · per batch</strong></div><div><span>Sampler</span><strong>4 steps · 1.0</strong></div></div>
-            <label className="toggle-row"><span><strong>Editorial Realism suffix</strong><small>Visible, deterministic text appended to each prompt.</small></span><input type="checkbox" checked={state.settings.editorialSuffixEnabled} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'editorialSuffixEnabled', value: event.target.checked })} /><i /></label>
-            <label className="settings-field"><span>Default appended prompt</span><textarea value={state.settings.editorialSuffix} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'editorialSuffix', value: event.target.value })} aria-describedby="settings-suffix-help" /><small id="settings-suffix-help">Saved as the default for every new batch. The switch controls whether it is appended.</small></label>
+            <label className="toggle-row"><span><strong>Optional style instruction</strong><small>{state.settings.editorialSuffixEnabled ? 'On — added to every prompt.' : 'Off — prompts are sent exactly as written.'}</small></span><input type="checkbox" checked={state.settings.editorialSuffixEnabled} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'editorialSuffixEnabled', value: event.target.checked })} /><i /></label>
+            <label className="settings-field"><span>Style instruction</span><textarea value={state.settings.editorialSuffix} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'editorialSuffix', value: event.target.value })} aria-describedby="settings-suffix-help" /><small id="settings-suffix-help">Saved for new batches and used only when the switch is on.</small></label>
           </section>
 
           {adapter.mode !== 'production' ? <section className="panel settings-panel state-lab">
@@ -194,7 +194,7 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
           </section> : null}
 
           {adapter.mode !== 'production' ? <section className="panel settings-panel danger-zone">
-            <SettingSectionTitle icon={RotateCcw} eyebrow="Simulation data" title="Reset production desk" />
+            <SettingSectionTitle icon={RotateCcw} eyebrow="Test data" title="Reset workspace" />
             <p>Return to the authored offline/empty state. This fake-only action clears the simulated batch and library; it does not touch local files.</p>
             <Button tone="danger" onClick={() => dispatch({ type: 'RESET_WORKSPACE' })}>Reset simulated workspace</Button>
           </section> : null}

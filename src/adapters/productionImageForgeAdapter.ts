@@ -15,11 +15,14 @@ import {
 } from './gpuLifecycleCoordinator';
 import {
   type ConnectionTestInput,
+  type DownloadAssetRequest,
   type ImageForgeAdapter,
+  type ValidatedImageResponse,
   parseStudioProfile,
 } from './imageForgeAdapter';
 import {
   WorkerBatchCoordinator,
+  type LocalDownloadReceipt,
   type WorkerBatchEvent,
   type WorkerBatchPort,
 } from './workerBatchCoordinator';
@@ -46,24 +49,70 @@ export interface ProductionDesktopPort extends GpuLifecycleNativePort, WorkerBat
   reconcileReceipts(batchId: string): Promise<unknown>;
   revealDestination(relativePath?: string): Promise<void>;
   writeManifest(batchId: string, content: string): Promise<string>;
-  fetchPreview(batchId: string, index: number): Promise<{
-    contentType: 'image/webp';
-    sha256: string;
-    sizeBytes: number;
-    bytes: number[];
-  }>;
+  fetchPreview(batchId: string, index: number): Promise<ValidatedImageResponse>;
+  downloadAsset(request: DownloadAssetRequest): Promise<string | null>;
 }
 
 export type ProductionRuntimeEvent =
   | { type: 'pod'; pod: PodState }
   | { type: 'batch'; batch: BatchState; assets: LibraryAsset[] }
+  | { type: 'library'; assets: LibraryAsset[] }
   | { type: 'busy'; batch: BatchState }
   | { type: 'idle' }
   | { type: 'create-recovery'; marker: PodState['createRecovery'] }
   | { type: 'error'; scope: 'pod' | 'batch'; code?: string; message: string; retryable: boolean };
 
+function recoveredBatchName(
+  batchId: string,
+  receipts: readonly { filename: string }[],
+): string | null {
+  if (receipts.length === 0) return null;
+  const folders = new Set(receipts.map((receipt) => receipt.filename.split('/')[1]));
+  if (folders.size !== 1) return null;
+  const [folder] = folders;
+  return folder && folder !== batchId ? folder : null;
+}
+
+function projectRecoveredLibrary(
+  batchId: string,
+  batchName: string,
+  destination: string,
+  receipts: readonly LocalDownloadReceipt[],
+): LibraryAsset[] {
+  return receipts.map((receipt) => {
+    const createdAt = new Date(receipt.verifiedAtUnixMs);
+    if (
+      receipt.batchId !== batchId
+      || !Number.isSafeInteger(receipt.index)
+      || receipt.index < 1
+      || !Number.isSafeInteger(receipt.verifiedAtUnixMs)
+      || receipt.verifiedAtUnixMs < 0
+      || !/^[0-9a-f]{64}$/i.test(receipt.sha256)
+      || Number.isNaN(createdAt.valueOf())
+    ) {
+      throw new Error('A restored local receipt is invalid.');
+    }
+    return {
+      id: `${batchId}-${receipt.index}`,
+      batchId,
+      batchName,
+      index: receipt.index,
+      prompt: `Saved image ${String(receipt.index).padStart(3, '0')}`,
+      seed: receipt.index,
+      filename: receipt.filename,
+      checksum: receipt.sha256,
+      createdAt: createdAt.toISOString(),
+      durationSeconds: 0,
+      destination,
+      palette: receipt.index % 6,
+      recovered: true,
+    };
+  });
+}
+
 export interface ProductionRuntimeFacade {
   subscribe(listener: (event: ProductionRuntimeEvent) => void): () => void;
+  restoreLocalLibrary(state: AppState): Promise<void>;
   refresh(state: AppState): Promise<void>;
   startGpu(state: AppState): Promise<void>;
   stopGpu(state: AppState): Promise<void>;
@@ -88,13 +137,22 @@ class ProductionRuntime implements ProductionRuntimeFacade {
   #unsubscribeGpu: () => void;
   #unsubscribeWorker: () => void;
   #recoveredBatchId: string | null;
+  #recoveredBatchName: string | null;
   #reconciledRecoveredBatch = false;
+  #localLibraryRestored = false;
+  #localLibraryRestore: Promise<void> | null = null;
 
-  constructor(port: ProductionDesktopPort, recoveredBatchId: string | null = null) {
+  constructor(
+    port: ProductionDesktopPort,
+    recoveredBatchId: string | null = null,
+    recoveredBatchName: string | null = null,
+  ) {
     this.#port = port;
     this.#recoveredBatchId = recoveredBatchId;
+    this.#recoveredBatchName = recoveredBatchName;
     this.#gpu = new GpuLifecycleCoordinator(port);
     this.#worker = new WorkerBatchCoordinator(port, recoveredBatchId);
+    if (recoveredBatchName !== null) this.#worker.setBatchName(recoveredBatchName);
     this.#unsubscribeGpu = this.#gpu.subscribe((snapshot) => this.#onPodSnapshot(snapshot));
     this.#unsubscribeWorker = this.#worker.subscribe((event) => this.#onWorkerEvent(event));
   }
@@ -102,6 +160,19 @@ class ProductionRuntime implements ProductionRuntimeFacade {
   subscribe(listener: (event: ProductionRuntimeEvent) => void): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
+  }
+
+  async restoreLocalLibrary(state: AppState): Promise<void> {
+    if (this.#recoveredBatchId === null || this.#localLibraryRestored) return;
+    if (this.#localLibraryRestore !== null) return this.#localLibraryRestore;
+    this.#captureState(state);
+    const operation = this.#restoreLocalLibrary(state);
+    this.#localLibraryRestore = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.#localLibraryRestore === operation) this.#localLibraryRestore = null;
+    }
   }
 
   async refresh(state: AppState): Promise<void> {
@@ -183,6 +254,7 @@ class ProductionRuntime implements ProductionRuntimeFacade {
         batch.prompts[0]?.seed ?? 0,
         batch.references ?? [],
         batch.aspectRatio,
+        batch.name,
       );
     } catch (error) {
       this.#emitError('batch', error, 'ImageForge could not create the batch.');
@@ -206,7 +278,10 @@ class ProductionRuntime implements ProductionRuntimeFacade {
   beginNewBatch(): void {
     this.#worker.forgetBatch();
     this.#recoveredBatchId = null;
+    this.#recoveredBatchName = null;
     this.#reconciledRecoveredBatch = true;
+    this.#localLibraryRestored = true;
+    this.#localLibraryRestore = null;
     this.#presentation = null;
   }
 
@@ -245,6 +320,7 @@ class ProductionRuntime implements ProductionRuntimeFacade {
   #captureState(state: AppState): void {
     this.#pod = state.pod;
     if (state.batch && state.batch.phase !== 'locked') {
+      this.#worker.setBatchName(state.batch.name);
       this.#presentation = {
         name: state.batch.name,
         destination: state.batch.destination,
@@ -253,7 +329,7 @@ class ProductionRuntime implements ProductionRuntimeFacade {
       };
     } else if (this.#presentation === null) {
       this.#presentation = {
-        name: 'Recovered ImageForge batch',
+        name: this.#recoveredBatchName ?? 'Recovered ImageForge batch',
         destination: state.settings.defaultDestination,
         estimatedSecondsPerImage: 8.4,
         hourlyRate: state.pod.hourlyRate,
@@ -294,6 +370,42 @@ class ProductionRuntime implements ProductionRuntimeFacade {
       });
       return false;
     }
+  }
+
+  async #restoreLocalLibrary(state: AppState): Promise<void> {
+    const batchId = this.#recoveredBatchId;
+    if (batchId === null) return;
+    await this.#port.validateDestination(state.settings.defaultDestination);
+    const receipts = await this.#port.readReceipts(
+      batchId,
+      this.#recoveredBatchName ?? undefined,
+    );
+    if (receipts.length === 0) {
+      this.#localLibraryRestored = true;
+      return;
+    }
+    const batchName = this.#recoveredBatchName ?? recoveredBatchName(batchId, receipts);
+    if (batchName === null) return;
+    this.#recoveredBatchName = batchName;
+    this.#worker.setBatchName(batchName);
+    if (this.#presentation === null || this.#presentation.name === 'Recovered ImageForge batch') {
+      this.#presentation = {
+        name: batchName,
+        destination: state.settings.defaultDestination,
+        estimatedSecondsPerImage: 8.4,
+        hourlyRate: state.pod.hourlyRate,
+      };
+    }
+    this.#localLibraryRestored = true;
+    this.#emit({
+      type: 'library',
+      assets: projectRecoveredLibrary(
+        batchId,
+        batchName,
+        state.settings.defaultDestination,
+        receipts,
+      ),
+    });
   }
 
   async #emitCurrentCreateMarker(): Promise<void> {
@@ -358,6 +470,20 @@ class ProductionRuntime implements ProductionRuntimeFacade {
       });
       return;
     }
+    const restoredName = recoveredBatchName(event.manifest.batchId, event.receipts);
+    if (
+      restoredName !== null
+      && (this.#presentation === null || this.#presentation.name === 'Recovered ImageForge batch')
+    ) {
+      this.#worker.setBatchName(restoredName);
+      this.#recoveredBatchName = restoredName;
+      this.#presentation = {
+        name: restoredName,
+        destination: this.#presentation?.destination ?? 'Validated downloads folder',
+        estimatedSecondsPerImage: this.#presentation?.estimatedSecondsPerImage ?? 8.4,
+        hourlyRate: this.#presentation?.hourlyRate ?? this.#pod?.hourlyRate ?? null,
+      };
+    }
     const context = this.#presentation ?? {
       name: 'Recovered ImageForge batch',
       destination: 'Validated downloads folder',
@@ -379,8 +505,12 @@ class ProductionRuntime implements ProductionRuntimeFacade {
   }
 }
 
-export function createProductionImageForgeAdapter(port: ProductionDesktopPort, recoveredBatchId: string | null = null): ImageForgeAdapter {
-  const runtime = new ProductionRuntime(port, recoveredBatchId);
+export function createProductionImageForgeAdapter(
+  port: ProductionDesktopPort,
+  recoveredBatchId: string | null = null,
+  recoveredBatchName: string | null = null,
+): ImageForgeAdapter {
+  const runtime = new ProductionRuntime(port, recoveredBatchId, recoveredBatchName);
   return {
     mode: 'production',
     runtime,
@@ -392,6 +522,7 @@ export function createProductionImageForgeAdapter(port: ProductionDesktopPort, r
     },
     revealPath: (relativePath) => port.revealDestination(relativePath),
     fetchPreview: (batchId, index) => port.fetchPreview(batchId, index),
+    downloadAsset: (request) => port.downloadAsset(request),
     writeManifest: (batchId, content) => port.writeManifest(batchId, content),
     credentialMetadata: () => port.credentialMetadata(),
     replaceCredential: (kind, value) => port.replaceCredential(kind, value),

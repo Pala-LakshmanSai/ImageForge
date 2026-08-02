@@ -26,11 +26,17 @@
 
 ## Files
 
-- Save full artifacts under generated batch IDs and numeric indices.
-- Verify content type, declared size, and SHA-256 on the desktop.
-- Write to `.part` within the destination filesystem and atomically rename.
-- Never overwrite an unrelated existing file; use a deterministic conflict
-  suffix or require an explicit replace action.
+- Keep the worker batch UUID as hidden API and receipt identity. Save full
+  artifacts under a sanitized user-facing batch folder and numeric indices,
+  backed by a durable UUID-to-folder mapping.
+- Verify content type, declared size, dimensions, and SHA-256 on the desktop.
+  Library display and per-image export must resolve through that verified
+  receipt; the renderer never receives an arbitrary local path.
+- Write downloads to `.part` within the destination filesystem and atomically
+  rename. Reject traversal, symbolic links, and Windows reparse points.
+- Never overwrite an unrelated existing download. Named batch folders receive
+  a deterministic conflict suffix; image export replacement occurs only after
+  the native save dialog confirms the destination.
 
 ## Tauri permissions
 

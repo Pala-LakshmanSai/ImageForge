@@ -1,7 +1,6 @@
 import {
   AlertTriangle,
   ArrowRight,
-  Ban,
   Check,
   CircleOff,
   Clock3,
@@ -21,15 +20,16 @@ import {
   X,
   Zap,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { batchCounts } from '../domain/reducer';
 import type { BatchPrompt } from '../domain/types';
 import { aspectRatioOption } from '../domain/aspectRatio';
 import { SimulatedImage } from '../components/SimulatedImage';
 import { PreviewImage } from '../components/PreviewImage';
-import { VirtualPromptList } from '../components/VirtualPromptList';
 import { Button, EmptyState, Eyebrow, LinearProgress, Metric, PhaseBadge, RingProgress } from '../components/primitives';
 import type { ScreenProps } from './types';
+
+const PROMPT_ROW_HEIGHT = 68;
 
 function formatDuration(seconds: number) {
   const rounded = Math.max(0, Math.round(seconds));
@@ -44,6 +44,110 @@ function phaseTone(phase: string): 'success' | 'warning' | 'danger' | 'info' | '
   if (phase === 'paused' || phase === 'partial_failure' || phase === 'reconnecting' || phase === 'interrupted') return 'warning';
   if (phase === 'error' || phase === 'cancelled') return 'danger';
   return 'neutral';
+}
+
+function batchStatus(
+  phase: string,
+  completed: number,
+  total: number,
+  failed: number,
+  selectedIndex?: number,
+) {
+  if (phase === 'complete') return `All ${total} images saved`;
+  if (phase === 'partial_failure') return `${completed} images saved · ${failed} need attention`;
+  if (phase === 'paused') return `Paused after ${completed} images`;
+  if (phase === 'locked') return 'Another user is running this batch';
+  if (phase === 'reconnecting') return 'Reconnecting to the GPU';
+  if (phase === 'interrupted') return 'Generation was interrupted';
+  if (phase === 'cancelled') return 'Batch cancelled';
+  if (phase === 'error') return 'Batch needs attention';
+  if (phase === 'validating') return 'Checking prompts and output folder';
+  if (phase === 'running') return selectedIndex ? `Creating image ${selectedIndex} of ${total}` : 'Starting generation';
+  return 'Preparing batch';
+}
+
+function promptStatusLabel(prompt: BatchPrompt) {
+  if (prompt.status === 'downloaded') return 'Saved';
+  if (prompt.status === 'generating') return 'Generating';
+  if (prompt.status === 'retrying') return 'Retrying';
+  if (prompt.status === 'ready') return 'Ready';
+  if (prompt.status === 'downloading') return 'Saving';
+  if (prompt.status === 'failed') return 'Needs retry';
+  if (prompt.status === 'cancelled') return 'Cancelled';
+  return 'Waiting';
+}
+
+function PromptStatusIcon({ prompt }: { prompt: BatchPrompt }) {
+  if (prompt.status === 'downloaded') return <Check size={15} aria-hidden="true" />;
+  if (prompt.status === 'generating') return <LoaderCircle className="spin" size={15} aria-hidden="true" />;
+  if (prompt.status === 'retrying') return <RotateCw className="spin" size={15} aria-hidden="true" />;
+  if (prompt.status === 'downloading' || prompt.status === 'ready') return <Download size={15} aria-hidden="true" />;
+  if (prompt.status === 'failed' || prompt.status === 'cancelled') return <AlertTriangle size={15} aria-hidden="true" />;
+  return <span className="prompt-row__pending-dot" aria-hidden="true" />;
+}
+
+function PromptQueue({
+  prompts,
+  selectedId,
+  onSelect,
+}: {
+  prompts: BatchPrompt[];
+  selectedId?: string;
+  onSelect: (prompt: BatchPrompt) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(430);
+
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element) return;
+    const update = () => setViewportHeight(element.clientHeight || 430);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  const range = useMemo(() => {
+    const overscan = 4;
+    const start = Math.max(0, Math.floor(scrollTop / PROMPT_ROW_HEIGHT) - overscan);
+    const visible = Math.ceil(viewportHeight / PROMPT_ROW_HEIGHT) + overscan * 2;
+    return { start, end: Math.min(prompts.length, start + visible) };
+  }, [prompts.length, scrollTop, viewportHeight]);
+
+  return (
+    <div
+      className="virtual-list"
+      ref={containerRef}
+      onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+      aria-label={`${prompts.length} prompts`}
+    >
+      <div className="virtual-list__spacer" style={{ height: prompts.length * PROMPT_ROW_HEIGHT }}>
+        {prompts.slice(range.start, range.end).map((prompt, localIndex) => {
+          const absoluteIndex = range.start + localIndex;
+          return (
+            <button
+              type="button"
+              className={`prompt-row prompt-row--${prompt.status} ${selectedId === prompt.id ? 'prompt-row--selected' : ''}`}
+              style={{ transform: `translateY(${absoluteIndex * PROMPT_ROW_HEIGHT}px)` }}
+              key={prompt.id}
+              onClick={() => onSelect(prompt)}
+              aria-current={selectedId === prompt.id || undefined}
+            >
+              <span className="prompt-row__rail"><PromptStatusIcon prompt={prompt} /></span>
+              <span className="prompt-row__index">{String(prompt.index).padStart(3, '0')}</span>
+              <span className="prompt-row__copy">
+                <strong>{prompt.text}</strong>
+                <small>{prompt.durationSeconds ? `${prompt.durationSeconds.toFixed(1)}s` : 'Waiting for timing'}</small>
+              </span>
+              <span className="prompt-row__status">{promptStatusLabel(prompt)}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 function manifestCsv(prompts: BatchPrompt[]) {
@@ -74,9 +178,9 @@ async function exportManifest(
   if (adapter.mode === 'production') {
     try {
       const path = await adapter.writeManifest(batchId, content);
-      dispatch({ type: 'SHOW_TOAST', tone: 'success', title: 'Manifest written', message: path });
+      dispatch({ type: 'SHOW_TOAST', tone: 'success', title: 'CSV saved', message: path });
     } catch (error) {
-      dispatch({ type: 'SHOW_TOAST', tone: 'error', title: 'Manifest export failed', message: error instanceof Error ? error.message : 'The manifest could not be written to the destination.' });
+      dispatch({ type: 'SHOW_TOAST', tone: 'error', title: 'CSV export failed', message: error instanceof Error ? error.message : 'The batch details could not be written to the output folder.' });
     }
     return;
   }
@@ -94,10 +198,10 @@ function NoBatch({ state, dispatch }: Pick<ScreenProps, 'state' | 'dispatch'>) {
   if (transitioning) {
     return (
       <div className="screen progress-screen">
-        <section className="page-heading"><div><Eyebrow>Progress · preparing compute</Eyebrow><h1>Warming the forge.</h1><p>{state.pod.statusDetail}</p></div></section>
+        <section className="page-heading"><div><Eyebrow>Progress</Eyebrow><h1>Starting GPU</h1><p>{state.pod.statusDetail}</p></div></section>
         <section className="panel boot-panel">
           <div className="boot-panel__visual"><LoaderCircle className="spin" size={38} /><span>{state.pod.phaseProgress}%</span></div>
-          <div className="boot-panel__copy"><PhaseBadge tone="info">{state.pod.phase}</PhaseBadge><h2>{state.pod.statusDetail}</h2><p>The model lives on the persistent network volume. Normal starts install no packages and download no weights.</p><LinearProgress value={state.pod.phaseProgress} label="GPU start progress" /></div>
+          <div className="boot-panel__copy"><PhaseBadge tone="info">{state.pod.phase}</PhaseBadge><h2>{state.pod.statusDetail}</h2><p>ImageForge is preparing the selected GPU and model. A cold start can take a few minutes.</p><LinearProgress value={state.pod.phaseProgress} label="GPU start progress" /></div>
           <div className="boot-steps" role="group" aria-label="GPU boot phases">
             {['Inventory', 'Provision', 'Boot', 'Load', 'Warm', 'Ready'].map((label, index) => <span key={label} className={state.pod.phaseProgress >= [4, 20, 38, 60, 82, 100][index] ? 'boot-step--complete' : ''}>{label}</span>)}
           </div>
@@ -108,12 +212,12 @@ function NoBatch({ state, dispatch }: Pick<ScreenProps, 'state' | 'dispatch'>) {
 
   return (
     <div className="screen progress-screen">
-      <section className="page-heading"><div><Eyebrow>Progress · no active batch</Eyebrow><h1>The desk is clear.</h1><p>{state.pod.phase === 'ready' ? 'The GPU is warm and waiting for an ordered brief.' : 'Start a GPU when you are ready; ImageForge never starts compute in the background.'}</p></div></section>
+      <section className="page-heading"><div><Eyebrow>Progress</Eyebrow><h1>No batch running</h1><p>{state.pod.phase === 'ready' ? 'The GPU is ready for a new batch.' : 'Start a GPU when you are ready. ImageForge never starts compute in the background.'}</p></div></section>
       <section className="panel empty-progress-panel">
         <EmptyState
           icon={state.pod.phase === 'ready' ? Sparkles : WifiOff}
-          title={state.pod.phase === 'ready' ? 'Ready for a production brief' : state.pod.phase === 'error' ? 'GPU needs attention' : 'GPU safely offline'}
-          copy={state.pod.errorMessage ?? (state.pod.phase === 'ready' ? 'Paste or import an ordered prompt list, choose a destination, and begin one batch.' : 'No compute is running and no hourly GPU cost is accruing.')}
+          title={state.pod.phase === 'ready' ? 'Ready for a new batch' : state.pod.phase === 'error' ? 'GPU needs attention' : 'GPU safely offline'}
+          copy={state.pod.errorMessage ?? (state.pod.phase === 'ready' ? 'Add prompts and choose an output folder in Create.' : 'No compute is running and no hourly GPU cost is accruing.')}
           action={
             <div className="empty-state__actions">
               {state.pod.phase !== 'ready' ? <Button tone="primary" icon={Zap} onClick={() => dispatch({ type: 'START_POD' })}>Start GPU</Button> : null}
@@ -129,6 +233,46 @@ function NoBatch({ state, dispatch }: Pick<ScreenProps, 'state' | 'dispatch'>) {
 export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
   const batch = state.batch;
   const [selectedId, setSelectedId] = useState<string | undefined>();
+  const [downloadingIndex, setDownloadingIndex] = useState<number | null>(null);
+
+  async function downloadImage(prompt: BatchPrompt): Promise<void> {
+    if (!batch || downloadingIndex !== null) return;
+    if (!adapter.downloadAsset || !prompt.checksum) {
+      dispatch({
+        type: 'SHOW_TOAST',
+        tone: 'error',
+        title: 'Download unavailable',
+        message: 'This image is not ready to download yet.',
+      });
+      return;
+    }
+    setDownloadingIndex(prompt.index);
+    try {
+      const savedPath = await adapter.downloadAsset({
+        batchId: batch.id,
+        index: prompt.index,
+        batchName: batch.name,
+        checksum: prompt.checksum,
+      });
+      if (savedPath !== null) {
+        dispatch({
+          type: 'SHOW_TOAST',
+          tone: 'success',
+          title: 'Image downloaded',
+          message: `${batch.name} · ${String(prompt.index).padStart(3, '0')} was saved as a new file.`,
+        });
+      }
+    } catch (error) {
+      dispatch({
+        type: 'SHOW_TOAST',
+        tone: 'error',
+        title: 'Download failed',
+        message: error instanceof Error ? error.message : 'The image could not be downloaded.',
+      });
+    } finally {
+      setDownloadingIndex(null);
+    }
+  }
 
   const currentPrompt = useMemo(() => {
     if (!batch) return undefined;
@@ -158,17 +302,21 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
   const isInterrupted = batch.phase === 'interrupted';
   const canResolveInterrupted = isInterrupted && canManage;
   const settled = ['complete', 'partial_failure', 'cancelled'].includes(batch.phase);
+  const status = batchStatus(batch.phase, counts.completed, counts.total, counts.failed, selectedPrompt?.index);
+  const revealTarget = batch.prompts.find(
+    (prompt) => prompt.status === 'downloaded' && prompt.filename,
+  )?.filename;
 
   return (
     <div className="screen progress-screen">
       <section className="page-heading progress-heading">
         <div>
           <div className="heading-status-row">
-            <Eyebrow>Progress · {batch.id}</Eyebrow>
+            <Eyebrow>Progress</Eyebrow>
             <PhaseBadge tone={phaseTone(batch.phase)}>{batch.phase.replace('_', ' ')}</PhaseBadge>
           </div>
           <h1>{batch.name}</h1>
-          <p>{batch.owner} · {counts.total} ordered frames · {state.pod.gpu ?? 'GPU disconnected'} · {batch.destination}</p>
+          <p>{batch.owner} · {counts.total} images · {state.pod.gpu ?? 'GPU disconnected'}</p>
         </div>
         <div className="page-heading__actions progress-actions">
           {isControllable ? (
@@ -179,8 +327,29 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
           {batch.phase === 'partial_failure' ? <Button tone="primary" icon={RotateCw} onClick={() => dispatch({ type: 'RETRY_FAILED' })}>Retry {counts.failed} failed</Button> : null}
           {canResolveInterrupted && state.pod.phase === 'ready' ? <Button tone="primary" icon={Play} onClick={() => dispatch({ type: 'RESUME_INTERRUPTED_BATCH' })}>Resume interrupted batch</Button> : null}
           {canResolveInterrupted && ['offline', 'error'].includes(state.pod.phase) ? <Button tone="primary" icon={Zap} onClick={() => dispatch({ type: 'START_POD' })}>Restart GPU to resume</Button> : null}
-          {settled || isInterrupted ? <Button icon={FileDown} onClick={() => void exportManifest(batch.prompts, batch.id, batch.name, adapter, dispatch)}>Manifest CSV</Button> : null}
-          <Button icon={FolderOpen} onClick={() => void adapter.revealPath().then(() => dispatch({ type: 'SHOW_TOAST', tone: 'success', title: 'Destination revealed', message: batch.destination })).catch((error: unknown) => dispatch({ type: 'SHOW_TOAST', tone: 'error', title: 'Could not reveal destination', message: error instanceof Error ? error.message : 'The destination could not be revealed.' }))}>Reveal folder</Button>
+          {settled || isInterrupted ? <Button icon={FileDown} onClick={() => void exportManifest(batch.prompts, batch.id, batch.name, adapter, dispatch)}>Export CSV</Button> : null}
+          <Button
+            icon={FolderOpen}
+            onClick={() => {
+              void adapter.revealPath(revealTarget)
+                .then(() => dispatch({
+                  type: 'SHOW_TOAST',
+                  tone: 'success',
+                  title: 'Folder opened',
+                  message: revealTarget ? `${batch.name} saved images` : batch.destination,
+                }))
+                .catch((error: unknown) => dispatch({
+                  type: 'SHOW_TOAST',
+                  tone: 'error',
+                  title: 'Could not open folder',
+                  message: error instanceof Error
+                    ? error.message
+                    : 'The output folder could not be opened.',
+                }));
+            }}
+          >
+            Show in folder
+          </Button>
           {isControllable ? <Button tone="danger" icon={X} onClick={() => dispatch({ type: 'REQUEST_CANCEL_BATCH' })}>Cancel</Button> : null}
           {canResolveInterrupted && state.pod.phase === 'ready' ? <Button tone="danger" icon={X} onClick={() => dispatch({ type: 'REQUEST_CANCEL_BATCH' })}>Cancel interrupted batch</Button> : null}
           {settled ? <Button tone="primary" icon={Sparkles} onClick={() => dispatch({ type: 'NEW_BATCH' })}>New brief</Button> : null}
@@ -190,26 +359,26 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
       {isLocked ? (
         <aside className="state-banner state-banner--locked" role="status">
           <LockKeyhole size={22} />
-          <div><strong>This worker is locked to {batch.owner}</strong><span>{batch.lockMessage} You can observe verified progress but cannot pause, cancel, or join.</span></div>
+          <div><strong>{batch.owner} is running this batch</strong><span>{batch.lockMessage} You can watch overall progress but cannot pause, cancel, or join.</span></div>
         </aside>
       ) : null}
       {isReconnecting ? (
         <aside className="state-banner state-banner--warning" role="status">
           <RefreshCcw className="spin-slow" size={21} />
-          <div><strong>Reconnecting to worker</strong><span>Generation state comes from the durable manifest. ImageForge will request only missing downloads when the connection returns.</span></div>
+          <div><strong>Reconnecting to the GPU</strong><span>ImageForge will resume status checks and save any missing images when the connection returns.</span></div>
           <Button compact onClick={() => dispatch({ type: 'REFRESH_STATUS', checkedAt: new Date().toISOString() })}>Check now</Button>
         </aside>
       ) : null}
       {isInterrupted ? (
         <aside className="state-banner state-banner--warning" role="status">
           <WifiOff size={21} />
-          <div><strong>Generation was interrupted safely</strong><span>Verified downloads remain complete. {canResolveInterrupted ? (state.pod.phase === 'ready' ? 'Resume from the first incomplete prompt or cancel the manifest.' : 'Restart a GPU, then resume from the first incomplete prompt—or cancel the manifest now.') : `${batch.owner} must resume or cancel this manifest.`}</span></div>
+          <div><strong>Generation was interrupted safely</strong><span>Images already saved remain complete. {canResolveInterrupted ? (state.pod.phase === 'ready' ? 'Resume from the first unfinished prompt or cancel the batch.' : 'Restart a GPU, then resume from the first unfinished prompt—or cancel the batch now.') : `${batch.owner} must resume or cancel this batch.`}</span></div>
         </aside>
       ) : null}
       {isError ? (
         <aside className="state-banner state-banner--error" role="alert">
           <AlertTriangle size={21} />
-          <div><strong>{state.pod.errorMessage ?? 'Batch stopped safely'}</strong><span>No secret values appear in this diagnostic. Existing artifacts and the durable manifest remain intact.</span></div>
+          <div><strong>{state.pod.errorMessage ?? 'Batch stopped safely'}</strong><span>No secret values appear here. Images already saved remain in the output folder.</span></div>
           <Button compact onClick={() => dispatch({ type: 'NAVIGATE', view: 'settings' })}>Open settings</Button>
         </aside>
       ) : null}
@@ -221,19 +390,19 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
         <div className="progress-hero__body">
           <header className="progress-hero__header">
             <div>
-              <Eyebrow>Verified production</Eyebrow>
-              <h2>{batch.statusMessage}</h2>
+              <Eyebrow>Batch progress</Eyebrow>
+              <h2>{status}</h2>
             </div>
-            <span className="progress-hero__receipt"><ShieldCheck size={15} /> ordered receipts live</span>
+            <span className="progress-hero__receipt"><ShieldCheck size={15} /> saving images as they finish</span>
           </header>
           <div className="progress-metrics">
-            <Metric label="Stage" value={`${String(counts.completed).padStart(3, '0')} / ${String(counts.total).padStart(3, '0')}`} detail={counts.failed ? `${counts.failed} slots require review` : 'Generate · verify · download'} tone={counts.failed ? 'warning' : undefined} />
-            <Metric label="Status" value={batch.phase.replace('_', ' ')} detail={batch.phase === 'running' ? selectedPrompt ? `Frame ${String(selectedPrompt.index).padStart(3, '0')} · seed ${selectedPrompt.seed}` : 'Starting' : batch.statusMessage} tone={batch.phase === 'complete' ? 'success' : batch.phase === 'partial_failure' ? 'warning' : undefined} />
-            <Metric label="Estimated" value={batch.phase === 'complete' ? 'Complete' : batch.phase === 'paused' ? 'On hold' : formatDuration(remainingSeconds)} detail={`${formatDuration(batch.elapsedSeconds)} elapsed · $${batch.estimatedCost.toFixed(3)} measured`} />
+            <Metric label="Images" value={`${String(counts.completed).padStart(3, '0')} / ${String(counts.total).padStart(3, '0')}`} detail={counts.failed ? `${counts.failed} need attention` : 'Generate · save'} tone={counts.failed ? 'warning' : undefined} />
+            <Metric label="Status" value={batch.phase.replace('_', ' ')} detail={status} tone={batch.phase === 'complete' ? 'success' : batch.phase === 'partial_failure' ? 'warning' : undefined} />
+            <Metric label="Time left" value={batch.phase === 'complete' ? 'Complete' : batch.phase === 'paused' ? 'On hold' : formatDuration(remainingSeconds)} detail={`${formatDuration(batch.elapsedSeconds)} elapsed · $${batch.estimatedCost.toFixed(3)} cost`} />
           </div>
           <div className="progress-hero__linear">
             <LinearProgress value={counts.progress} label={`${counts.progress}% batch progress`} />
-            <div><span>{counts.completed} downloaded</span><span>{counts.pending} remaining</span><span>{counts.failed} failed</span></div>
+            <div><span>{counts.completed} saved</span><span>{counts.pending} remaining</span><span>{counts.failed} failed</span></div>
           </div>
         </div>
       </section>
@@ -241,11 +410,11 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
       <div className="progress-lower">
         <section className="panel pipeline-panel">
           <header className="panel-heading">
-            <div><Eyebrow>Prompt pipeline</Eyebrow><h2>Ordered manifest</h2></div>
+            <div><Eyebrow>Images</Eyebrow><h2>Queue</h2></div>
             <span className="cost-readout">Cost <strong>${batch.estimatedCost.toFixed(4)}</strong></span>
           </header>
           <div className="pipeline-legend">
-            <span><i className="legend-dot legend-dot--done" /> {counts.completed} downloaded</span>
+            <span><i className="legend-dot legend-dot--done" /> {counts.completed} saved</span>
             <span><i className="legend-dot legend-dot--live" /> {batch.phase === 'running' ? `1 ${selectedPrompt?.status ?? 'active'}` : '0 active'}</span>
             <span><i className="legend-dot legend-dot--wait" /> {counts.pending} waiting</span>
           </div>
@@ -253,10 +422,10 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
             <div className="locked-manifest-placeholder">
               <LockKeyhole size={29} />
               <strong>Prompt text stays private to {batch.owner}</strong>
-              <span>You can see overall progress only. No images or prompts will download to this computer.</span>
+              <span>You can see overall progress only. No images or prompts will be saved to this computer.</span>
             </div>
           ) : (
-            <VirtualPromptList prompts={batch.prompts} selectedId={selectedPrompt?.id} onSelect={(prompt) => setSelectedId(prompt.id)} />
+            <PromptQueue prompts={batch.prompts} selectedId={selectedPrompt?.id} onSelect={(prompt) => setSelectedId(prompt.id)} />
           )}
         </section>
 
@@ -284,27 +453,41 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
                     fallback={
                       <div className="preview-frame__waiting">
                         <ShieldCheck size={29} />
-                        <strong>{selectedPrompt.status === 'downloaded' ? 'Loading verified preview' : 'Secure preview pending'}</strong>
-                        <span>{selectedPrompt.status === 'downloaded' ? 'The full image is safely stored in your selected folder.' : 'The preview becomes available after the worker publishes the frame.'}</span>
+                        <strong>{selectedPrompt.status === 'downloaded' ? 'Loading preview' : 'Preview not ready yet'}</strong>
+                        <span>{selectedPrompt.status === 'downloaded' ? 'The full image is saved in your selected folder.' : 'The preview appears when this image is ready.'}</span>
                       </div>
                     }
                   />
                 ) : (
-                  <SimulatedImage seed={selectedPrompt.seed} prompt={selectedPrompt.text} />
+                  <SimulatedImage seed={selectedPrompt.seed} prompt={selectedPrompt.text} compact />
                 )}
                 {selectedPrompt.status === 'generating' || selectedPrompt.status === 'retrying' ? <span className="preview-frame__live"><LoaderCircle className="spin" size={13} /> {selectedPrompt.status === 'retrying' ? selectedPrompt.failureReason : 'Rendering 4 diffusion steps'}</span> : null}
-                {selectedPrompt.status === 'ready' ? <span className="preview-frame__live"><ShieldCheck size={13} /> Verifying full JPEG</span> : null}
-                {selectedPrompt.status === 'downloading' ? <span className="preview-frame__live"><Download size={13} /> Downloading to .part</span> : null}
+                {selectedPrompt.status === 'ready' ? <span className="preview-frame__live"><ShieldCheck size={13} /> Preparing full image</span> : null}
+                {selectedPrompt.status === 'downloading' ? <span className="preview-frame__live"><Download size={13} /> Saving to your folder</span> : null}
               </div>
               <blockquote className="preview-prompt">“{selectedPrompt.text}”</blockquote>
               <dl className="preview-details">
-                <div><dt>Seed</dt><dd>{selectedPrompt.seed}</dd></div>
                 <div><dt>Frame</dt><dd>{aspectRatioOption(state.batch?.aspectRatio ?? '16:9').label} · {aspectRatioOption(state.batch?.aspectRatio ?? '16:9').width} × {aspectRatioOption(state.batch?.aspectRatio ?? '16:9').height}</dd></div>
                 <div><dt>Time</dt><dd>{selectedPrompt.durationSeconds ? `${selectedPrompt.durationSeconds.toFixed(1)} s` : 'measuring'}</dd></div>
-                <div><dt>Receipt</dt><dd>{selectedPrompt.checksum ?? 'pending'}</dd></div>
               </dl>
               {selectedPrompt.status === 'downloaded' ? (
-                <div className="download-receipt"><Check size={16} /><span><strong>{selectedPrompt.filename}</strong><small>SHA-256 verified · atomic rename complete</small></span><Download size={17} /></div>
+                <div className="download-receipt">
+                  <Check size={16} aria-hidden="true" />
+                  <span>
+                    <strong>Image saved</strong>
+                    <small>Frame {String(selectedPrompt.index).padStart(3, '0')} is in {batch.name}</small>
+                  </span>
+                  <Button
+                    compact
+                    tone="quiet"
+                    icon={Download}
+                    pending={downloadingIndex === selectedPrompt.index}
+                    disabled={downloadingIndex !== null}
+                    onClick={() => void downloadImage(selectedPrompt)}
+                  >
+                    Download
+                  </Button>
+                </div>
               ) : null}
             </>
           ) : (

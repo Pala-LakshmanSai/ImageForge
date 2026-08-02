@@ -7,7 +7,10 @@ pub mod vault;
 pub mod worker;
 
 pub use destination::{DestinationMetadata, DestinationSelection, DestinationStore};
-pub use download::{DownloadReceipt, DownloadRequest, Downloader, ReceiptLedger};
+pub use download::{
+    DownloadReceipt, DownloadRequest, Downloader, ExportArtifactRequest, LocalArtifactResponse,
+    ReceiptLedger,
+};
 pub use error::{NativeError, NativeResult};
 pub use runpod::{
     RunPodCreateMarkerMetadata, RunPodHttpRequest, RunPodHttpResponse, RunPodTransport,

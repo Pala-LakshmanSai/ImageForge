@@ -87,7 +87,7 @@ export function VirtualPromptList({
               <span className="prompt-row__index">{String(prompt.index).padStart(3, '0')}</span>
               <span className="prompt-row__copy">
                 <strong>{prompt.text}</strong>
-                <small>seed {prompt.seed} {prompt.durationSeconds ? `· ${prompt.durationSeconds.toFixed(1)}s` : ''}</small>
+                <small>{prompt.durationSeconds ? `${prompt.durationSeconds.toFixed(1)}s` : 'Waiting for timing'}</small>
               </span>
               <span className="prompt-row__status">{statusLabel(prompt)}</span>
             </button>

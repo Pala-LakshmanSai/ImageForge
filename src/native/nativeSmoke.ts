@@ -97,6 +97,9 @@ export async function runNativeSmoke(): Promise<void> {
     await clickSelector('downloads folder chooser', '.setup-folder');
     await clickButton('connection test', /Run connection test/);
     await waitFor('setup dialog to close', () => document.querySelector('[role="dialog"]') === null ? true : null);
+    await clickButton('Settings navigation', /^Settings$/);
+    await clickButton('12x simulation speed', /^12×$/);
+    await clickButton('Create navigation', /^Create$/);
     await clickButton('sample brief', /Load sample brief/);
     await ensureOutputFolder();
     await attachReference();
@@ -105,9 +108,25 @@ export async function runNativeSmoke(): Promise<void> {
     await attachReference();
     await clickButton('fake Start GPU control', /^Start GPU$/);
     await waitFor('fake GPU readiness', () => buttonMatching(/Stop GPU/) ? true : null);
-    await clickButton('fake batch launch', /Generate \d+ ordered images/);
-    await clickButton('folder reveal control', /Reveal folder/);
-    await record(true, 'onboarding, reference add/remove/re-add, fake GPU lifecycle, fake batch launch, and folder reveal passed');
+    await clickButton('fake batch launch', /Generate \d+ images/);
+    await waitFor('fake batch completion', () => buttonMatching(/^New brief$/) ? true : null, 30_000);
+    await clickButton('folder reveal control', /Show in folder/);
+    await clickButton('Library navigation', /^Library$/);
+    await waitFor('named Library cards', () => {
+      const library = document.querySelector('.library-screen');
+      if (!library) return null;
+      const copy = visibleText(library);
+      if (!copy.includes('Atlas of Quiet Work · 001')) return null;
+      if (/\b(seed|checksum|receipt|sha-256|verified)\b/i.test(copy)) {
+        throw new Error('The packaged Library exposed internal artifact jargon.');
+      }
+      return true;
+    });
+    await clickButton('per-image Download', /^Download Atlas of Quiet Work · 001$/);
+    await waitFor('Download success', () => document.body.textContent?.includes('Image downloaded') ? true : null);
+    await clickButton('image detail', /^Open details for Atlas of Quiet Work · 001$/);
+    await waitFor('image detail actions', () => buttonMatching(/^Show Atlas of Quiet Work · 001 in folder$/) ? true : null);
+    await record(true, 'onboarding, reference add/remove/re-add, fast fake batch, named minimal Library, per-image Download, image detail, and folder reveal passed');
   } catch (error) {
     await record(false, error instanceof Error ? error.message : 'Native smoke failed.');
   }

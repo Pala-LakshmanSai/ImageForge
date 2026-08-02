@@ -60,6 +60,7 @@ function port(overrides: Partial<ProductionDesktopPort> = {}): ProductionDesktop
     reconcileReceipts: vi.fn(async () => ({ schemaVersion: 1, batchId, receipts: [] })),
     revealDestination: vi.fn(async () => undefined),
     fetchPreview: vi.fn(async () => ({ contentType: 'image/webp' as const, sha256: 'a'.repeat(64), sizeBytes: 12, bytes: [] })),
+    downloadAsset: vi.fn(async () => '/safe/downloads/Atlas of Quiet Work - 001.jpg'),
     writeManifest: vi.fn(async (batchId) => `${batchId}/manifest.csv`),
     clearWorkerSession: vi.fn(async () => undefined),
     chooseDestination: vi.fn(async (path) => ({ path, writable: true })),
@@ -135,6 +136,102 @@ describe('production ImageForge adapter', () => {
     expect(event).toMatchObject({ type: 'batch', batch: { id: batchId, name: 'History Brief', phase: 'complete' } });
     if (event?.type === 'batch') expect(event.assets[0].filename).toBe(`batches/${batchId}/000001.jpg`);
     expect(native.downloadArtifact).not.toHaveBeenCalled();
+  });
+
+  it('restores a recovered batch name from its durable named-folder receipt', async () => {
+    const namedReceipt = {
+      schemaVersion: 1 as const,
+      batchId,
+      index: 1,
+      filename: 'batches/Atlas of Quiet Work/000001.jpg',
+      sha256: 'a'.repeat(64),
+      sizeBytes: 2_048,
+      verifiedAtUnixMs: 1,
+    };
+    const native = port({
+      status: vi.fn(async () => ({
+        status: 200,
+        body: {
+          schema_version: 1,
+          ready: true,
+          active_batch: {
+            batch_id: batchId,
+            owner: { user_id: 'lakshman', display_name: 'Lakshman' },
+            state: 'completed',
+            progress: manifest().progress,
+            pause_requested: false,
+            cancel_requested: false,
+          },
+          permissions: { can_create: false, can_manage_active: true, is_owner: true },
+        },
+      })),
+      readReceipts: vi.fn(async () => [namedReceipt]),
+    });
+    const adapter = createProductionImageForgeAdapter(native, batchId);
+    const events: ProductionRuntimeEvent[] = [];
+    adapter.runtime!.subscribe((event) => events.push(event));
+
+    await adapter.runtime!.pollBatch(createConfiguredInitialState());
+
+    expect(native.readReceipts).toHaveBeenCalledWith(batchId, undefined);
+    expect(events.find((event) => event.type === 'batch')).toMatchObject({
+      type: 'batch',
+      batch: { id: batchId, name: 'Atlas of Quiet Work', phase: 'complete' },
+      assets: [{ batchName: 'Atlas of Quiet Work', filename: namedReceipt.filename }],
+    });
+  });
+
+  it('retains the persisted user batch name while migrating legacy UUID receipts', async () => {
+    const native = port();
+    const adapter = createProductionImageForgeAdapter(native, batchId, 'Atlas of Quiet Work');
+    const events: ProductionRuntimeEvent[] = [];
+    adapter.runtime!.subscribe((event) => events.push(event));
+
+    await adapter.runtime!.pollBatch(createConfiguredInitialState());
+
+    expect(native.readReceipts).toHaveBeenCalledWith(batchId, 'Atlas of Quiet Work');
+    expect(events.find((event) => event.type === 'batch')).toMatchObject({
+      type: 'batch',
+      batch: { id: batchId, name: 'Atlas of Quiet Work', phase: 'complete' },
+      assets: [{ batchName: 'Atlas of Quiet Work' }],
+    });
+  });
+
+  it('restores named verified local images while the GPU remains offline', async () => {
+    const namedReceipt = {
+      schemaVersion: 1 as const,
+      batchId,
+      index: 1,
+      filename: 'batches/Atlas of Quiet Work/000001.jpg',
+      sha256: 'a'.repeat(64),
+      sizeBytes: 2_048,
+      verifiedAtUnixMs: Date.parse('2026-08-02T12:00:00.000Z'),
+    };
+    const native = port({ readReceipts: vi.fn(async () => [namedReceipt]) });
+    const adapter = createProductionImageForgeAdapter(native, batchId);
+    const events: ProductionRuntimeEvent[] = [];
+    adapter.runtime!.subscribe((event) => events.push(event));
+    const state = createConfiguredInitialState();
+
+    await adapter.runtime!.restoreLocalLibrary(state);
+
+    expect(native.validateDestination).toHaveBeenCalledWith(state.settings.defaultDestination);
+    expect(native.readReceipts).toHaveBeenCalledWith(batchId, undefined);
+    expect(events).toEqual([{
+      type: 'library',
+      assets: [expect.objectContaining({
+        id: `${batchId}-1`,
+        batchId,
+        batchName: 'Atlas of Quiet Work',
+        index: 1,
+        prompt: 'Saved image 001',
+        filename: namedReceipt.filename,
+        checksum: namedReceipt.sha256,
+        recovered: true,
+      })],
+    }]);
+    expect(native.runPodFetch).not.toHaveBeenCalled();
+    expect(native.workerHealthFetch).not.toHaveBeenCalled();
   });
 
   it('keeps simulated lifecycle entry points unreachable in production mode', () => {

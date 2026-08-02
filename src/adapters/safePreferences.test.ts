@@ -4,6 +4,7 @@ import {
   hydrateSafePreferences,
   persistSafePreferences,
   readPersistedBatchId,
+  readPersistedBatchRecovery,
   SAFE_PREFERENCES_STORAGE_KEY,
 } from './safePreferences';
 import { createConfiguredInitialState, createInitialState } from '../domain/reducer';
@@ -105,7 +106,7 @@ describe('safe preference persistence', () => {
     expect(hydrated.settings.editorialSuffix).toBe(suffix);
   });
 
-  it('persists only a non-secret recovery pointer while a batch is active', () => {
+  it('persists the recovery UUID and exact user batch name while a batch is active', () => {
     const state = createConfiguredInitialState();
     state.batch = {
       id: '11111111-1111-4111-8111-111111111111',
@@ -125,7 +126,32 @@ describe('safe preference persistence', () => {
     };
     const setItem = vi.fn();
     persistSafePreferences(state, { setItem });
-    expect(setItem.mock.calls[0][1]).toContain('11111111-1111-4111-8111-111111111111');
-    expect(setItem.mock.calls[0][1]).not.toContain('Private title');
+    const serialized = setItem.mock.calls[0][1] as string;
+    expect(serialized).toContain('11111111-1111-4111-8111-111111111111');
+    expect(serialized).toContain('Private title');
+    expect(readPersistedBatchRecovery({ getItem: () => serialized })).toEqual({
+      id: '11111111-1111-4111-8111-111111111111',
+      name: 'Private title',
+    });
+  });
+
+  it('reads a v1 recovery UUID with no invented batch name', () => {
+    const stored = {
+      version: 1,
+      setupCompleted: true,
+      lastOwnedBatchId: '11111111-1111-4111-8111-111111111111',
+      userName: 'Lakshman',
+      defaultDestination: '/safe',
+      editorialSuffixEnabled: false,
+      editorialSuffix: '',
+      theme: 'midnight',
+      density: 'comfortable',
+      gpuPreference: 'best_value',
+      studioProfile: DEFAULT_STUDIO_PROFILE,
+    };
+    expect(readPersistedBatchRecovery({ getItem: () => JSON.stringify(stored) })).toEqual({
+      id: '11111111-1111-4111-8111-111111111111',
+      name: null,
+    });
   });
 });

@@ -1,7 +1,11 @@
 import { AlertTriangle, CheckCircle2, Info, X, XCircle } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
 import { createFakeImageForgeAdapter, type ImageForgeAdapter } from './adapters/imageForgeAdapter';
-import { persistSafePreferences, readPersistedBatchId } from './adapters/safePreferences';
+import {
+  persistSafePreferences,
+  readPersistedBatchRecovery,
+  type PersistedBatchRecovery,
+} from './adapters/safePreferences';
 import { BottomNav, TopBar } from './components/AppChrome';
 import { DialogPortal } from './components/DialogPortal';
 import { SetupAssistant } from './components/SetupAssistant';
@@ -29,8 +33,8 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
   const stateRef = useRef(state);
   stateRef.current = state;
   const runtime = adapter.mode === 'production' ? adapter.runtime : undefined;
-  const recoveryPointerRef = useRef<string | null>(
-    adapter.mode === 'production' ? readPersistedBatchId(window.localStorage) : null,
+  const recoveryPointerRef = useRef<PersistedBatchRecovery | null>(
+    adapter.mode === 'production' ? readPersistedBatchRecovery(window.localStorage) : null,
   );
   const clearRecoveryPointerRef = useRef(false);
 
@@ -39,12 +43,18 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
     return runtime.subscribe((event) => {
       if (event.type === 'pod') dispatch({ type: 'SYNC_RUNTIME_POD', pod: event.pod });
       else if (event.type === 'batch') dispatch({ type: 'SYNC_RUNTIME_BATCH', batch: event.batch, assets: event.assets });
+      else if (event.type === 'library') dispatch({ type: 'SYNC_RUNTIME_LIBRARY', assets: event.assets });
       else if (event.type === 'busy') dispatch({ type: 'SYNC_RUNTIME_BUSY', batch: event.batch });
       else if (event.type === 'idle') dispatch({ type: 'RUNTIME_BATCH_IDLE' });
       else if (event.type === 'create-recovery') dispatch({ type: 'SYNC_CREATE_RECOVERY', marker: event.marker });
       else dispatch({ type: 'RUNTIME_ERROR', scope: event.scope, code: event.code, message: event.message, retryable: event.retryable });
     });
   }, [runtime]);
+
+  useEffect(() => {
+    if (!runtime || !state.setup.completed) return;
+    void runtime.restoreLocalLibrary(stateRef.current).catch(() => undefined);
+  }, [runtime, state.setup.completed, state.settings.defaultDestination]);
 
   useEffect(() => {
     if (!runtime) return;
@@ -98,7 +108,9 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
 
   useEffect(() => {
     if (adapter.mode !== 'production' || !state.setup.completed) return;
-    if (state.batch?.canManage === true) recoveryPointerRef.current = state.batch.id;
+    if (state.batch?.canManage === true) {
+      recoveryPointerRef.current = { id: state.batch.id, name: state.batch.name };
+    }
     const recoveryOverride = clearRecoveryPointerRef.current
       ? null
       : state.batch?.canManage !== true
@@ -113,7 +125,7 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
     } catch {
       // A storage failure must never affect GPU or batch control.
     }
-  }, [adapter.mode, state.settings, state.setup.completed, state.setup.studioProfile, state.batch?.id, state.batch?.phase]);
+  }, [adapter.mode, state.settings, state.setup.completed, state.setup.studioProfile, state.batch?.id, state.batch?.name, state.batch?.phase]);
 
   useEffect(() => {
     if (state.pod.lifecycleSequence === 0 || state.pod.phase !== 'selecting') return;
@@ -306,7 +318,7 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
               <>
                 <p className="eyebrow">Cancel batch</p>
                 <h2 id="modal-title">Stop generating remaining images?</h2>
-                <p>Downloaded and verified files stay in the selected folder. Pending prompts are removed from this run and the shared batch lock is released.</p>
+                <p>Images already saved stay in the selected folder. Unfinished prompts are removed from this run so a new batch can start.</p>
                 <div className="modal__actions">
                   <Button data-autofocus onClick={() => dispatch({ type: 'DISMISS_DIALOG' })}>Continue batch</Button>
                   <Button tone="danger" onClick={() => uiDispatch({ type: 'CONFIRM_CANCEL_BATCH' })}>Cancel remaining</Button>

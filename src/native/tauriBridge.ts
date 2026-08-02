@@ -45,6 +45,7 @@ let pendingRunPodStartGrant: PendingRunPodStartGrant | null = null;
 
 export interface NativeDownloadRequest {
   batchId: string;
+  batchName?: string;
   index: number;
   expectedSha256: string;
   expectedSizeBytes: number;
@@ -69,10 +70,17 @@ export interface NativeReceiptLedger {
 }
 
 export interface NativePreviewResponse {
-  contentType: 'image/webp';
+  contentType: 'image/jpeg' | 'image/webp';
   sha256: string;
   sizeBytes: number;
   bytes: number[];
+}
+
+export interface NativeExportArtifactRequest {
+  batchId: string;
+  index: number;
+  batchName: string;
+  checksum: string;
 }
 
 export interface NativeRunPodCreateMarkerMetadata {
@@ -245,12 +253,23 @@ export function nativeWorkerFetchPreview(batchId: string, index: number): Promis
   return invoke('worker_fetch_preview', { batchId, index });
 }
 
+export function nativeReadLocalArtifact(batchId: string, index: number): Promise<NativePreviewResponse> {
+  return invoke('read_local_artifact', { batchId, index });
+}
+
+export function nativeExportArtifact(request: NativeExportArtifactRequest): Promise<string | null> {
+  return invoke('export_artifact', { request });
+}
+
 export function nativeDownloadArtifact(request: NativeDownloadRequest): Promise<NativeDownloadReceipt> {
   return invoke('download_artifact', { request });
 }
 
-export function nativeReadReceiptLedger(batchId: string): Promise<NativeReceiptLedger> {
-  return invoke<NativeReceiptLedger>('read_receipt_ledger', { batchId });
+export function nativeReadReceiptLedger(batchId: string, batchName?: string): Promise<NativeReceiptLedger> {
+  return invoke<NativeReceiptLedger>('read_receipt_ledger', {
+    batchId,
+    batchName: batchName ?? null,
+  });
 }
 
 export function nativeReconcileReceipts(batchId: string): Promise<NativeReceiptLedger> {

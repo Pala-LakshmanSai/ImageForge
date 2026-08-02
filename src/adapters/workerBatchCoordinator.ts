@@ -32,9 +32,10 @@ export interface WorkerBatchPort {
   resumeBatch(batchId: string): Promise<WorkerHttpResult>;
   cancelBatch(batchId: string): Promise<WorkerHttpResult>;
   retryFailed(batchId: string): Promise<WorkerHttpResult>;
-  readReceipts(batchId: string): Promise<LocalDownloadReceipt[]>;
+  readReceipts(batchId: string, batchName?: string): Promise<LocalDownloadReceipt[]>;
   downloadArtifact(input: {
     batchId: string;
+    batchName?: string;
     index: number;
     expectedSha256: string;
     expectedSizeBytes: number;
@@ -70,6 +71,31 @@ export class WorkerBatchError extends Error {
 }
 
 type BatchControl = 'pause' | 'resume' | 'cancel' | 'retry_failed';
+const DEFAULT_BATCH_NAME = 'Untitled batch';
+
+function isTerminalManifest(manifest: WorkerManifest): boolean {
+  return ['completed', 'cancelled', 'failed', 'interrupted'].includes(manifest.state);
+}
+
+function isSafeReceiptFilename(filename: string, _batchId: string, index: number): boolean {
+  const expectedLeaf = `${String(index).padStart(6, '0')}.jpg`;
+  const parts = filename.split('/');
+  if (parts.length !== 3 || parts[0] !== 'batches' || parts[2] !== expectedLeaf) return false;
+  const folder = parts[1];
+  if (
+    !folder ||
+    folder === '.' ||
+    folder === '..' ||
+    folder !== folder.trim() ||
+    /[.\s]$/u.test(folder) ||
+    /[<>:"\\|?*\u0000-\u001f]/u.test(folder) ||
+    new TextEncoder().encode(folder).length > 120 ||
+    folder.length > 120
+  ) return false;
+  const stem = folder.split('.')[0].toUpperCase();
+  if (/^(?:CON|PRN|AUX|NUL|CLOCK\$|COM[1-9]|LPT[1-9])$/u.test(stem)) return false;
+  return true;
+}
 
 function validateReceipt(receipt: LocalDownloadReceipt, batchId: string): LocalDownloadReceipt {
   if (
@@ -77,7 +103,7 @@ function validateReceipt(receipt: LocalDownloadReceipt, batchId: string): LocalD
     receipt.batchId !== batchId ||
     !Number.isSafeInteger(receipt.index) ||
     receipt.index < 1 ||
-    receipt.filename !== `batches/${batchId}/${String(receipt.index).padStart(6, '0')}.jpg` ||
+    !isSafeReceiptFilename(receipt.filename, batchId, receipt.index) ||
     !/^[0-9a-f]{64}$/.test(receipt.sha256) ||
     !Number.isSafeInteger(receipt.sizeBytes) ||
     receipt.sizeBytes < 1 ||
@@ -112,6 +138,7 @@ export class WorkerBatchCoordinator {
   readonly #port: WorkerBatchPort;
   readonly #listeners = new Set<(event: WorkerBatchEvent) => void>();
   #ownedBatchId: string | null = null;
+  #batchName: string | null = null;
   #observedBusyBatchId: string | null = null;
   #pollPromise: Promise<WorkerBatchEvent> | null = null;
   #receiptCache = new Map<string, Map<number, LocalDownloadReceipt>>();
@@ -135,9 +162,17 @@ export class WorkerBatchCoordinator {
     return this.#ownedBatchId;
   }
 
+  get batchName(): string | null {
+    return this.#batchName;
+  }
+
   invalidateReceipts(batchId?: string): void {
     if (batchId === undefined) this.#receiptCache.clear();
     else this.#receiptCache.delete(batchId);
+  }
+
+  setBatchName(batchName: string): void {
+    this.#batchName = batchName;
   }
 
   /**
@@ -149,6 +184,7 @@ export class WorkerBatchCoordinator {
     this.#connectionGeneration += 1;
     this.#stateGeneration += 1;
     this.#ownedBatchId = null;
+    this.#batchName = null;
     this.#observedBusyBatchId = null;
     // Let the next brief proceed without waiting for stale network I/O. Every
     // old-generation completion is guarded, including its error path.
@@ -157,7 +193,13 @@ export class WorkerBatchCoordinator {
     this.#pollPromise = null;
   }
 
-  async create(prompts: readonly string[], baseSeed: number, references: readonly BatchReference[] = [], aspectRatio: AspectRatio = '16:9'): Promise<WorkerBatchEvent> {
+  async create(
+    prompts: readonly string[],
+    baseSeed: number,
+    references: readonly BatchReference[] = [],
+    aspectRatio: AspectRatio = '16:9',
+    batchName = DEFAULT_BATCH_NAME,
+  ): Promise<WorkerBatchEvent> {
     if (
       prompts.length < 1 ||
       prompts.some((prompt) => !prompt.trim()) ||
@@ -207,6 +249,7 @@ export class WorkerBatchCoordinator {
       }
       const manifest = parseWorkerManifest(requireSuccess(result, [201]));
       this.#ownedBatchId = manifest.batchId;
+      this.#batchName = batchName;
       this.#observedBusyBatchId = null;
       return this.#synchronizeOwnedManifest(manifest, connectionGeneration, stateGeneration);
     });
@@ -285,7 +328,7 @@ export class WorkerBatchCoordinator {
           if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
           if (result.status === 200) {
             const manifest = parseWorkerManifest(result.body);
-            return this.#synchronizeOwnedManifest(manifest, connectionGeneration, stateGeneration);
+            return await this.#synchronizeOwnedManifest(manifest, connectionGeneration, stateGeneration);
           }
           if (result.status !== 404) throw workerFailure(result);
         }
@@ -307,7 +350,7 @@ export class WorkerBatchCoordinator {
         requireSuccess(await this.#port.getBatch(status.activeBatch.batchId), [200]),
       );
       if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
-      return this.#synchronizeOwnedManifest(manifest, connectionGeneration, stateGeneration);
+      return await this.#synchronizeOwnedManifest(manifest, connectionGeneration, stateGeneration);
     } catch (error) {
       if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
       const safe = error instanceof WorkerBatchError
@@ -341,97 +384,135 @@ export class WorkerBatchCoordinator {
     const cached = this.#receiptCache.get(manifest.batchId);
     const byIndex = cached ?? new Map<number, LocalDownloadReceipt>();
     if (cached === undefined) {
-      const rawReceipts = await this.#port.readReceipts(manifest.batchId);
+      const rawReceipts = await this.#port.readReceipts(
+        manifest.batchId,
+        this.#batchName ?? undefined,
+      );
       if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
       for (const receipt of rawReceipts) {
         const valid = validateReceipt(receipt, manifest.batchId);
         byIndex.set(valid.index, valid);
       }
+      if (this.#batchName === null && rawReceipts.length > 0) {
+        const folderNames = new Set(rawReceipts.map((receipt) => receipt.filename.split('/')[1]));
+        const [folderName] = folderNames;
+        if (folderNames.size === 1 && folderName !== manifest.batchId) {
+          this.#batchName = folderName;
+        }
+      }
       this.#receiptCache.set(manifest.batchId, byIndex);
     }
     let receipts = [...byIndex.values()].sort((left, right) => left.index - right.index);
-    let downloaded = false;
+    const reconciledArtifactIndexes = new Set<number>();
+    // At most one successful native download/acknowledgement is attempted for
+    // each artifact in this synchronization. The extra pass either commits a
+    // stable manifest or reports a retryable terminal acknowledgement gap.
+    const maxReconciliationPasses = manifest.images.length + 1;
 
-    for (const image of manifest.images) {
-      if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
-      if (!['ready', 'downloaded'].includes(image.status)) continue;
-      if (image.sha256 === null || image.sizeBytes === null) {
-        throw new WorkerBatchError(
-          'worker_manifest_invalid',
-          'A ready image is missing its checksum or byte count.',
-          0,
-        );
-      }
-      const local = byIndex.get(image.index);
-      const localMatches = local?.sha256 === image.sha256 && local.sizeBytes === image.sizeBytes;
-      if (localMatches && image.status === 'downloaded') continue;
-      // A local receipt is durable before the native layer sends the worker
-      // acknowledgement. If that acknowledgement fails (or the process dies
-      // in between), the worker can still report this image as `ready` while
-      // the local ledger already contains the verified JPEG. Re-run the
-      // idempotent native download/ack path in that state; it sees the final
-      // file, verifies it, and retries only the missing worker mutation.
-      // Never treat a matching local receipt as proof of acknowledgement until
-      // the worker manifest itself reports `downloaded`.
-      if (local !== undefined) {
-        if (localMatches && image.status === 'ready') {
-          const receipt = validateReceipt(
-            await this.#downloadArtifactOnce({
-              batchId: manifest.batchId,
-              index: image.index,
-              expectedSha256: image.sha256,
-              expectedSizeBytes: image.sizeBytes,
-              expectedWidth: manifest.settings.width,
-              expectedHeight: manifest.settings.height,
-            }),
-            manifest.batchId,
+    for (let pass = 0; pass < maxReconciliationPasses; pass += 1) {
+      let reconciledThisPass = false;
+
+      for (const image of manifest.images) {
+        if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
+        if (!['ready', 'downloaded'].includes(image.status)) continue;
+        if (image.sha256 === null || image.sizeBytes === null) {
+          throw new WorkerBatchError(
+            'worker_manifest_invalid',
+            'A ready image is missing its checksum or byte count.',
+            0,
           );
-          if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
-          byIndex.set(receipt.index, receipt);
-          this.#receiptCache.set(manifest.batchId, byIndex);
-          receipts = [...byIndex.values()].sort((left, right) => left.index - right.index);
-          downloaded = true;
-          continue;
         }
-        throw new WorkerBatchError(
-          'local_receipt_conflict',
-          `Local frame ${image.index} does not match the worker manifest.`,
-          0,
+        const local = byIndex.get(image.index);
+        const localMatches = local?.sha256 === image.sha256 && local.sizeBytes === image.sizeBytes;
+        if (localMatches && image.status === 'downloaded') continue;
+        if (reconciledArtifactIndexes.has(image.index)) continue;
+        // A local receipt is durable before the native layer sends the worker
+        // acknowledgement. If that acknowledgement fails (or the process dies
+        // in between), the worker can still report this image as `ready` while
+        // the local ledger already contains the verified JPEG. Re-run the
+        // idempotent native download/ack path in that state; it sees the final
+        // file, verifies it, and retries only the missing worker mutation.
+        // Never treat a matching local receipt as proof of acknowledgement until
+        // the worker manifest itself reports `downloaded`.
+        if (local !== undefined) {
+          if (localMatches && image.status === 'ready') {
+            const receipt = validateReceipt(
+              await this.#downloadArtifactOnce({
+                batchId: manifest.batchId,
+                batchName: this.#batchName ?? undefined,
+                index: image.index,
+                expectedSha256: image.sha256,
+                expectedSizeBytes: image.sizeBytes,
+                expectedWidth: manifest.settings.width,
+                expectedHeight: manifest.settings.height,
+              }),
+              manifest.batchId,
+            );
+            if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
+            byIndex.set(receipt.index, receipt);
+            this.#receiptCache.set(manifest.batchId, byIndex);
+            receipts = [...byIndex.values()].sort((left, right) => left.index - right.index);
+            reconciledArtifactIndexes.add(image.index);
+            reconciledThisPass = true;
+            continue;
+          }
+          throw new WorkerBatchError(
+            'local_receipt_conflict',
+            `Local frame ${image.index} does not match the worker manifest.`,
+            0,
+          );
+        }
+        const receipt = validateReceipt(
+          await this.#downloadArtifactOnce({
+            batchId: manifest.batchId,
+            batchName: this.#batchName ?? undefined,
+            index: image.index,
+            expectedSha256: image.sha256,
+            expectedSizeBytes: image.sizeBytes,
+            expectedWidth: manifest.settings.width,
+            expectedHeight: manifest.settings.height,
+          }),
+          manifest.batchId,
+        );
+        if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
+        byIndex.set(receipt.index, receipt);
+        this.#receiptCache.set(manifest.batchId, byIndex);
+        receipts = [...byIndex.values()].sort((left, right) => left.index - right.index);
+        reconciledArtifactIndexes.add(image.index);
+        reconciledThisPass = true;
+      }
+
+      if (!reconciledThisPass) {
+        if (isTerminalManifest(manifest) && manifest.images.some((image) => image.status === 'ready')) {
+          throw new WorkerBatchError(
+            'terminal_reconciliation_pending',
+            'A verified image is still awaiting worker acknowledgement.',
+            409,
+          );
+        }
+        if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
+        return this.#commit(
+          { type: 'manifest', manifest, receipts },
+          connectionGeneration,
+          stateGeneration,
         );
       }
-      const receipt = validateReceipt(
-        await this.#downloadArtifactOnce({
-          batchId: manifest.batchId,
-          index: image.index,
-          expectedSha256: image.sha256,
-          expectedSizeBytes: image.sizeBytes,
-          expectedWidth: manifest.settings.width,
-          expectedHeight: manifest.settings.height,
-        }),
-        manifest.batchId,
-      );
-      if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
-      byIndex.set(receipt.index, receipt);
-      this.#receiptCache.set(manifest.batchId, byIndex);
-      receipts = [...byIndex.values()].sort((left, right) => left.index - right.index);
-      downloaded = true;
-    }
 
-    if (downloaded) {
       manifest = parseWorkerManifest(
         requireSuccess(await this.#port.getBatch(manifest.batchId), [200]),
       );
     }
-    if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
-    return this.#commit(
-      { type: 'manifest', manifest, receipts },
-      connectionGeneration,
-      stateGeneration,
+
+    throw new WorkerBatchError(
+      'worker_reconciliation_limit',
+      'Artifact reconciliation did not reach a stable worker manifest.',
+      409,
     );
   }
 
   #downloadArtifactOnce(input: {
     batchId: string;
+    batchName?: string;
     index: number;
     expectedSha256: string;
     expectedSizeBytes: number;
@@ -440,6 +521,7 @@ export class WorkerBatchCoordinator {
   }): Promise<LocalDownloadReceipt> {
     const key = `${input.batchId}:${input.index}`;
     const fingerprint = [
+      input.batchName ?? 'legacy-folder',
       input.expectedSha256,
       input.expectedSizeBytes,
       input.expectedWidth,

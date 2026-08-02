@@ -51,7 +51,7 @@ function formatEta(state: AppState) {
 function commandTitle(state: AppState): string {
   if (state.pod.createRecovery) return 'RunPod start needs confirmation';
   if (state.pod.phase === 'error') return 'GPU operation needs attention';
-  return state.batch?.name ?? (state.pod.phase === 'offline' ? 'Production desk' : state.pod.statusDetail);
+  return state.batch?.name ?? (state.pod.phase === 'offline' ? 'No active batch' : state.pod.statusDetail);
 }
 
 function commandProgress(state: AppState, progress: number): string {
@@ -79,7 +79,7 @@ export function TopBar({ state, dispatch }: { state: AppState; dispatch: Dispatc
         <span>imageforge</span>
       </button>
 
-      <div className="command-track" aria-label="Current production status">
+      <div className="command-track" aria-label="Current status">
         <div className="command-track__title">
           <span className={`command-track__phase command-track__phase--${phaseTone(state.pod.phase)}`}>
             <StatusDot tone={phaseTone(state.pod.phase)} pulse={state.pod.phase === 'ready' || podBusy} />

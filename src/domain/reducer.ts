@@ -28,7 +28,7 @@ export function defaultDestinationForPlatform(userAgent = typeof navigator === '
 export const DEFAULT_SETTINGS: SettingsState = {
   userName: '',
   defaultDestination: defaultDestinationForPlatform(),
-  editorialSuffixEnabled: true,
+  editorialSuffixEnabled: false,
   editorialSuffix: 'Editorial realism, natural light, honest texture, restrained color, no text or logos.',
   theme: 'midnight',
   density: 'comfortable',
@@ -424,7 +424,7 @@ function reduceBatchTick(state: AppState): AppState {
     estimatedCost: (elapsedSeconds / 3600) * hourlyRate,
     statusMessage: activePrompt
       ? `${activePrompt.status === 'ready' ? 'Verifying' : activePrompt.status === 'downloading' ? 'Downloading' : activePrompt.status === 'retrying' ? 'Retrying' : 'Generating'} image ${String(activePrompt.index).padStart(3, '0')} of ${String(prompts.length).padStart(3, '0')}`
-      : 'Finalizing manifest and verified downloads',
+      : 'Saving the last images',
   };
 
   if (!activePrompt && nextIndex < 0) {
@@ -435,7 +435,7 @@ function reduceBatchTick(state: AppState): AppState {
       statusMessage:
         counts.failed > 0
           ? `${counts.completed} downloaded · ${counts.failed} need attention`
-          : `${counts.completed} images verified in order`,
+          : `${counts.completed} images saved`,
     };
     const nextUsage = finishUsage(nextBatch, state.pod);
     return {
@@ -510,7 +510,7 @@ function scenarioState(state: AppState, scenario: OperationalScenario): AppState
     };
   } else if (scenario === 'complete') {
     const settled = baseBatch.prompts.map(completedPrompt);
-    batch = { ...baseBatch, prompts: settled, statusMessage: '24 images verified in order' };
+    batch = { ...baseBatch, prompts: settled, statusMessage: '24 images saved' };
   } else if (scenario === 'error') {
     pod = podDetails('error', 0, 'Worker authentication failed. Check the worker secret.', readyPod());
     batch = { ...baseBatch, statusMessage: 'Generation stopped safely · no files lost' };
@@ -577,7 +577,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         draft: { ...state.draft, destination: action.path },
-        ...toast(state, 'success', 'Destination connected', `Verified write access to ${action.path}`),
+        ...toast(state, 'success', 'Output folder ready', `${action.path} is writable.`),
       };
     case 'ADD_REFERENCE':
       if (state.draft.references.length >= MAX_BATCH_REFERENCES || state.draft.references.some((reference) => reference.id === action.reference.id)) return state;
@@ -650,7 +650,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
                       ? { ...prompt, status: 'pending' as const, failureReason: undefined }
                       : prompt,
                   ),
-                  statusMessage: 'Interrupted manifest saved · restart a GPU to resume or cancel',
+                  statusMessage: 'Generation interrupted · restart a GPU to resume or cancel',
                 },
               }
             : {}
@@ -709,7 +709,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
                   ? { ...prompt, status: 'pending' as const, failureReason: undefined }
                   : prompt,
               ),
-              statusMessage: 'Interrupted manifest saved · restart a GPU to resume or cancel',
+              statusMessage: 'Generation interrupted · restart a GPU to resume or cancel',
             }
           : state.batch,
         ...toast(state, 'success', 'GPU stopped', 'Compute was terminated explicitly. Local files are unchanged.'),
@@ -720,7 +720,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         refreshedAt: action.checkedAt,
         pod: { ...state.pod, lastCheckedAt: action.checkedAt },
-        ...toast(state, 'info', 'Status refreshed', 'Worker health and download receipts are up to date.'),
+        ...toast(state, 'info', 'Status refreshed', 'GPU and download status are up to date.'),
       };
     case 'START_BATCH': {
       if (!canStartBatch(state)) {
@@ -756,7 +756,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           estimatedSecondsPerImage: 8.4,
           estimatedCost: 0,
           lockMessage: null,
-          statusMessage: `Validating ${prompts.length} prompts and destination receipts`,
+          statusMessage: `Checking ${prompts.length} prompts and output folder`,
           references: state.draft.references,
           aspectRatio: state.draft.aspectRatio,
         },
@@ -778,7 +778,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           prompts,
           statusMessage: `Generating image 001 of ${String(prompts.length).padStart(3, '0')}`,
         },
-        ...toast(state, 'success', 'Batch started', 'Images will be verified and downloaded in prompt order.'),
+        ...toast(state, 'success', 'Batch started', 'Images will be generated and saved in prompt order.'),
       };
     }
     case 'BATCH_TICK':
@@ -793,7 +793,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         pod: state.pod.phase === 'reconnecting'
-          ? { ...state.pod, phase: 'ready', health: 'healthy', phaseProgress: 100, errorMessage: null, statusDetail: 'Model warm · worker manifest synchronized' }
+          ? { ...state.pod, phase: 'ready', health: 'healthy', phaseProgress: 100, errorMessage: null, statusDetail: 'Model ready · batch status synchronized' }
           : state.pod,
         activeView: state.batch?.phase === 'validating' ? 'progress' : state.activeView,
         batch: action.batch,
@@ -801,6 +801,11 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         usage,
       };
     }
+    case 'SYNC_RUNTIME_LIBRARY':
+      return {
+        ...state,
+        library: action.assets.reduce(upsertLibraryAsset, state.library),
+      };
     case 'SYNC_RUNTIME_BUSY':
       return {
         ...state,
@@ -843,7 +848,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
               statusDetail: action.message,
               errorMessage: action.message,
             },
-            ...toast(state, 'warning', 'Reconnecting to the worker', 'The durable manifest and verified downloads remain safe.'),
+            ...toast(state, 'warning', 'Reconnecting to the GPU', 'Images already saved remain safe.'),
           }
         : action.scope === 'pod'
         ? {
@@ -875,7 +880,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         batch: {
           ...state.batch,
           phase: isPausing ? 'paused' : 'running',
-          statusMessage: isPausing ? 'Paused safely · active manifest lock retained' : 'Resuming from the first incomplete prompt',
+          statusMessage: isPausing ? 'Paused safely · this batch remains active' : 'Resuming from the first incomplete prompt',
         },
         ...toast(
           state,
@@ -938,9 +943,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           ...state.batch,
           phase: 'running',
           prompts,
-          statusMessage: started ? 'Resumed from the first incomplete prompt' : 'Finalizing resumed manifest',
+          statusMessage: started ? 'Resumed from the first incomplete prompt' : 'Finishing resumed batch',
         },
-        ...toast(state, 'success', 'Interrupted batch resumed', 'Verified files were kept; generation continues at the first incomplete slot.'),
+        ...toast(state, 'success', 'Interrupted batch resumed', 'Saved images were kept; generation continues at the first incomplete prompt.'),
       };
     }
     case 'DISMISS_DIALOG':
@@ -978,7 +983,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...reset,
         settings: state.settings,
         setup: state.setup,
-        ...toast(state, 'info', 'Workspace reset', 'You are back to an offline, empty production desk.'),
+        ...toast(state, 'info', 'Workspace reset', 'You are back to an offline, empty workspace.'),
       };
     }
     case 'REQUEST_CLEAR_LIBRARY':

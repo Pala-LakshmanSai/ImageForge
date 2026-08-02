@@ -206,10 +206,12 @@ describe('appReducer', () => {
     expect(state.batch?.prompts[0].status).toBe('generating');
   });
 
-  it('applies the visible editorial suffix and provides platform-correct defaults', () => {
+  it('leaves the optional style instruction off by default and provides platform-correct destinations', () => {
     let state = readyDraft(1);
+    const prompt = state.draft.prompts[0].text;
+    expect(state.settings.editorialSuffixEnabled).toBe(false);
     state = appReducer(state, { type: 'START_BATCH', startedAt: '2026-08-01T10:00:00.000Z' });
-    expect(state.batch?.prompts[0].text).toContain(state.settings.editorialSuffix);
+    expect(state.batch?.prompts[0].text).toBe(prompt);
     expect(defaultDestinationForPlatform('Mozilla/5.0 (Windows NT 10.0)')).toBe('C:\\Users\\Editor\\Pictures\\ImageForge');
     expect(defaultDestinationForPlatform('Mozilla/5.0 (Macintosh; Intel Mac OS X)')).toBe('/Users/Shared/Pictures/ImageForge');
   });
@@ -217,6 +219,7 @@ describe('appReducer', () => {
   it('uses an edited default suffix exactly, and omits it when disabled', () => {
     let state = readyDraft(1);
     state = appReducer(state, { type: 'SET_SETTING', key: 'editorialSuffix', value: 'cinematic tungsten, clean frame' });
+    state = appReducer(state, { type: 'SET_SETTING', key: 'editorialSuffixEnabled', value: true });
     state = appReducer(state, { type: 'START_BATCH', startedAt: '2026-08-01T10:01:00.000Z' });
     expect(state.batch?.prompts[0].text).toBe('Editorial documentary frame 001 with natural light and honest texture cinematic tungsten, clean frame');
 
@@ -303,6 +306,31 @@ describe('appReducer', () => {
     state = appReducer(state, { type: 'RUNTIME_BATCH_IDLE' });
     expect(state.batch).toBeNull();
     expect(state.activeView).toBe('create');
+  });
+
+  it('restores local Library assets without inventing a terminal batch', () => {
+    const recovered = {
+      id: '11111111-1111-4111-8111-111111111111-1',
+      batchId: '11111111-1111-4111-8111-111111111111',
+      batchName: 'Atlas of Quiet Work',
+      index: 1,
+      prompt: 'Saved image 001',
+      seed: 1,
+      filename: 'batches/Atlas of Quiet Work/000001.jpg',
+      checksum: 'a'.repeat(64),
+      createdAt: '2026-08-02T12:00:00.000Z',
+      durationSeconds: 0,
+      destination: '/safe',
+      palette: 1,
+      recovered: true,
+    };
+    const state = appReducer(createConfiguredInitialState(), {
+      type: 'SYNC_RUNTIME_LIBRARY',
+      assets: [recovered],
+    });
+
+    expect(state.batch).toBeNull();
+    expect(state.library).toEqual([recovered]);
   });
 
   it('keeps durable work recoverable across transient worker errors and explicit Pod termination', () => {

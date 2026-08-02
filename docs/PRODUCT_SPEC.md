@@ -19,8 +19,9 @@ application took 30-60 minutes to become usable.
    GPU, atomically falling back to the next type when the first is unavailable.
 3. Watch `provisioning -> loading -> warming -> ready` without using a terminal.
 4. Paste or import one prompt per line (TXT or CSV), validate it, and start.
-5. Download each completed image directly into the initiating machine's chosen
-   folder while later images generate.
+5. Save each completed image directly into a folder named for the user's batch
+   while later images generate. Browse the full-quality local JPEG or download
+   a separate copy with a friendly batch-and-frame filename.
 6. Review failures, retry if needed, reveal the folder, and explicitly press
    **Stop GPU**.
 
@@ -46,6 +47,9 @@ application took 30-60 minutes to become usable.
   checksums, timings, and failures.
 - AC-7: Closing/reopening the client resumes missing downloads. Recreating a
   Pod can resume an interrupted manifest at the first incomplete prompt.
+- AC-7a: User-facing cards, details, folders, and exports use the batch name and
+  frame number. UUIDs, seeds, checksums, and receipt mechanics stay out of the
+  primary UI while remaining available internally and in the CSV manifest.
 - AC-8: The worker loads only FLUX.2 Klein 4B BF16, uses four inference steps
   and guidance 1.0 by default, and exposes measured readiness and GPU state.
 - AC-9: First-start downloads are one-time; normal starts install no packages

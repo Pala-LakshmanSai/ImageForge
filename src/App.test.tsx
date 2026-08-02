@@ -54,6 +54,7 @@ function productionAdapter() {
       listeners.add(listener);
       return () => listeners.delete(listener);
     }),
+    restoreLocalLibrary: vi.fn(async () => undefined),
     refresh: vi.fn(async () => undefined),
     startGpu: vi.fn(async () => undefined),
     stopGpu: vi.fn(async () => undefined),
@@ -88,6 +89,7 @@ describe('ImageForge shell', () => {
     render(<App initialState={createConfiguredInitialState()} adapter={production.adapter} />);
 
     await waitFor(() => expect(production.runtime.refresh).toHaveBeenCalledOnce());
+    await waitFor(() => expect(production.runtime.restoreLocalLibrary).toHaveBeenCalledOnce());
     expect(production.runtime.startGpu).not.toHaveBeenCalled();
     expect(production.adapter.runPodLifecycle).not.toHaveBeenCalled();
 
@@ -155,9 +157,10 @@ describe('ImageForge shell', () => {
     state.batch = { ...state.batch!, phase: 'complete', statusMessage: '1 image verified in order' };
     render(<App initialState={state} adapter={production.adapter} />);
 
+    expect(screen.getByText('Previous batch still open')).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'New brief' }));
     expect(production.runtime.beginNewBatch).toHaveBeenCalledOnce();
-    expect(screen.getByRole('heading', { name: 'Complete the setup' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Finish these items' })).toBeVisible();
   });
 
   it('blocks duplicate starts and exposes explicit ambiguous-create recovery', async () => {
@@ -198,7 +201,7 @@ describe('ImageForge shell', () => {
 
     render(<App initialState={state} adapter={production.adapter} />);
 
-    const track = screen.getByLabelText('Current production status');
+    const track = screen.getByLabelText('Current status');
     expect(track).toHaveTextContent('RunPod start needs confirmation');
     expect(track).toHaveTextContent('—');
     expect(track).toHaveTextContent('eta action needed');
@@ -211,15 +214,70 @@ describe('ImageForge shell', () => {
     render(<App initialState={createConfiguredInitialState()} adapter={immediateAdapter()} />);
 
     for (const [label, heading] of [
-      ['Progress', 'The desk is clear.'],
-      ['Library', 'Your visual ledger.'],
-      ['Usage', 'Know every frame’s cost.'],
-      ['Settings', 'Make the desk yours.'],
-      ['Create', 'Direct the frame.'],
+      ['Progress', 'No batch running'],
+      ['Library', 'Your images.'],
+      ['Usage', 'Usage and cost'],
+      ['Settings', 'Settings'],
+      ['Create', 'New batch'],
     ] as const) {
       await user.click(screen.getByRole('button', { name: label }));
       expect(screen.getByRole('heading', { name: heading })).toBeVisible();
     }
+  });
+
+  it('shows plain batch availability and keeps the optional style instruction visible but off', () => {
+    render(<App initialState={createConfiguredInitialState()} adapter={immediateAdapter()} />);
+
+    expect(screen.getByText('Ready for a new batch')).toBeVisible();
+    const styleToggle = screen.getByRole('checkbox', { name: /Optional style instruction/i });
+    expect(styleToggle).not.toBeChecked();
+    const styleEditor = screen.getByRole('textbox', { name: /Style instruction/i });
+    expect(styleEditor).toBeVisible();
+    fireEvent.change(styleEditor, { target: { value: 'soft daylight, documentary photography' } });
+    expect(styleEditor).toHaveValue('soft daylight, documentary photography');
+    expect(screen.getByText('Off — prompts are sent exactly as written.')).toBeVisible();
+    expect(screen.queryByText('Shared batch lock available')).not.toBeInTheDocument();
+  });
+
+  it('keeps internal details out of Progress and reveals the actual named batch folder', async () => {
+    const user = userEvent.setup();
+    const state = createDemoState();
+    const savedPrompt = state.batch!.prompts.find((prompt) => prompt.status === 'downloaded')!;
+    savedPrompt.filename = 'batches/Atlas of Quiet Work/000001.jpg';
+    const adapter = immediateAdapter();
+    adapter.revealPath = vi.fn(async () => undefined);
+    render(<App initialState={state} adapter={adapter} />);
+
+    const progress = screen.getByRole('heading', { name: state.batch!.name }).closest('.progress-screen')!;
+    expect(progress).not.toHaveTextContent(state.batch!.id);
+    expect(progress).not.toHaveTextContent(/seed|checksum|receipt|sha-256|atomic rename|\.part/i);
+    expect(progress).toHaveTextContent('saving images as they finish');
+    await user.click(screen.getByRole('button', { name: 'Show in folder' }));
+    expect(adapter.revealPath).toHaveBeenCalledWith(
+      'batches/Atlas of Quiet Work/000001.jpg',
+    );
+    expect(state.batch!.prompts[0]).toMatchObject({ seed: expect.any(Number), checksum: expect.any(String) });
+  });
+
+  it('keeps a 450-image Progress queue incremental and seed-free', () => {
+    const state = createDemoState();
+    const template = state.batch!.prompts[0];
+    state.batch!.prompts = Array.from({ length: 450 }, (_, index) => ({
+      ...template,
+      id: `prompt-${index + 1}`,
+      index: index + 1,
+      text: `Image prompt ${index + 1}`,
+      seed: 200_000 + index,
+      status: index === 0 ? ('generating' as const) : ('pending' as const),
+      checksum: undefined,
+      filename: undefined,
+      durationSeconds: undefined,
+    }));
+    render(<App initialState={state} adapter={immediateAdapter()} />);
+
+    const queue = screen.getByLabelText('450 prompts');
+    expect(queue.querySelectorAll('.prompt-row').length).toBeLessThan(30);
+    expect(queue).not.toHaveTextContent(/seed/i);
   });
 
   it('runs the critical fake Create-to-Progress flow with no backend', async () => {
@@ -230,8 +288,8 @@ describe('ImageForge shell', () => {
     await user.click(screen.getByRole('button', { name: /Choose output folder/i }));
     await user.click(screen.getAllByRole('button', { name: 'Start GPU' })[0]);
 
-    await waitFor(() => expect(screen.getByRole('button', { name: /Generate 24 ordered images/i })).toBeEnabled());
-    await user.click(screen.getByRole('button', { name: /Generate 24 ordered images/i }));
+    await waitFor(() => expect(screen.getByRole('button', { name: /Generate 24 images/i })).toBeEnabled());
+    await user.click(screen.getByRole('button', { name: /Generate 24 images/i }));
 
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Atlas of Quiet Work' })).toBeVisible());
     await waitFor(() => expect(screen.getByRole('button', { name: 'Pause after frame' })).toBeVisible());
@@ -295,7 +353,7 @@ describe('ImageForge shell', () => {
     await user.click(await screen.findByRole('button', { name: /Pictures\/ImageForge/i }));
     await user.click(await screen.findByRole('button', { name: 'Run connection test' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-    expect(screen.getByRole('heading', { name: 'Direct the frame.' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'New batch' })).toBeVisible();
   });
 
   it('moves keyboard focus to the first control on every setup step', async () => {
@@ -333,9 +391,9 @@ describe('ImageForge shell', () => {
     await screen.findByRole('heading', { name: 'Bring in the studio profile.' });
     await user.click(screen.getByRole('button', { name: 'Continue' }));
     const chooser = await screen.findByRole('button', { name: /Pictures\/ImageForge/i });
-    expect(screen.getByText('Folder verified')).toBeVisible();
+    expect(screen.getByText('Folder ready')).toBeVisible();
     await user.click(chooser);
-    await waitFor(() => expect(screen.queryByText('Folder verified')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText('Folder ready')).not.toBeInTheDocument());
     expect(screen.getByRole('button', { name: 'Run connection test' })).toBeDisabled();
   });
 
@@ -396,7 +454,7 @@ describe('ImageForge shell', () => {
 
     expect(screen.getByRole('button', { name: 'Replace worker credential' })).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Replace worker credential' }));
-    expect(screen.getByRole('heading', { name: 'Make the desk yours.' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Settings' })).toBeVisible();
   });
 
   it('allows replacing the worker credential while an idle GPU remains attached', async () => {

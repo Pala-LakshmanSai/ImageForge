@@ -174,6 +174,9 @@ export interface LibraryAsset {
   durationSeconds: number;
   destination: string;
   palette: number;
+  /** True when the local receipt was restored before worker prompt/timing
+   * metadata became reachable. */
+  recovered?: boolean;
 }
 
 export interface UsageRun {
@@ -263,6 +266,7 @@ export type AppAction =
   | { type: 'BATCH_VALIDATED' }
   | { type: 'BATCH_TICK' }
   | { type: 'SYNC_RUNTIME_BATCH'; batch: BatchState; assets: LibraryAsset[] }
+  | { type: 'SYNC_RUNTIME_LIBRARY'; assets: LibraryAsset[] }
   | { type: 'SYNC_RUNTIME_BUSY'; batch: BatchState }
   | { type: 'RUNTIME_BATCH_IDLE' }
   | { type: 'RUNTIME_ERROR'; scope: 'pod' | 'batch'; code?: string; message: string; retryable?: boolean }

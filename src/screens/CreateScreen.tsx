@@ -26,25 +26,34 @@ import { Button, Eyebrow, PhaseBadge } from '../components/primitives';
 import type { ScreenProps } from './types';
 
 function readiness(state: ScreenProps['state']) {
+  const previousBatchFinished = state.batch !== null && TERMINAL_BATCH_PHASES.includes(state.batch.phase);
   return [
     {
-      label: 'GPU and model ready',
-      detail: state.pod.phase === 'ready' ? `${state.pod.gpu} · BF16 warm` : `Currently ${state.pod.phase}`,
+      label: 'GPU ready',
+      detail: state.pod.phase === 'ready' ? `${state.pod.gpu} · model ready` : `Currently ${state.pod.phase}`,
       ready: state.pod.phase === 'ready',
     },
     {
-      label: 'Prompt order validated',
-      detail: state.draft.prompts.length > 0 ? `${state.draft.prompts.length} ordered prompts` : 'Paste or import prompts',
+      label: 'Prompts ready',
+      detail: state.draft.prompts.length > 0 ? `${state.draft.prompts.length} prompts` : 'Paste or import prompts',
       ready: state.draft.prompts.length > 0 && !state.draft.issues.some((issue) => issue.level === 'error'),
     },
     {
-      label: 'Local destination writable',
+      label: 'Output folder ready',
       detail: state.draft.destination ?? 'Choose a folder on this device',
       ready: state.draft.destination !== null,
     },
     {
-      label: 'Shared batch lock available',
-      detail: state.batch ? `${state.batch.owner} · ${state.batch.phase.replace('_', ' ')}` : 'No active generation lease',
+      label: state.batch === null
+        ? 'Ready for a new batch'
+        : previousBatchFinished
+          ? 'Previous batch still open'
+          : 'Another batch is running',
+      detail: state.batch === null
+        ? 'No other batch is using the GPU'
+        : previousBatchFinished
+          ? 'Choose New brief before starting another batch'
+          : `${state.batch.owner} · ${state.batch.phase.replace('_', ' ')}`,
       ready: state.batch === null,
     },
   ];
@@ -167,9 +176,9 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
     <div className="screen create-screen">
       <section className="page-heading page-heading--create">
         <div>
-          <Eyebrow>Create · ordered image production</Eyebrow>
-          <h1>Direct the frame.</h1>
-          <p>One visible prompt per image. No rewriting model, no hidden queue, and no surprise compute.</p>
+          <Eyebrow>Create</Eyebrow>
+          <h1>New batch</h1>
+          <p>Name the batch, add one prompt per image, and review every option before starting.</p>
         </div>
         <div className="page-heading__actions">
           {terminalBatch ? <Button onClick={() => dispatch({ type: 'NEW_BATCH' })}>New brief</Button> : null}
@@ -188,8 +197,8 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
         <aside className="lock-banner" role="status">
           <span><LockKeyhole size={20} /></span>
           <div>
-            <strong>One active batch is already holding the shared lease</strong>
-            <p>{state.batch?.owner} is {state.batch?.phase.replace('_', ' ')} “{state.batch?.name}”. ImageForge does not queue a second batch.</p>
+            <strong>Another batch is already running</strong>
+            <p>{state.batch?.owner} is {state.batch?.phase.replace('_', ' ')} “{state.batch?.name}”. ImageForge runs one batch at a time and does not queue another.</p>
           </div>
           <Button compact onClick={() => dispatch({ type: 'NAVIGATE', view: 'progress' })}>View progress</Button>
         </aside>
@@ -199,8 +208,8 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
         <section className="panel prompt-workbench">
           <header className="panel-heading">
             <div>
-              <Eyebrow>01 · Production brief</Eyebrow>
-              <h2>Ordered prompt list</h2>
+              <Eyebrow>01 · Prompts</Eyebrow>
+              <h2>One prompt per image</h2>
             </div>
             <span className="source-chip"><FileText size={14} /> {state.draft.sourceName ?? 'Pasted text'}</span>
           </header>
@@ -270,10 +279,10 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
         <aside className="create-sidebar">
           <section className="panel reference-panel">
             <header className="panel-heading panel-heading--compact">
-              <div><Eyebrow>Optional visual anchor</Eyebrow><h2>Batch references</h2></div>
+              <div><Eyebrow>Optional</Eyebrow><h2>Reference images</h2></div>
               <Image size={20} />
             </header>
-            <p className="reference-panel__intro">References apply to every prompt in this batch. They stay local until you explicitly start generation.</p>
+            <p className="reference-panel__intro">Use up to {MAX_BATCH_REFERENCES} images to guide the whole batch. They are sent only when you start generation.</p>
             <label
               className="reference-dropzone"
               htmlFor="reference-files"
@@ -327,16 +336,16 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
               <span><Folder size={21} /></span>
               <span>
                 <strong>{choosingDestination ? 'Opening folder chooser…' : state.draft.destination ? state.draft.destination.split(/[\\/]/).at(-1) : 'Choose output folder'}</strong>
-                <small>{state.draft.destination ?? 'JPEGs, previews, and manifest.csv'}</small>
+                <small>{state.draft.destination ?? 'Full-quality JPEGs are saved here'}</small>
               </span>
               <ArrowRight size={17} />
             </button>
-            <p className="security-note"><ShieldCheck size={14} /> Files arrive as <code>.part</code>, pass checksum verification, then rename atomically.</p>
+            <p className="security-note"><ShieldCheck size={14} /> Images are checked before they are saved to this folder.</p>
           </section>
 
           <section className="panel contract-panel">
             <header className="panel-heading panel-heading--compact">
-              <div><Eyebrow>Fixed render contract</Eyebrow><h2>One honest model</h2></div>
+              <div><Eyebrow>Image settings</Eyebrow><h2>Output</h2></div>
               <Sparkles size={20} />
             </header>
             <dl className="contract-grid">
@@ -366,7 +375,10 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
               </div>
             </div>
             <label className="toggle-row">
-              <span><strong>Editorial Realism suffix</strong><small>Visible style direction; never rewritten by an LLM.</small></span>
+              <span>
+                <strong>Optional style instruction</strong>
+                <small>{state.settings.editorialSuffixEnabled ? 'On — added to every prompt.' : 'Off — prompts are sent exactly as written.'}</small>
+              </span>
               <input
                 type="checkbox"
                 checked={state.settings.editorialSuffixEnabled}
@@ -375,20 +387,20 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
               <i aria-hidden="true" />
             </label>
             <label className="settings-field create-suffix-field" htmlFor="create-editorial-suffix">
-              <span>Edit visible suffix</span>
+              <span>Style instruction</span>
               <textarea
                 id="create-editorial-suffix"
                 value={state.settings.editorialSuffix}
                 onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'editorialSuffix', value: event.target.value })}
                 aria-describedby="create-editorial-suffix-help"
               />
-              <small id="create-editorial-suffix-help">Appended after each submitted prompt when enabled; surrounding whitespace is normalized.</small>
+              <small id="create-editorial-suffix-help">{state.settings.editorialSuffixEnabled ? 'This exact text will be added after every prompt.' : 'Edit it now if needed; it is used only when the switch is on.'}</small>
             </label>
           </section>
 
           <section className={`panel launch-panel ${isReady ? 'launch-panel--ready' : ''}`}>
             <header className="panel-heading panel-heading--compact">
-              <div><Eyebrow>03 · Launch check</Eyebrow><h2>{isReady ? 'Ready to forge' : 'Complete the setup'}</h2></div>
+              <div><Eyebrow>03 · Before you start</Eyebrow><h2>{isReady ? 'Ready to generate' : 'Finish these items'}</h2></div>
               <Gauge size={20} />
             </header>
             <ul className="readiness-list">
@@ -406,9 +418,9 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
               disabled={!isReady}
               onClick={() => dispatch({ type: 'START_BATCH', startedAt: new Date().toISOString() })}
             >
-              Generate {state.draft.prompts.length || ''} ordered images
+              Generate {state.draft.prompts.length || ''} images
             </Button>
-            <p className="launch-panel__foot">Starting generation never enables automatic GPU shutdown.</p>
+            <p className="launch-panel__foot">ImageForge will not stop the GPU automatically.</p>
           </section>
         </aside>
       </div>

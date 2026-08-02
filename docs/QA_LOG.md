@@ -436,3 +436,45 @@ the recovery poll observes it.
   `357e74ffc29dd1c858028c2d8bd32a4a65a6fbadeefc211a2144d6f629336847`.
   It is ad-hoc signed and not notarized. Desktop release identity is now aligned
   at `0.1.4`; the final versioned hashes are recorded after the native workflow.
+
+## v0.1.5 named folders and minimal full-quality Library — 2026-08-02
+
+- The existing `Atlas of Quiet Work` recovery was migrated from its internal
+  UUID directory to `batches/Atlas of Quiet Work` through the durable native
+  batch-folder mapping. Read-only verification found 21 numbered JPEGs, 21
+  matching receipts, identical size/SHA-256 pairs, and no `.part` file. The
+  three unfinished images were not generated because the GPU remains
+  explicitly off; ImageForge did not start or stop paid compute automatically.
+- Production Library cards and the detail view now read the receipt-bound local
+  JPEG rather than stretching the small polling preview. Native reads are
+  confined to the validated destination, reject links/reparse points, verify
+  the already-open file bytes, and enforce JPEG and byte limits. Sampled local
+  sources were 1024 x 1024. The current batch appears as compact labels such as
+  `Atlas of Quiet Work · 001`; UUID paths, seeds, checksums, receipt language,
+  and repeated verification badges are absent from the primary Library UI.
+- Each card and detail view has a separate accessible Download action. Native
+  export uses a friendly batch-and-frame filename and an atomic no-overwrite
+  move. Show in folder resolves the actual named local path. Receipt-only
+  offline restoration shows only real local metadata and does not invent a
+  completed batch, placeholder prompt, or render duration. Progress now passes
+  the first real saved filename to the reveal command, with destination-root
+  fallback only before the batch has any local image; its repair test and
+  independent re-review passed.
+- The optional style instruction is off by default for new installs. The local
+  test profile was reset from `cartoon style` to a neutral editorial instruction
+  while remaining off, so prompts are sent exactly as entered unless a user
+  explicitly enables it.
+- Final local checks: desktop Vitest 124/124, RunPod client 95/95, Rust release
+  tests 57/57, root typecheck, production build, Rust formatting, and
+  `git diff --check` passed. Independent review reported no remaining must-fix
+  finding. The packaged app launched and the pre-polish candidate was inspected
+  interactively with 21 sharp local cards, exact batch naming, and per-card
+  Download controls. The packaged smoke now also checks a fast completed fake
+  batch, named minimal Library, Download, image detail, and folder reveal on
+  both native CI runners. The exact local smoke could not advance while this Mac
+  was locked and timed out without a pass/fail marker, so CI is authoritative.
+- Final local Apple-silicon candidate:
+  `/Volumes/ImageForgeBuild/cargo-target/release/bundle/dmg/ImageForge_0.1.5_aarch64.dmg`,
+  SHA-256 `92a452f96f133131f5f594f8eb397bc78fd8240a477dcf51243be812703fc9af`.
+  `codesign --verify --deep --strict` and `hdiutil verify` passed. This beta is
+  ad-hoc signed and not notarized; no production signing claim is made.
