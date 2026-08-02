@@ -18,6 +18,7 @@ function workerManifest() {
     interrupted_at: null,
     pause_requested: false,
     cancel_requested: false,
+    settings: { width: 720, height: 1280 },
     images: [{
       index: 1,
       prompt: 'A handpicked documentary still',
@@ -98,6 +99,7 @@ describe('production runtime projection', () => {
     }, Date.parse('2026-08-02T10:01:00.000Z'));
     expect(none.assets).toEqual([]);
     expect(none.batch.prompts[0].status).toBe('ready');
+    expect(none.batch.aspectRatio).toBe('9:16');
 
     const verified = projectOwnedManifest(manifest, [{
       schemaVersion: 1, batchId, index: 1, filename: `batches/${batchId}/000001.jpg`, sha256: 'a'.repeat(64), sizeBytes: 2_048, verifiedAtUnixMs: 1,

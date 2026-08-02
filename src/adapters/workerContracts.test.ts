@@ -24,6 +24,7 @@ function manifest() {
     interrupted_at: null,
     pause_requested: false,
     cancel_requested: false,
+    settings: { width: 1280, height: 720 },
     images: [
       {
         index: 1,

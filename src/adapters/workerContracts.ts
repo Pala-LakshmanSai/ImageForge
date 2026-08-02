@@ -85,9 +85,15 @@ export interface WorkerManifest {
   interruptedAt: string | null;
   pauseRequested: boolean;
   cancelRequested: boolean;
+  settings: WorkerRenderSettings;
   references: WorkerReferenceMetadata[];
   images: WorkerImageRecord[];
   progress: WorkerProgress;
+}
+
+export interface WorkerRenderSettings {
+  width: number;
+  height: number;
 }
 
 export interface WorkerReferenceMetadata {
@@ -133,6 +139,22 @@ function integer(value: unknown, label: string, minimum = 0): number {
     throw new Error(`${label} must be a safe integer.`);
   }
   return value as number;
+}
+
+function renderDimension(value: unknown, label: string): number {
+  const parsed = integer(value, label, 64);
+  if (parsed > 2048 || parsed % 8 !== 0) throw new Error(`${label} is not a supported render dimension.`);
+  return parsed;
+}
+
+function renderSettings(value: unknown): WorkerRenderSettings {
+  if (value === undefined) return { width: 1280, height: 720 };
+  const item = record(value, 'settings');
+  exactKeys(item, ['width', 'height'], 'settings');
+  return {
+    width: renderDimension(item.width, 'settings.width'),
+    height: renderDimension(item.height, 'settings.height'),
+  };
 }
 
 function finite(value: unknown, label: string, minimum = 0): number {
@@ -337,6 +359,7 @@ export function parseWorkerManifest(value: unknown): WorkerManifest {
       'interrupted_at',
       'pause_requested',
       'cancel_requested',
+      'settings',
       'references',
       'images',
       'progress',
@@ -367,6 +390,7 @@ export function parseWorkerManifest(value: unknown): WorkerManifest {
     interruptedAt: nullable(item.interrupted_at, (candidate) => string(candidate, 'interrupted_at')),
     pauseRequested: boolean(item.pause_requested, 'pause_requested'),
     cancelRequested: boolean(item.cancel_requested, 'cancel_requested'),
+    settings: renderSettings(item.settings),
     references,
     images,
     progress: parsedProgress,

@@ -9,11 +9,13 @@ needed before Lakshman and Sujal install their desktop clients.
    volume is `imageforge-prod-50gb` (`ukh207b26r`). The volume holds the
    selective FLUX snapshot, durable manifests, previews, and short-lived full
    artifacts. Pod deletion must never delete this volume.
-2. Build and publish the pinned ImageForge worker container. The checked-in
-   `.github/workflows/publish-worker.yml` builds only `linux/amd64`, emits an
-   OCI digest, and pushes the worker to GHCR. Copy the digest printed by the
-   workflow; never use a mutable tag in a RunPod template. Normal Pod boot
-   installs nothing and has all Hugging Face offline flags enabled.
+2. Build and publish the pinned ImageForge worker container from the dedicated
+   `Pala-LakshmanSai/imageforge-worker` repository workflow. The matching
+   workflow builds only `linux/amd64`, emits an OCI digest, and pushes the
+   worker to GHCR; the ImageForge repository workflow is validation-only. Copy
+   the digest printed by the publisher workflow; never use a mutable tag in a
+   RunPod template. Normal Pod boot installs nothing and has all Hugging Face
+   offline flags enabled.
 3. Prepare the model cache once on the attached volume with the worker's
    explicitly confirmed preparation command. It downloads only the Diffusers
    folders required at runtime and excludes the redundant root single-file
@@ -32,24 +34,25 @@ read-only package-pull secret in RunPod and record that it was used; for a
 public package, verify the package visibility explicitly. Never put a personal
 GitHub token in the repository, desktop profile, or this runbook.
 
-Current immutable worker release evidence (published 2026-08-01):
+Current immutable worker release evidence (published 2026-08-02):
 
 - Repository: `Pala-LakshmanSai/imageforge-worker`
-- Source commit: `860badbf5359085494da09234e77cf1cd9349ecd`
-- Image: `ghcr.io/pala-lakshmansai/imageforge-worker@sha256:9bf602e6dd7106533b865b8f350ade7bf70237dc05512be14fa58c9856fe16b9`
+- Source commit: `dbb6b712317b824b113132f1128ee91b11a46c27`
+- Image: `ghcr.io/pala-lakshmansai/imageforge-worker@sha256:f862e1ea8ece9f35101e7c47be55a5042c17e0eb3cf8414dd709ed73a59e33ed`
 - Architecture: `linux/amd64`
 
 The GHCR package is public, so the template uses **No credentials** for image
-pulls. The ImageForge RunPod template has now been updated to this exact
-digest:
+pulls. Update the ImageForge RunPod template to this exact digest before
+starting a new Pod:
 
 - Template: `imageforge-flux-worker-v1` (`q8sfgixfy2`)
 - Network volume: `imageforge-prod-50gb` (`ukh207b26r`)
 - Data center: `EU-RO-1`
 
-The pinned template has passed the paid smoke and EU-RO-1 shared-volume gates
-documented below. Keep the model-cache preparation and release checks in the
-runbook for any future worker-image or volume change.
+The current digest must pass the paid smoke and EU-RO-1 shared-volume gates
+below before it is treated as production-qualified. Keep the model-cache
+preparation and release checks in the runbook for any future worker-image or
+volume change.
 
 ## 2. Worker authentication
 

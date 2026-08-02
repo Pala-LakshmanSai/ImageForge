@@ -21,3 +21,9 @@ export const DEFAULT_ASPECT_RATIO: AspectRatio = '16:9';
 export function aspectRatioOption(value: AspectRatio): AspectRatioOption {
   return ASPECT_RATIOS.find((option) => option.value === value) ?? ASPECT_RATIOS[0];
 }
+
+/** Recover the selected ratio from safe render dimensions persisted by the worker. */
+export function aspectRatioFromDimensions(width: number, height: number): AspectRatio {
+  return ASPECT_RATIOS.find((option) => option.width === width && option.height === height)?.value
+    ?? DEFAULT_ASPECT_RATIO;
+}

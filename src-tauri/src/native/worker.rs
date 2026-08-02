@@ -664,6 +664,7 @@ fn project_manifest(body: &Value) -> NativeResult<Value> {
             "interrupted_at",
             "pause_requested",
             "cancel_requested",
+            "settings",
             "images",
             "progress",
         ],
@@ -682,6 +683,10 @@ fn project_manifest(body: &Value) -> NativeResult<Value> {
             "current_index",
         ],
     )?;
+    if let Some(settings) = body.get("settings") {
+        let settings = project_object(settings, &["width", "height"])?;
+        projected.insert("settings".into(), Value::Object(settings));
+    }
     let images = projected
         .get("images")
         .and_then(Value::as_array)
@@ -993,6 +998,7 @@ mod tests {
             "state": "complete", "created_at": "2026-08-01T00:00:00Z", "updated_at": "2026-08-01T00:01:00Z",
             "completed_at": "2026-08-01T00:01:00Z", "interrupted_at": null,
             "pause_requested": false, "cancel_requested": false,
+            "settings": {"width": 720, "height": 1280},
             "images": [{
                 "index": 1, "prompt": "safe prompt", "seed": 1, "status": "downloaded", "attempts": 1,
                 "retry_rounds": 0, "filename": "000001.jpg", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1009,6 +1015,7 @@ mod tests {
         assert!(image.get("preview_path").is_none());
         assert!(image.get("attempt_history").is_none());
         assert!(image["receipt"].get("user_id").is_none());
+        assert_eq!(projected["settings"], json!({"width": 720, "height": 1280}));
         assert!(projected.get("cleanup_tombstones").is_none());
     }
 

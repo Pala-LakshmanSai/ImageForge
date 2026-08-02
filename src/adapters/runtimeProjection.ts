@@ -8,7 +8,7 @@ import type {
   PodState,
   PromptStatus,
 } from '../domain/types';
-import { DEFAULT_ASPECT_RATIO } from '../domain/aspectRatio';
+import { aspectRatioFromDimensions, DEFAULT_ASPECT_RATIO } from '../domain/aspectRatio';
 import type { LocalDownloadReceipt } from './workerBatchCoordinator';
 import type {
   WorkerBatchState,
@@ -182,7 +182,7 @@ export function projectOwnedManifest(
     estimatedCost,
     lockMessage: null,
     statusMessage: statusMessage(manifest, phase),
-    aspectRatio: DEFAULT_ASPECT_RATIO,
+    aspectRatio: aspectRatioFromDimensions(manifest.settings.width, manifest.settings.height),
   };
   const assets = prompts.flatMap((prompt): LibraryAsset[] => {
     if (prompt.status !== 'downloaded' || !prompt.filename || !prompt.checksum) return [];

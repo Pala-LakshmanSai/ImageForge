@@ -251,3 +251,16 @@ the recovery poll observes it.
   SHA-256: `8da2420bf4d593ac979ec2296bdec49080eb7e94acc73b8869a766247249261f`.
   It was mounted, launched, and detached successfully. The beta artifact is
   ad-hoc/unsigned; no signing is claimed.
+
+## Fresh final audit — current repair loop
+
+- Frontend: 13 Vitest files, 84 tests passed; typecheck and production build
+  passed after adding safe manifest render-settings projection. The regression
+  now preserves a submitted 9:16 selection after worker manifest rehydration.
+- Worker: 40 offline tests passed and Ruff passed; the one real-GPU test remains
+  explicitly opt-in.
+- Worker source commit `dbb6b712317b824b113132f1128ee91b11a46c27` was rebuilt
+  by workflow `30732102432` and published as
+  `ghcr.io/pala-lakshmansai/imageforge-worker@sha256:f862e1ea8ece9f35101e7c47be55a5042c17e0eb3cf8414dd709ed73a59e33ed`.
+- The RunPod template must be repinned to that digest before the next paid
+  smoke; the earlier template digest was from a pre-aspect/reference worker.
