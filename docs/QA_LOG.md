@@ -380,3 +380,7 @@ the recovery poll observes it.
   `0592889a20404a03734f73232f8f1f108c037b964335f61b8a0324c8c12b9626`.
   The release assets were downloaded back from GitHub and matched these
   hashes byte-for-byte.
+- The explicitly marked deterministic endurance gate
+  `worker/tests/test_endurance.py` passed separately in 8.56s: 450 ordered
+  prompts, pause, second-client `batch_busy`, process restart, resume, and
+  final artifact checksum/order validation.
