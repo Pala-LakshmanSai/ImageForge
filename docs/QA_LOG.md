@@ -392,3 +392,22 @@ the recovery poll observes it.
   pass was reset by Vite full-page reloads caused by concurrent TypeScript
   build output under `packages/runpod-client/dist`, not by the application;
   the clean rerun had no reloads.
+
+## Recovery fix rebuild — commit `b5df0bb`
+
+- Added typed `authentication_required` propagation and a screenshot-safe
+  worker-credential replacement flow. Replacement is available while an idle
+  GPU is attached and disabled during an active batch. Focused recovery tests,
+  the full frontend suite (90 tests), typecheck, and production build passed.
+- Current Apple-silicon DMG: `/Volumes/ImageForgeBuild/final-cargo-target/aarch64-apple-darwin/release/bundle/dmg/ImageForge_0.1.0_aarch64.dmg`, SHA-256
+  `d0fb57a70ff66fd5e7c4a3b2fd4948227f00fa1b172ac36bea9a58fcc00baf58`.
+  Generated and mounted app deep/strict codesign verification passed;
+  `hdiutil verify` passed; the app launched successfully. It is ad-hoc signed
+  and not notarized.
+- Native Windows run `30746218655` passed for `b5df0bb`: frontend tests,
+  typecheck, Windows NSIS packaging, WebView2 detection, install, real-window
+  launch, cleanup, and artifact upload. Current Windows installer SHA-256:
+  `3282b966e7f2fe9944a0415a8254cdeb88c0894e7b8702dc3d02398a1a6af28f`.
+- The existing GitHub prerelease remains tied to `c5964ac` and its previously
+  published hashes; the newer `b5df0bb` artifacts have not been silently
+  substituted.
