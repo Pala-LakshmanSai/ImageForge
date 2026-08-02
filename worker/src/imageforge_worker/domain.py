@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from .constants import (
     API_SCHEMA_VERSION,
+    ASPECT_RATIO_DIMENSIONS,
     GUIDANCE_SCALE,
     INFERENCE_STEPS,
     JPEG_QUALITY,
@@ -24,7 +25,6 @@ from .constants import (
     OUTPUT_WIDTH,
     PREVIEW_HEIGHT,
     PREVIEW_WIDTH,
-    ASPECT_RATIO_DIMENSIONS,
 )
 
 
@@ -172,7 +172,12 @@ class GenerationSettings(StrictModel):
         preview_scale = min(320 / width, 180 / height)
         preview_width = max(64, min(PREVIEW_WIDTH, int(round(width * preview_scale))))
         preview_height = max(64, min(PREVIEW_HEIGHT, int(round(height * preview_scale))))
-        return cls(width=width, height=height, preview_width=preview_width, preview_height=preview_height)
+        return cls(
+            width=width,
+            height=height,
+            preview_width=preview_width,
+            preview_height=preview_height,
+        )
 
 
 class BatchOwner(StrictModel):
