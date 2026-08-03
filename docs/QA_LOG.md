@@ -479,3 +479,81 @@ the recovery poll observes it.
   SHA-256 `07cea6fec3320b17e26d6cd3c191d0ac7f7045ffab89c15437d7a32201422113`.
   `codesign --verify --deep --strict` and `hdiutil verify` passed. This beta is
   ad-hoc signed and not notarized; no production signing claim is made.
+
+## v0.1.9 authoritative studio synchronization candidate — 2026-08-03
+
+- Task contract: `tasks/012-authoritative-studio-sync-and-coordinated-stop.md`.
+  Desktop candidate commit `67b80b7fdd085afa764a16250b2913d86e4f7767`
+  is pushed on `codex/final-platform-audit`. It fixes status-first local receipt
+  recovery, bounded authoritative cross-client observation, exact shared batch
+  ownership/progress, fail-closed peer-coordinated Stop GPU, remote-stop
+  interruption truth, exact-Pod deletion guards, and the accessible requester /
+  approver UI. The release is versioned consistently as `0.1.9`.
+- Local and independent gates passed: frontend Vitest 193/193, RunPod client
+  106/106, worker Python 67 passed with one explicitly paid `real_gpu` test
+  deselected, worker Ruff and compile checks, TypeScript, production Vite build,
+  Rust formatting, release Clippy with warnings denied, and Rust 72/72. The
+  supported local Rust path sourced `scripts/use-usb-toolchain.sh`, which keeps
+  Cargo output on the APFS removable-disk cache and disables AppleDouble copies;
+  a raw Cargo target on the FAT project volume is unsupported because generated
+  `._*` metadata can be parsed as dependency input.
+- Native workflow
+  `https://github.com/Pala-LakshmanSai/ImageForge/actions/runs/30815852852`
+  passed at the exact candidate commit on both `macos-14` Apple silicon and
+  `windows-latest` x64. Both jobs built the production application, installed
+  and launched it, observed distinct native client PIDs/windows with isolated
+  webview stores, ran the one-client UI smoke plus the installed two-client
+  production-runtime smoke, cleaned up, wrote metadata, and uploaded artifacts.
+- The re-downloaded macOS Actions artifact verified byte-for-byte:
+  `ImageForge_0.1.9_aarch64.dmg`
+  (`72cbd60877db833e43d62c37cab48857ce87f4ec0616fab14cc06a0855c80c60`),
+  coordination audit
+  (`2468644e17fab0205b54057d95e41ae2f488d00b2c849121359a67ac7452b6b6`),
+  client A result
+  (`d27908b18b83c81d1220cb154dd14a2d75d55ce774f8fa44a8d014b4e6ab0200`),
+  client B result
+  (`dd4e57bc5460a10c5999084ccafb28b5b3d2083171d44cd33316181b0cda7f54`),
+  and metadata file
+  (`55b2527d5e8deef817eb55441a6fa8cb7858a1917c8e4f62d586f6fb464ed570`).
+  `hdiutil verify` also passed. The beta is ad-hoc signed and not notarized.
+- The re-downloaded Windows Actions artifact verified byte-for-byte:
+  `ImageForge_0.1.9_x64-setup.exe`
+  (`0ca7822db565595c711e3726ca78397bbef5da8bfbf21d157b05527d862109c5`),
+  coordination audit
+  (`aadf78ea0c8a1df5d56b2460ae9404f855fe82ddce250ad39a2752429fa4af82`),
+  client A result
+  (`08831d37195f816abf3c0bd50ea37b9f26c83e6693d3590cabd81816f71f051c`),
+  client B result
+  (`081845f6e93a8a108767af9f75366076ab61e06fe4f8cdd31bfa29fa616ddc4f`),
+  and metadata file
+  (`ac68376660038f20d06d4b1d4ba43a74a1d78c5761190e7c4ad81c01f41b6103`).
+  The installer is an unsigned NSIS beta.
+- Each OS audit passed 25 checkpoints and 16/16 assertions: both clients
+  converged through loading, warming, and Ready; observed the same 450-image
+  batch and exact `137 / 450` progress; streamed 137 owner artifacts; released
+  busy truth; vetoed Stop during active work; covered peer approve, deny,
+  timeout, and generation-versus-pending-stop; stopped replacement Pods in both
+  directions; issued exactly two expected fixture deletes; and recorded zero
+  unexpected creates/deletes. The fixture was loopback-only, required random
+  authorization, and retained no request bodies.
+- A credential-safe, GET-only RunPod audit at `2026-08-03T13:00:10.700Z`
+  returned zero active Pods. One historical Pod was present only in `EXITED`
+  state; no RunPod mutation or paid GPU test was performed.
+- Independent final desktop review reported no must-fix finding. The only CI
+  maintenance note is the non-blocking GitHub Actions Node 20 deprecation
+  annotation for pinned v4 actions.
+
+### Publication gate still open
+
+- This candidate is **not** a published v0.1.9 beta yet. GitHub Releases still
+  ends at v0.1.8; therefore no public-release asset re-download claim, v0.1.9
+  tag, or final release URL is recorded here.
+- The matching worker source is pushed and independently green at dedicated
+  repository commit `f4970f24248e8348dc0ea0cdacd677435d8751f0`, but publisher
+  runs `30808822551` and `30809119392` were rejected before their jobs started
+  because the private repository's GitHub Actions billing/spending limit is
+  unavailable. The latest published worker digest is for older source and is
+  intentionally not reused. Until the repository owner either restores private
+  Actions billing or explicitly authorizes a reviewed visibility/publisher
+  authority change, there is no supportable Task 012 immutable worker digest to
+  pin in the desktop, RunPod template, runbook, tag, or release.
