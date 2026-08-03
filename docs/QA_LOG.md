@@ -548,11 +548,12 @@ the recovery poll observes it.
 - This candidate is **not** a published v0.1.9 beta yet. GitHub Releases still
   ends at v0.1.8; therefore no public-release asset re-download claim, v0.1.9
   tag, or final release URL is recorded here.
-- The matching worker source is pushed and independently green at dedicated
-  repository commit `f4970f24248e8348dc0ea0cdacd677435d8751f0`, but publisher
-  runs `30808822551` and `30809119392` were rejected before their jobs started
-  because the private repository's GitHub Actions billing/spending limit is
-  unavailable. The latest published worker digest is for older source and is
+- The matching worker source is pushed at dedicated repository commit
+  `f4970f24248e8348dc0ea0cdacd677435d8751f0`; its separately recorded local
+  worker tests pass, but there is no green publisher evidence for that commit.
+  Publisher runs `30808822551` and `30809119392` were rejected before their jobs
+  started because the private repository's GitHub Actions billing/spending limit
+  is unavailable. The latest published worker digest is for older source and is
   intentionally not reused. Until the repository owner either restores private
   Actions billing or explicitly authorizes a reviewed visibility/publisher
   authority change, there is no supportable Task 012 immutable worker digest to
