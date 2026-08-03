@@ -6,19 +6,22 @@ import { projectBusyBatch, projectOwnedManifest, projectPodSnapshot } from './ru
 
 const batchId = '11111111-1111-4111-8111-111111111111';
 
-function workerManifest(imageStatus: 'ready' | 'downloaded' = 'downloaded') {
+function workerManifest(
+  imageStatus: 'ready' | 'downloaded' = 'downloaded',
+  state: 'completed' | 'cancelled' = 'completed',
+) {
   const acknowledged = imageStatus === 'downloaded';
   return parseWorkerManifest({
     schema_version: 1,
     batch_id: batchId,
     owner: { user_id: 'lakshman', display_name: 'Lakshman' },
-    state: 'completed',
+    state,
     created_at: '2026-08-01T10:00:00.000Z',
     updated_at: '2026-08-01T10:01:00.000Z',
     completed_at: '2026-08-01T10:01:00.000Z',
     interrupted_at: null,
     pause_requested: false,
-    cancel_requested: false,
+    cancel_requested: state === 'cancelled',
     settings: { width: 720, height: 1280 },
     images: [{
       index: 1,
@@ -195,6 +198,36 @@ describe('production runtime projection', () => {
     }], context);
     expect(settled.batch.phase).toBe('partial_failure');
     expect(settled.batch.prompts.map((prompt) => prompt.status)).toEqual(['downloaded', 'failed']);
+    expect(settled.assets).toHaveLength(1);
+  });
+
+  it('keeps a cancelled batch in saving state until ready artifacts are locally verified and acknowledged', () => {
+    const context = {
+      name: 'Cancelled brief', destination: '/safe/folder', estimatedSecondsPerImage: 8.4, hourlyRate: 0.5,
+    };
+    const receipt = {
+      schemaVersion: 1 as const,
+      batchId,
+      index: 1,
+      filename: `batches/${batchId}/000001.jpg`,
+      sha256: 'a'.repeat(64),
+      sizeBytes: 2_048,
+      verifiedAtUnixMs: 1,
+    };
+
+    const saving = projectOwnedManifest(workerManifest('ready', 'cancelled'), [], context);
+    expect(saving.batch.phase).toBe('running');
+    expect(saving.batch.statusMessage).toBe('Saving completed images · 0 of 1 verified locally');
+
+    const awaitingAcknowledgement = projectOwnedManifest(
+      workerManifest('ready', 'cancelled'),
+      [receipt],
+      context,
+    );
+    expect(awaitingAcknowledgement.batch.phase).toBe('running');
+
+    const settled = projectOwnedManifest(workerManifest('downloaded', 'cancelled'), [receipt], context);
+    expect(settled.batch.phase).toBe('cancelled');
     expect(settled.assets).toHaveLength(1);
   });
 

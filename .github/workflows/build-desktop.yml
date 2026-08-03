@@ -184,6 +184,8 @@ jobs:
           }
           $package = Get-Content -Raw -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'package.json') | ConvertFrom-Json
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer[0].FullName).Hash.ToLowerInvariant()
+          $smokeResult = Join-Path $env:RUNNER_TEMP 'imageforge-native-smoke-result.txt'
+          $smokeDetail = (Get-Content -LiteralPath $smokeResult | Select-Object -Skip 1) -join ' '
           [ordered]@{
             product = 'ImageForge'
             version = [string]$package.version
@@ -196,6 +198,7 @@ jobs:
             signing = 'unsigned beta installer'
             notarization = 'not applicable'
             native_smoke = 'install, WebView2, native launch/window, fake-adapter onboarding/reference/batch/Library UI, native Rust filesystem/download tests, cleanup'
+            native_smoke_detail = $smokeDetail
           } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 -LiteralPath (Join-Path $bundleDir 'ImageForge-windows-release-metadata.json')
 
       - name: Upload Windows installer
@@ -300,6 +303,8 @@ jobs:
           dmg_path="$(find "$bundle_dir/dmg" -maxdepth 1 -type f -name 'ImageForge_*_aarch64.dmg' -print | head -n 1)"
           version="$(node -p "require('./package.json').version")"
           hash="$(shasum -a 256 "$dmg_path" | awk '{print $1}')"
+          smoke_detail="$(tail -n +2 "$RUNNER_TEMP/imageforge-native-smoke-result.txt" | tr '\n' ' ')"
+          smoke_detail_json="$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$smoke_detail")"
           cat > "$bundle_dir/dmg/ImageForge-macos-release-metadata.json" <<EOF
           {
             "product": "ImageForge",
@@ -312,7 +317,8 @@ jobs:
             "sha256": "$hash",
             "signing": "ad-hoc signed beta",
             "notarization": "not notarized",
-            "native_smoke": "codesign, DMG verification, native launch/window, fake-adapter onboarding/reference/batch/Library UI, native Rust filesystem/download tests"
+            "native_smoke": "codesign, DMG verification, native launch/window, fake-adapter onboarding/reference/batch/Library UI, native Rust filesystem/download tests",
+            "native_smoke_detail": $smoke_detail_json
           }
           EOF
 

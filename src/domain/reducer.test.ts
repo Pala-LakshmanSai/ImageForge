@@ -8,7 +8,7 @@ import {
   createInitialState,
   defaultDestinationForPlatform,
 } from './reducer';
-import type { AppState } from './types';
+import type { AppState, BatchState, LibraryAsset } from './types';
 
 function readyDraft(promptCount: number): AppState {
   let state = createConfiguredInitialState();
@@ -331,6 +331,52 @@ describe('appReducer', () => {
 
     expect(state.batch).toBeNull();
     expect(state.library).toEqual([recovered]);
+  });
+
+  it('merges 450 successive durable receipt projections without duplicates or order drift', () => {
+    const batch: BatchState = {
+      id: 'large-batch',
+      name: 'Large batch',
+      owner: 'Lakshman',
+      canManage: true,
+      phase: 'running',
+      prompts: [],
+      destination: '/safe',
+      startedAt: '2026-08-03T06:00:00.000Z',
+      elapsedSeconds: 0,
+      estimatedSecondsPerImage: 8.4,
+      estimatedCost: 0,
+      lockMessage: null,
+      statusMessage: 'Saving images',
+      aspectRatio: '16:9',
+    };
+    const assets: LibraryAsset[] = Array.from({ length: 450 }, (_, offset) => ({
+      id: `large-batch-${offset + 1}`,
+      batchId: batch.id,
+      batchName: batch.name,
+      index: offset + 1,
+      prompt: `Prompt ${offset + 1}`,
+      seed: 700 + offset,
+      filename: `batches/Large batch/${String(offset + 1).padStart(6, '0')}.jpg`,
+      checksum: (offset + 1).toString(16).padStart(64, '0'),
+      createdAt: batch.startedAt,
+      durationSeconds: 8,
+      destination: batch.destination,
+      palette: offset % 6,
+    }));
+    let state = createConfiguredInitialState();
+    for (let count = 1; count <= assets.length; count += 1) {
+      state = appReducer(state, {
+        type: 'SYNC_RUNTIME_BATCH',
+        batch,
+        assets: assets.slice(0, count),
+      });
+    }
+
+    expect(state.library).toHaveLength(450);
+    expect(state.library.map((asset) => asset.index)).toEqual(
+      Array.from({ length: 450 }, (_, index) => index + 1),
+    );
   });
 
   it('keeps durable work recoverable across transient worker errors and explicit Pod termination', () => {

@@ -211,10 +211,12 @@ class ProductionRuntime implements ProductionRuntimeFacade {
       await this.#port.clearWorkerSession();
     }
     if (snapshot.phase === 'ready') {
-      if (!await this.#ensureRecoveredReceipts(state)) return;
       // A worker outage must not obscure the still-live billed Pod. The worker
       // coordinator emits a retryable batch event and the UI keeps Stop visible.
-      await this.#worker.poll();
+      // Reuse the routine poll path so a Pod that disappears after RunPod's
+      // first Ready response is immediately reconciled instead of surfacing as
+      // a misleading worker/schema failure during Generate preflight.
+      await this.pollBatch(state);
     }
   }
 

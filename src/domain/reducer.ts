@@ -178,8 +178,11 @@ function assetFromPrompt(batch: BatchState, prompt: BatchPrompt): LibraryAsset {
   };
 }
 
-function upsertLibraryAsset(library: LibraryAsset[], asset: LibraryAsset): LibraryAsset[] {
-  return [...library.filter((item) => item.id !== asset.id), asset].sort((left, right) => {
+function mergeLibraryAssets(library: LibraryAsset[], assets: readonly LibraryAsset[]): LibraryAsset[] {
+  if (assets.length === 0) return library;
+  const byId = new Map(library.map((asset) => [asset.id, asset] as const));
+  for (const asset of assets) byId.set(asset.id, asset);
+  return [...byId.values()].sort((left, right) => {
     if (left.batchId === right.batchId) return left.index - right.index;
     return right.createdAt.localeCompare(left.createdAt);
   });
@@ -442,7 +445,7 @@ function reduceBatchTick(state: AppState): AppState {
     return {
       ...state,
       batch: nextBatch,
-      library: newAsset ? upsertLibraryAsset(state.library, newAsset) : state.library,
+      library: newAsset ? mergeLibraryAssets(state.library, [newAsset]) : state.library,
       usage: [nextUsage, ...state.usage.filter((run) => run.id !== nextUsage.id)],
       ...toast(
         state,
@@ -456,7 +459,7 @@ function reduceBatchTick(state: AppState): AppState {
   return {
     ...state,
     batch: nextBatch,
-    library: newAsset ? upsertLibraryAsset(state.library, newAsset) : state.library,
+    library: newAsset ? mergeLibraryAssets(state.library, [newAsset]) : state.library,
   };
 }
 
@@ -786,7 +789,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case 'BATCH_TICK':
       return reduceBatchTick(state);
     case 'SYNC_RUNTIME_BATCH': {
-      const library = action.assets.reduce(upsertLibraryAsset, state.library);
+      const library = mergeLibraryAssets(state.library, action.assets);
       const terminal = ['complete', 'partial_failure', 'cancelled'].includes(action.batch.phase);
       const usageId = `usage-${action.batch.id}`;
       const usage = terminal && !state.usage.some((item) => item.id === usageId)
@@ -806,7 +809,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case 'SYNC_RUNTIME_LIBRARY':
       return {
         ...state,
-        library: action.assets.reduce(upsertLibraryAsset, state.library),
+        library: mergeLibraryAssets(state.library, action.assets),
       };
     case 'SYNC_RUNTIME_BUSY':
       return {

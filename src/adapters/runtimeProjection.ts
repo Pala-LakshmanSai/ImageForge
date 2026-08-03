@@ -105,7 +105,7 @@ function imageStatus(image: WorkerImageRecord, local: LocalDownloadReceipt | und
 }
 
 function batchPhase(state: WorkerBatchState, failed: number, savingSuccessfulArtifacts: boolean): BatchPhase {
-  if (savingSuccessfulArtifacts && ['completed', 'failed'].includes(state)) return 'running';
+  if (savingSuccessfulArtifacts && ['completed', 'failed', 'cancelled'].includes(state)) return 'running';
   switch (state) {
     case 'running': return 'running';
     case 'paused': return 'paused';
@@ -163,7 +163,7 @@ export function projectOwnedManifest(
     };
   });
   const locallyVerified = prompts.filter((prompt) => prompt.status === 'downloaded').length;
-  const savingSuccessfulArtifacts = ['completed', 'failed'].includes(manifest.state) && manifest.images.some((image) => {
+  const savingSuccessfulArtifacts = ['completed', 'failed', 'cancelled'].includes(manifest.state) && manifest.images.some((image) => {
     if (!['ready', 'downloaded'].includes(image.status)) return false;
     const local = receiptByIndex.get(image.index);
     // The native receipt is durable before its worker acknowledgement. Keep a

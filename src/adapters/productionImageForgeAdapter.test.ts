@@ -195,6 +195,32 @@ describe('production ImageForge adapter', () => {
     }
   });
 
+  it('reconciles a remote Stop that lands after strict refresh reports Ready but before its worker poll', async () => {
+    const native = port({
+      status: vi.fn(async () => ({
+        status: 409,
+        body: { error: { code: 'worker_api_incompatible', message: 'Worker API version is incompatible.', details: null } },
+      })),
+    });
+    const adapter = createProductionImageForgeAdapter(native);
+    const events: ProductionRuntimeEvent[] = [];
+    adapter.runtime!.subscribe((event) => events.push(event));
+    const refresh = vi.spyOn(GpuLifecycleCoordinator.prototype, 'refresh')
+      .mockResolvedValue({ phase: 'ready' } as unknown as RunPodSnapshot);
+    const observe = vi.spyOn(GpuLifecycleCoordinator.prototype, 'observe')
+      .mockResolvedValue({ phase: 'offline' } as unknown as RunPodSnapshot);
+    try {
+      await expect(adapter.runtime!.refresh(createConfiguredInitialState())).resolves.toBeUndefined();
+      expect(refresh).toHaveBeenCalledOnce();
+      expect(observe).toHaveBeenCalledOnce();
+      expect(native.clearWorkerSession).toHaveBeenCalledOnce();
+      expect(events.filter((event) => event.type === 'error')).toEqual([]);
+    } finally {
+      refresh.mockRestore();
+      observe.mockRestore();
+    }
+  });
+
   it('restores a recovered batch name from its durable named-folder receipt', async () => {
     const namedReceipt = {
       schemaVersion: 1 as const,
