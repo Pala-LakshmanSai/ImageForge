@@ -97,7 +97,6 @@ afterEach(() => {
 
 describe('ImageForge shell', () => {
   it('refreshes production read-only on launch and starts compute only after a foreground click', async () => {
-    const user = userEvent.setup();
     const production = productionAdapter();
     render(<App initialState={createConfiguredInitialState()} adapter={production.adapter} />);
 
@@ -106,7 +105,7 @@ describe('ImageForge shell', () => {
     expect(production.runtime.startGpu).not.toHaveBeenCalled();
     expect(production.adapter.runPodLifecycle).not.toHaveBeenCalled();
 
-    await user.click(screen.getAllByRole('button', { name: 'Start GPU' })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Start GPU' })[0]);
     await waitFor(() => expect(production.runtime.startGpu).toHaveBeenCalledOnce());
     expect(production.adapter.runPodLifecycle).not.toHaveBeenCalled();
   });
