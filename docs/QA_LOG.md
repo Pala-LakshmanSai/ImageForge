@@ -551,10 +551,12 @@ the recovery poll observes it.
 - The matching worker source is pushed at dedicated repository commit
   `f4970f24248e8348dc0ea0cdacd677435d8751f0`; its separately recorded local
   worker tests pass, but there is no green publisher evidence for that commit.
-  Publisher runs `30808822551` and `30809119392` were rejected before their jobs
-  started because the private repository's GitHub Actions billing/spending limit
-  is unavailable. The latest published worker digest is for older source and is
-  intentionally not reused. Until the repository owner either restores private
-  Actions billing or explicitly authorizes a reviewed visibility/publisher
-  authority change, there is no supportable Task 012 immutable worker digest to
-  pin in the desktop, RunPod template, runbook, tag, or release.
+  Publisher runs `30808822551`, `30809119392`, and the fresh exact-source
+  dispatch `30817590886` were rejected before their jobs started because recent
+  account payments failed or the private repository's GitHub Actions spending
+  limit must be increased. The latest published worker digest is for older
+  source and is intentionally not reused. Until the repository owner either
+  restores private Actions billing or explicitly authorizes a reviewed
+  visibility/publisher authority change, there is no supportable Task 012
+  immutable worker digest to pin in the desktop, RunPod template, runbook, tag,
+  or release.
