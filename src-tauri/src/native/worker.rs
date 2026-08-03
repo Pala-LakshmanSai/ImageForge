@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 const MAX_JSON_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PREVIEW_BYTES: usize = 4 * 1024 * 1024;
+const _: () = assert!(MAX_PREVIEW_BYTES < MAX_JSON_RESPONSE_BYTES);
 const MAX_BATCH_REFERENCES: usize = 8;
 const MAX_REFERENCE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REFERENCE_TOTAL_BYTES: usize = 32 * 1024 * 1024;
@@ -2266,7 +2267,6 @@ mod tests {
         assert!(is_webp(b"RIFF0000WEBP"));
         assert!(!is_webp(b"RIFF0000JPEG"));
         assert!(!is_webp(b"WEBP"));
-        assert!(MAX_PREVIEW_BYTES < MAX_JSON_RESPONSE_BYTES);
     }
 
     #[test]
