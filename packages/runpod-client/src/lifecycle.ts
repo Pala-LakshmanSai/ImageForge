@@ -75,6 +75,8 @@ const REUSABLE_POD_STATUSES = new Set<ManagedPod["status"]>([
   "running",
 ]);
 
+// Refresh performs two deliberately ordered remote reads. This multiplier is
+// an explicit composite budget, not a relaxation of the per-operation bound.
 const READ_ONLY_REFRESH_TIMEOUT_MULTIPLIER = 2;
 
 function defaultSleep(milliseconds: number, signal?: AbortSignal): Promise<void> {

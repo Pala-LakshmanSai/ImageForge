@@ -19,6 +19,13 @@ const INVENTORY_HOST: &str = "api.runpod.io";
 const DELETE_GRANT_TTL: Duration = Duration::from_secs(30);
 const CREATE_GRANT_TTL: Duration = Duration::from_secs(30);
 const EMERGENCY_GPU_ID: &str = "NVIDIA RTX 2000 Ada Generation";
+// These values are the native trust boundary for production provisioning.
+// The renderer may import a profile, but it must not be able to redirect a
+// paid Pod to another template, volume, or worker image.
+const IMAGEFORGE_TEMPLATE_ID: &str = "q8sfgixfy2";
+const IMAGEFORGE_NETWORK_VOLUME_ID: &str = "ukh207b26r";
+const IMAGEFORGE_WORKER_IMAGE: &str =
+    "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:f862e1ea8ece9f35101e7c47be55a5042c17e0eb3cf8414dd709ed73a59e33ed";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RunPodProfileBinding {
@@ -209,6 +216,7 @@ impl RunPodTransport {
                 "The RunPod template or network-volume identifier is invalid.",
             ));
         }
+        validate_approved_profile_ids(template_id, network_volume_id)?;
         if !self
             .create_marker
             .binding_matches(template_id, network_volume_id)?
@@ -1084,6 +1092,7 @@ fn validate_bound_create_profile(
     body: Option<&Value>,
     profile: &RunPodProfileBinding,
 ) -> NativeResult<()> {
+    validate_approved_profile_ids(&profile.template_id, &profile.network_volume_id)?;
     let object = body.and_then(Value::as_object).ok_or_else(rejected)?;
     if object.get("templateId").and_then(Value::as_str) != Some(profile.template_id.as_str())
         || object.get("networkVolumeId").and_then(Value::as_str)
@@ -1097,7 +1106,18 @@ fn validate_bound_create_profile(
     Ok(())
 }
 
+fn validate_approved_profile_ids(template_id: &str, network_volume_id: &str) -> NativeResult<()> {
+    if template_id != IMAGEFORGE_TEMPLATE_ID || network_volume_id != IMAGEFORGE_NETWORK_VOLUME_ID {
+        return Err(NativeError::new(
+            "runpod_profile_unapproved",
+            "The RunPod profile does not match the approved ImageForge deployment.",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_bound_list_profile(url: &Url, profile: &RunPodProfileBinding) -> NativeResult<()> {
+    validate_approved_profile_ids(&profile.template_id, &profile.network_volume_id)?;
     let query = query_map(url)?;
     if query.get("templateId") != Some(&profile.template_id)
         || query.get("networkVolumeId") != Some(&profile.network_volume_id)
@@ -1116,6 +1136,7 @@ fn validate_managed_pod_value(
     profile: &RunPodProfileBinding,
     dynamic_gpus: &HashMap<String, String>,
 ) -> NativeResult<()> {
+    validate_approved_profile_ids(&profile.template_id, &profile.network_volume_id)?;
     let object = pod.as_object().ok_or_else(rejected)?;
     let network_volume = object
         .get("networkVolume")
@@ -1186,6 +1207,7 @@ const POD_PROJECTION_KEYS: &[&str] = &[
     "lastStartedAt",
 ];
 
+#[cfg(test)]
 fn project_pod(raw: &Value) -> NativeResult<Value> {
     project_pod_with_dynamic(raw, &HashMap::new())
 }
@@ -1409,13 +1431,10 @@ fn validate_list_pods(method: &Method, url: &Url, body: Option<&Value>) -> Nativ
             return Err(rejected());
         }
     }
-    for key in ["templateId", "networkVolumeId"] {
-        if !pairs
-            .get(key)
-            .is_some_and(|value| safe_identifier(value, false))
-        {
-            return Err(rejected());
-        }
+    if pairs.get("templateId").map(String::as_str) != Some(IMAGEFORGE_TEMPLATE_ID)
+        || pairs.get("networkVolumeId").map(String::as_str) != Some(IMAGEFORGE_NETWORK_VOLUME_ID)
+    {
+        return Err(rejected());
     }
     if pairs.len() != 6 {
         return Err(rejected());
@@ -1480,11 +1499,21 @@ fn validate_create_pod(method: &Method, url: &Url, body: Option<&Value>) -> Nati
             return Err(rejected());
         }
     }
+    let template_id = object
+        .get("templateId")
+        .and_then(Value::as_str)
+        .ok_or_else(rejected)?;
+    let network_volume_id = object
+        .get("networkVolumeId")
+        .and_then(Value::as_str)
+        .ok_or_else(rejected)?;
+    validate_approved_profile_ids(template_id, network_volume_id)?;
+
     let image_name = object
         .get("imageName")
         .and_then(Value::as_str)
         .ok_or_else(rejected)?;
-    if !safe_image_reference(image_name) {
+    if image_name != IMAGEFORGE_WORKER_IMAGE || !safe_image_reference(image_name) {
         return Err(rejected());
     }
     for key in ["minDiskBandwidthMBps", "minDownloadMbps", "minUploadMbps"] {
@@ -1754,9 +1783,9 @@ mod tests {
     fn create_body(gpus: &[&str]) -> Value {
         serde_json::json!({
             "name": "imageforge-request-123",
-            "templateId": "imageforge-worker-v1",
-            "imageName": "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:f862e1ea8ece9f35101e7c47be55a5042c17e0eb3cf8414dd709ed73a59e33ed",
-            "networkVolumeId": "if-models-production",
+            "templateId": IMAGEFORGE_TEMPLATE_ID,
+            "imageName": IMAGEFORGE_WORKER_IMAGE,
+            "networkVolumeId": IMAGEFORGE_NETWORK_VOLUME_ID,
             "volumeMountPath": "/workspace",
             "ports": ["8000/http"],
             "computeType": "GPU",
@@ -1783,7 +1812,7 @@ mod tests {
         let list = request(
             RunPodOperation::ListPods,
             "GET",
-            "https://rest.runpod.io/v1/pods?computeType=GPU&includeMachine=true&includeNetworkVolume=true&dataCenterId=EU-RO-1&templateId=imageforge-worker-v1&networkVolumeId=if-models-production",
+            &format!("https://rest.runpod.io/v1/pods?computeType=GPU&includeMachine=true&includeNetworkVolume=true&dataCenterId=EU-RO-1&templateId={IMAGEFORGE_TEMPLATE_ID}&networkVolumeId={IMAGEFORGE_NETWORK_VOLUME_ID}"),
             None,
         );
         assert!(ValidatedRequest::try_from(list).is_ok());
@@ -1797,6 +1826,62 @@ mod tests {
             ])),
         );
         assert!(ValidatedRequest::try_from(create).is_ok());
+    }
+
+    #[test]
+    fn native_boundary_rejects_forged_profile_and_worker_image() {
+        let temporary = tempfile::tempdir().unwrap();
+        let transport = RunPodTransport::new_for_test(
+            Arc::new(MemoryVault::default()),
+            temporary.path().join("marker"),
+        )
+        .unwrap();
+        for (template_id, volume_id) in [
+            ("attacker-template", IMAGEFORGE_NETWORK_VOLUME_ID),
+            (IMAGEFORGE_TEMPLATE_ID, "attacker-volume"),
+        ] {
+            assert_eq!(
+                transport
+                    .bind_profile(template_id, volume_id)
+                    .unwrap_err()
+                    .code,
+                "runpod_profile_unapproved"
+            );
+        }
+        transport
+            .bind_profile(IMAGEFORGE_TEMPLATE_ID, IMAGEFORGE_NETWORK_VOLUME_ID)
+            .unwrap();
+
+        let mut forged_profile = create_body(&["NVIDIA GeForce RTX 4090"]);
+        forged_profile["templateId"] = Value::String("attacker-template".to_owned());
+        assert_eq!(
+            ValidatedRequest::try_from(request(
+                RunPodOperation::CreatePod,
+                "POST",
+                "https://rest.runpod.io/v1/pods",
+                Some(forged_profile),
+            ))
+            .unwrap_err()
+            .code,
+            "runpod_profile_unapproved"
+        );
+
+        let mut forged_image = create_body(&["NVIDIA GeForce RTX 4090"]);
+        forged_image["imageName"] = Value::String(
+            "ghcr.io/attacker/imageforge-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_owned(),
+        );
+        assert_eq!(
+            ValidatedRequest::try_from(request(
+                RunPodOperation::CreatePod,
+                "POST",
+                "https://rest.runpod.io/v1/pods",
+                Some(forged_image),
+            ))
+            .unwrap_err()
+            .code,
+            "runpod_request_rejected"
+        );
     }
 
     #[test]
@@ -1863,7 +1948,7 @@ mod tests {
         serde_json::json!({
             "id": "abc123xy",
             "name": "imageforge-request-123",
-            "templateId": "imageforge-worker-v1",
+            "templateId": IMAGEFORGE_TEMPLATE_ID,
             "volumeMountPath": "/workspace",
             "interruptible": false,
             "networkVolume": {"id": volume_id, "dataCenterId": "EU-RO-1"},
@@ -1877,12 +1962,12 @@ mod tests {
     #[test]
     fn exact_managed_identity_is_required_before_delete() {
         let profile = RunPodProfileBinding {
-            template_id: "imageforge-worker-v1".into(),
-            network_volume_id: "if-models-production".into(),
+            template_id: IMAGEFORGE_TEMPLATE_ID.into(),
+            network_volume_id: IMAGEFORGE_NETWORK_VOLUME_ID.into(),
         };
         validate_managed_pod_value(
             &serde_json::from_str(&managed_pod_json(
-                "if-models-production",
+                IMAGEFORGE_NETWORK_VOLUME_ID,
                 "NVIDIA GeForce RTX 4090",
             ))
             .unwrap(),
@@ -1907,8 +1992,11 @@ mod tests {
         );
         assert_eq!(
             validate_managed_pod_value(
-                &serde_json::from_str(&managed_pod_json("if-models-production", "NVIDIA B200",))
-                    .unwrap(),
+                &serde_json::from_str(&managed_pod_json(
+                    IMAGEFORGE_NETWORK_VOLUME_ID,
+                    "NVIDIA B200",
+                ))
+                .unwrap(),
                 "abc123xy",
                 &profile,
                 &HashMap::new(),
@@ -1925,7 +2013,7 @@ mod tests {
         )
         .unwrap();
         transport
-            .bind_profile("imageforge-worker-v1", "if-models-production")
+            .bind_profile(IMAGEFORGE_TEMPLATE_ID, IMAGEFORGE_NETWORK_VOLUME_ID)
             .unwrap();
         assert_eq!(
             transport.consume_delete_grant("abc123xy").unwrap_err().code,
@@ -2056,9 +2144,9 @@ mod tests {
             .is_err());
 
         let raw = serde_json::json!({
-            "id": "abc123xy", "name": "imageforge-request-123", "templateId": "imageforge-worker-v1",
+            "id": "abc123xy", "name": "imageforge-request-123", "templateId": IMAGEFORGE_TEMPLATE_ID,
             "volumeMountPath": "/workspace", "interruptible": false,
-            "networkVolume": {"id": "if-models-production", "dataCenterId": "EU-RO-1", "secret": "hidden"},
+            "networkVolume": {"id": IMAGEFORGE_NETWORK_VOLUME_ID, "dataCenterId": "EU-RO-1", "secret": "hidden"},
             "machine": {"secureCloud": true, "dataCenterId": "EU-RO-1", "internalIp": "hidden"},
             "gpu": {"id": "dynamic-4500-id", "displayName": "RTX PRO 4500 Blackwell", "count": 1, "serial": "hidden"},
             "ports": ["8000/http"], "env": {"WORKER_TOKEN": "must-not-cross"}
@@ -2068,8 +2156,8 @@ mod tests {
         assert!(projected["gpu"].get("serial").is_none());
         assert!(projected["machine"].get("internalIp").is_none());
         let profile = RunPodProfileBinding {
-            template_id: "imageforge-worker-v1".into(),
-            network_volume_id: "if-models-production".into(),
+            template_id: IMAGEFORGE_TEMPLATE_ID.into(),
+            network_volume_id: IMAGEFORGE_NETWORK_VOLUME_ID.into(),
         };
         validate_managed_pod_value(
             &projected,
@@ -2108,13 +2196,13 @@ mod tests {
         let body = create_body(&["NVIDIA GeForce RTX 4090"]);
         transport.create_marker.begin(&body).unwrap();
         let raw: Value = serde_json::from_str(&managed_pod_json(
-            "if-models-production",
+            IMAGEFORGE_NETWORK_VOLUME_ID,
             "NVIDIA GeForce RTX 4090",
         ))
         .unwrap();
         let profile = RunPodProfileBinding {
-            template_id: "imageforge-worker-v1".into(),
-            network_volume_id: "if-models-production".into(),
+            template_id: IMAGEFORGE_TEMPLATE_ID.into(),
+            network_volume_id: IMAGEFORGE_NETWORK_VOLUME_ID.into(),
         };
         let projected = transport
             .project_and_register_created_pod(&raw, &body, &profile)
@@ -2146,9 +2234,9 @@ mod tests {
         let raw = serde_json::json!({
             "id": "live4090pod",
             "name": "imageforge-live",
-            "templateId": "imageforge-worker-v1",
+            "templateId": IMAGEFORGE_TEMPLATE_ID,
             "volumeMountPath": "/workspace",
-            "networkVolume": {"id": "if-models-production", "dataCenterId": "EU-RO-1"},
+            "networkVolume": {"id": IMAGEFORGE_NETWORK_VOLUME_ID, "dataCenterId": "EU-RO-1"},
             "machine": {
                 "secureCloud": true,
                 "dataCenterId": "EU-RO-1",
@@ -2159,8 +2247,8 @@ mod tests {
             "ports": ["8000/http"]
         });
         let profile = RunPodProfileBinding {
-            template_id: "imageforge-worker-v1".into(),
-            network_volume_id: "if-models-production".into(),
+            template_id: IMAGEFORGE_TEMPLATE_ID.into(),
+            network_volume_id: IMAGEFORGE_NETWORK_VOLUME_ID.into(),
         };
         let projected = project_pod(&raw).unwrap();
         assert_eq!(projected["interruptible"], false);
@@ -2186,10 +2274,10 @@ mod tests {
         let raw = serde_json::json!({
             "id": "live-omitted-gpu",
             "name": "imageforge-live",
-            "templateId": "imageforge-worker-v1",
+            "templateId": IMAGEFORGE_TEMPLATE_ID,
             "volumeMountPath": "/workspace",
             "interruptible": false,
-            "networkVolume": {"id": "if-models-production", "dataCenterId": "EU-RO-1"},
+            "networkVolume": {"id": IMAGEFORGE_NETWORK_VOLUME_ID, "dataCenterId": "EU-RO-1"},
             "machine": {
                 "secureCloud": true,
                 "dataCenterId": "EU-RO-1",
@@ -2199,8 +2287,8 @@ mod tests {
             "ports": ["8000/http"]
         });
         let profile = RunPodProfileBinding {
-            template_id: "imageforge-worker-v1".into(),
-            network_volume_id: "if-models-production".into(),
+            template_id: IMAGEFORGE_TEMPLATE_ID.into(),
+            network_volume_id: IMAGEFORGE_NETWORK_VOLUME_ID.into(),
         };
         let projected = project_pod(&raw).unwrap();
         assert_eq!(projected["gpu"]["id"], "NVIDIA GeForce RTX 4090");

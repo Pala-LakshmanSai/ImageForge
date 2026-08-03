@@ -21,6 +21,11 @@ export interface RunPodClientConfigInput {
   readonly defaultImageCount?: number;
   readonly refreshIntervalMs?: number;
   readonly provisioningTimeoutMs?: number;
+  /**
+   * Wall-clock budget for one RunPod/worker operation. The public refresh is a
+   * two-stage read (inventory, then Pod discovery), so it may use up to twice
+   * this per-stage budget; start/stop mutations remain single-stage bounded.
+   */
   readonly operationTimeoutMs?: number;
   readonly stopConfirmationTtlMs?: number;
   readonly constraints?: PodConstraintInput;

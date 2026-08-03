@@ -44,6 +44,9 @@ jobs:
       - name: Run TypeScript checks
         run: npm run typecheck
 
+      - name: Run native Rust tests
+        run: cargo test --release --manifest-path src-tauri/Cargo.toml
+
       - name: Build Windows NSIS installer
         run: npm run tauri:build -- --target x86_64-pc-windows-msvc --bundles nsis
 
@@ -147,16 +150,26 @@ jobs:
             if ($null -ne $appProcess -and -not $appProcess.HasExited) {
               Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
               $appProcess.WaitForExit(5000)
+              $appProcess.Refresh()
+              if (-not $appProcess.HasExited) {
+                throw "ImageForge process $($appProcess.Id) did not stop during cleanup."
+              }
             }
             if (Test-Path -LiteralPath $installRoot) {
               $uninstaller = Join-Path $installRoot 'uninstall.exe'
-              if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
-                $uninstallResult = Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait -PassThru
-                if ($uninstallResult.ExitCode -ne 0) {
-                  Write-Warning "NSIS uninstall returned exit code $($uninstallResult.ExitCode)."
-                }
+              if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
+                throw "NSIS uninstaller was missing during cleanup: $uninstaller."
               }
-              Remove-Item -LiteralPath $installRoot -Recurse -Force -ErrorAction SilentlyContinue
+              $uninstallResult = Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait -PassThru
+              if ($uninstallResult.ExitCode -ne 0) {
+                throw "NSIS uninstall failed with exit code $($uninstallResult.ExitCode)."
+              }
+              if (Test-Path -LiteralPath $installRoot) {
+                Remove-Item -LiteralPath $installRoot -Recurse -Force -ErrorAction Stop
+              }
+              if (Test-Path -LiteralPath $installRoot) {
+                throw "NSIS install root remained after cleanup: $installRoot."
+              }
             }
           }
 
@@ -175,13 +188,14 @@ jobs:
             product = 'ImageForge'
             version = [string]$package.version
             commit = $env:GITHUB_SHA
+            run_id = $env:GITHUB_RUN_ID
             os = 'Windows'
             architecture = 'x86_64'
             artifact = $installer[0].Name
             sha256 = $hash
             signing = 'unsigned beta installer'
             notarization = 'not applicable'
-            native_smoke = 'install, WebView2, onboarding, reference add/remove/re-add, fast fake batch, named minimal Library, per-image Download, image detail, folder reveal, cleanup'
+            native_smoke = 'install, WebView2, native launch/window, fake-adapter onboarding/reference/batch/Library UI, native Rust filesystem/download tests, cleanup'
           } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 -LiteralPath (Join-Path $bundleDir 'ImageForge-windows-release-metadata.json')
 
       - name: Upload Windows installer
@@ -215,6 +229,9 @@ jobs:
       - name: Run TypeScript checks and production build
         run: npm run typecheck && npm run build
 
+      - name: Run native Rust tests
+        run: cargo test --release --manifest-path src-tauri/Cargo.toml
+
       - name: Build macOS Apple-silicon app and DMG
         run: npm run tauri:build -- --target aarch64-apple-darwin --bundles app,dmg
 
@@ -226,6 +243,33 @@ jobs:
           dmg_path="$(find "$GITHUB_WORKSPACE/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg" -maxdepth 1 -type f -name 'ImageForge_*_aarch64.dmg' -print | head -n 1)"
           smoke_result="$RUNNER_TEMP/imageforge-native-smoke-result.txt"
           binary_path="$(find "$app_path/Contents/MacOS" -maxdepth 1 -type f -perm -111 -print | head -n 1)"
+          app_pid=""
+          stop_app() {
+            if [ -n "$app_pid" ] && kill -0 "$app_pid" 2>/dev/null; then
+              kill "$app_pid" 2>/dev/null || true
+              for _ in $(seq 1 10); do
+                if ! kill -0 "$app_pid" 2>/dev/null; then
+                  break
+                fi
+                sleep 1
+              done
+              if kill -0 "$app_pid" 2>/dev/null; then
+                echo "ImageForge process $app_pid did not stop during cleanup." >&2
+                return 1
+              fi
+              wait "$app_pid" 2>/dev/null || true
+            fi
+            app_pid=""
+          }
+          cleanup() {
+            local status=$?
+            if ! stop_app; then
+              status=1
+            fi
+            trap - EXIT
+            exit "$status"
+          }
+          trap cleanup EXIT
           if [ -z "$binary_path" ] || [ ! -x "$binary_path" ]; then
             echo 'ImageForge bundle executable was not found.' >&2
             exit 1
@@ -246,7 +290,7 @@ jobs:
             echo 'ImageForge did not remain alive after launch.' >&2
             exit 1
           fi
-          kill "$app_pid"
+          stop_app
 
       - name: Write macOS release metadata
         shell: bash
@@ -261,13 +305,14 @@ jobs:
             "product": "ImageForge",
             "version": "$version",
             "commit": "$GITHUB_SHA",
+            "run_id": "$GITHUB_RUN_ID",
             "os": "macOS",
             "architecture": "aarch64",
             "artifact": "$(basename "$dmg_path")",
             "sha256": "$hash",
             "signing": "ad-hoc signed beta",
             "notarization": "not notarized",
-            "native_smoke": "codesign, DMG verification, onboarding, reference add/remove/re-add, fast fake batch, named minimal Library, per-image Download, image detail, folder reveal"
+            "native_smoke": "codesign, DMG verification, native launch/window, fake-adapter onboarding/reference/batch/Library UI, native Rust filesystem/download tests"
           }
           EOF
 
