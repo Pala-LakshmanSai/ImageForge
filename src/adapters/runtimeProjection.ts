@@ -104,7 +104,8 @@ function imageStatus(image: WorkerImageRecord, local: LocalDownloadReceipt | und
   return image.status;
 }
 
-function batchPhase(state: WorkerBatchState, failed: number): BatchPhase {
+function batchPhase(state: WorkerBatchState, failed: number, savingSuccessfulArtifacts: boolean): BatchPhase {
+  if (savingSuccessfulArtifacts && ['completed', 'failed'].includes(state)) return 'running';
   switch (state) {
     case 'running': return 'running';
     case 'paused': return 'paused';
@@ -115,8 +116,17 @@ function batchPhase(state: WorkerBatchState, failed: number): BatchPhase {
   }
 }
 
-function statusMessage(manifest: WorkerManifest, phase: BatchPhase): string {
+function statusMessage(
+  manifest: WorkerManifest,
+  phase: BatchPhase,
+  savingSuccessfulArtifacts: boolean,
+  locallyVerified: number,
+): string {
   const { progress } = manifest;
+  if (savingSuccessfulArtifacts) {
+    const successful = manifest.images.filter((image) => ['ready', 'downloaded'].includes(image.status)).length;
+    return `Saving completed images · ${locallyVerified} of ${successful} verified locally`;
+  }
   if (phase === 'running') {
     const current = progress.currentIndex ?? Math.min(progress.processed + 1, progress.total);
     return `Generating image ${String(current).padStart(3, '0')} of ${String(progress.total).padStart(3, '0')}`;
@@ -152,7 +162,19 @@ export function projectOwnedManifest(
       ...(image.error === null ? {} : { failureReason: image.error.message }),
     };
   });
-  const phase = batchPhase(manifest.state, manifest.progress.failed);
+  const locallyVerified = prompts.filter((prompt) => prompt.status === 'downloaded').length;
+  const savingSuccessfulArtifacts = ['completed', 'failed'].includes(manifest.state) && manifest.images.some((image) => {
+    if (!['ready', 'downloaded'].includes(image.status)) return false;
+    const local = receiptByIndex.get(image.index);
+    // The native receipt is durable before its worker acknowledgement. Keep a
+    // terminal worker manifest in the truthful saving phase until both halves
+    // of that handshake are visible: the verified local file and the worker's
+    // authoritative `downloaded` state.
+    return image.status !== 'downloaded'
+      || local?.sha256 !== image.sha256
+      || local?.sizeBytes !== image.sizeBytes;
+  });
+  const phase = batchPhase(manifest.state, manifest.progress.failed, savingSuccessfulArtifacts);
   const started = Date.parse(manifest.createdAt);
   const terminalAt = ['complete', 'partial_failure', 'cancelled', 'interrupted', 'error'].includes(phase)
     ? Date.parse(manifest.completedAt ?? manifest.updatedAt)
@@ -181,7 +203,7 @@ export function projectOwnedManifest(
     estimatedSecondsPerImage,
     estimatedCost,
     lockMessage: null,
-    statusMessage: statusMessage(manifest, phase),
+    statusMessage: statusMessage(manifest, phase, savingSuccessfulArtifacts, locallyVerified),
     aspectRatio: aspectRatioFromDimensions(manifest.settings.width, manifest.settings.height),
   };
   const assets = prompts.flatMap((prompt): LibraryAsset[] => {

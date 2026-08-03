@@ -86,6 +86,75 @@ describe('GpuLifecycleCoordinator', () => {
     expect(port.clearWorkerSession).toHaveBeenCalled();
   });
 
+  it('reconciles a Pod stopped by another client without a second DELETE', async () => {
+    const port = nativePort();
+    let provider: FakeRunPodProvider | null = null;
+    const coordinator = new GpuLifecycleCoordinator(port, (config) => {
+      const pod = managedPod(config, 'stoppedelsewhere1');
+      provider = new FakeRunPodProvider({ inventory: [], pods: [pod] });
+      const health = new FakeWorkerHealthProbe();
+      health.setHealth(pod.proxyUrl, { schemaVersion: 1, phase: 'ready', phaseProgress: 1 });
+      return new RunPodLifecycleController({ provider, config, workerHealthProbe: health });
+    });
+    const ready = await coordinator.start(DEFAULT_STUDIO_PROFILE, 12, false);
+    provider!.setPods([]);
+    vi.mocked(port.clearWorkerSession).mockClear();
+
+    const reconciled = await coordinator.stop(ready.selectedPodId!);
+
+    expect(reconciled.alreadyStopped).toBe(true);
+    expect(reconciled.phase).toBe('offline');
+    expect(provider!.calls.terminate).toEqual([]);
+    expect(port.clearWorkerSession).toHaveBeenCalledOnce();
+  });
+
+  it('reconciles a Pod that vanishes during DELETE after Stop preflight', async () => {
+    const port = nativePort();
+    let provider: FakeRunPodProvider | null = null;
+    const coordinator = new GpuLifecycleCoordinator(port, (config) => {
+      const pod = managedPod(config, 'vanishafterpreflight1');
+      provider = new FakeRunPodProvider({ inventory: [], pods: [pod] });
+      const health = new FakeWorkerHealthProbe();
+      health.setHealth(pod.proxyUrl, { schemaVersion: 1, phase: 'ready', phaseProgress: 1 });
+      return new RunPodLifecycleController({ provider, config, workerHealthProbe: health });
+    });
+    const ready = await coordinator.start(DEFAULT_STUDIO_PROFILE, 12, false);
+    provider!.onTerminate((_podId, current) => current.setPods([]));
+    vi.mocked(port.clearWorkerSession).mockClear();
+
+    const reconciled = await coordinator.stop(ready.selectedPodId!);
+
+    expect(reconciled.alreadyStopped).toBe(true);
+    expect(reconciled.phase).toBe('offline');
+    expect(provider!.calls.terminate).toEqual([ready.selectedPodId]);
+    expect(port.clearWorkerSession).toHaveBeenCalledOnce();
+  });
+
+  it('keeps an authentication failure from Stop visible instead of reconciling it away', async () => {
+    const port = nativePort();
+    let provider: FakeRunPodProvider | null = null;
+    const coordinator = new GpuLifecycleCoordinator(port, (config) => {
+      const pod = managedPod(config, 'stopauthfailure1');
+      provider = new FakeRunPodProvider({ inventory: [], pods: [pod] });
+      const health = new FakeWorkerHealthProbe();
+      health.setHealth(pod.proxyUrl, { schemaVersion: 1, phase: 'ready', phaseProgress: 1 });
+      return new RunPodLifecycleController({ provider, config, workerHealthProbe: health });
+    });
+    const ready = await coordinator.start(DEFAULT_STUDIO_PROFILE, 12, false);
+    provider!.failNext('terminate', new RunPodClientError({
+      code: 'api_authentication_failed',
+      message: 'RunPod credentials were rejected.',
+      operation: 'terminate_pod',
+    }));
+    vi.mocked(port.clearWorkerSession).mockClear();
+
+    await expect(coordinator.stop(ready.selectedPodId!)).rejects.toMatchObject({
+      code: 'pod_termination_failed',
+    });
+    expect(provider!.calls.terminate).toEqual([ready.selectedPodId]);
+    expect(port.clearWorkerSession).not.toHaveBeenCalled();
+  });
+
   it('does not replace controller policy while a Pod or ambiguity is active', async () => {
     const port = nativePort();
     const providers: FakeRunPodProvider[] = [];

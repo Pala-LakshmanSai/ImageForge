@@ -24,6 +24,8 @@ export interface AppProps {
   adapter?: ImageForgeAdapter;
 }
 
+const CROSS_CLIENT_HEARTBEAT_MS = 30_000;
+
 export default function App({ initialState, adapter: injectedAdapter }: AppProps) {
   const [state, dispatch] = useReducer(appReducer, initialState, (provided) => provided ?? createInitialState());
   const adapter = useMemo(
@@ -38,6 +40,7 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
   );
   const clearRecoveryPointerRef = useRef(false);
   const refreshInFlightRef = useRef<Promise<boolean> | null>(null);
+  const observationInFlightRef = useRef<Promise<void> | null>(null);
   const batchStartInFlightRef = useRef(false);
 
   const refreshProductionStatus = useCallback((): Promise<boolean> => {
@@ -54,6 +57,21 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
     return operation;
   }, [runtime]);
 
+  const observeProductionStatus = useCallback((): Promise<void> => {
+    if (!runtime || !stateRef.current.setup.completed || !stateRef.current.setup.credentials.runpodApiKey.configured) {
+      return Promise.resolve();
+    }
+    if (observationInFlightRef.current !== null) return observationInFlightRef.current;
+    // A strict startup/manual/pre-submit refresh is already at least as
+    // authoritative as the advisory heartbeat, so do not queue duplicate work.
+    if (refreshInFlightRef.current !== null) return refreshInFlightRef.current.then(() => undefined);
+    const operation = runtime.observe(stateRef.current).finally(() => {
+      if (observationInFlightRef.current === operation) observationInFlightRef.current = null;
+    });
+    observationInFlightRef.current = operation;
+    return operation;
+  }, [runtime]);
+
   useEffect(() => {
     if (!runtime) return;
     return runtime.subscribe((event) => {
@@ -63,6 +81,7 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
       else if (event.type === 'busy') dispatch({ type: 'SYNC_RUNTIME_BUSY', batch: event.batch });
       else if (event.type === 'idle') dispatch({ type: 'RUNTIME_BATCH_IDLE' });
       else if (event.type === 'create-recovery') dispatch({ type: 'SYNC_CREATE_RECOVERY', marker: event.marker });
+      else if (event.type === 'notice') dispatch({ type: 'SHOW_TOAST', tone: event.tone, title: event.title, message: event.message });
       else dispatch({ type: 'RUNTIME_ERROR', scope: event.scope, code: event.code, message: event.message, retryable: event.retryable });
     });
   }, [runtime]);
@@ -89,18 +108,20 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
     if (!runtime || !state.setup.completed || !state.setup.credentials.runpodApiKey.configured) return;
     let active = true;
     const sync = () => {
-      if (active) void refreshProductionStatus();
+      if (active) void observeProductionStatus().catch(() => undefined);
     };
-    sync();
+    // Establish the first authoritative state immediately. Subsequent checks
+    // are deliberately slower, receipt-free observations.
+    void refreshProductionStatus();
     // RunPod lifecycle polling is read-only. Keep every open macOS and
     // Windows client aligned when another editor starts or explicitly stops
     // the shared disposable Pod, even while no batch is running.
-    const timer = window.setInterval(sync, 2_000);
+    const timer = window.setInterval(sync, CROSS_CLIENT_HEARTBEAT_MS);
     return () => {
       active = false;
       window.clearInterval(timer);
     };
-  }, [refreshProductionStatus, runtime, state.setup.completed, state.setup.credentials.runpodApiKey.configured]);
+  }, [observeProductionStatus, refreshProductionStatus, runtime, state.setup.completed, state.setup.credentials.runpodApiKey.configured]);
 
   useEffect(() => {
     let active = true;
@@ -184,7 +205,7 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
   useEffect(() => {
     if (state.batch?.phase !== 'validating') return;
     if (runtime) {
-      void runtime.startBatch(state.batch).catch(() => undefined);
+      void runtime.startBatch(stateRef.current).catch(() => undefined);
       return;
     }
     return adapter.validateBatch(() => dispatch({ type: 'BATCH_VALIDATED' }));
@@ -198,6 +219,7 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
 
   useEffect(() => {
     if (!runtime || !['ready', 'reconnecting'].includes(state.pod.phase)) return;
+    if (state.batch?.phase === 'validating') return;
     if (state.batch && ['complete', 'partial_failure', 'cancelled'].includes(state.batch.phase)) return;
     const poll = () => void runtime.pollBatch(stateRef.current).catch(() => undefined);
     poll();
@@ -299,7 +321,7 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
       return;
     }
     dispatch(action);
-  }, [runtime]);
+  }, [refreshProductionStatus, runtime]);
 
   const screenProps = { state, dispatch: uiDispatch, adapter };
 

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   WorkerBatchCoordinator,
   WorkerBatchError,
+  type WorkerBatchEvent,
   type LocalDownloadReceipt,
   type WorkerBatchPort,
   type WorkerHttpResult,
@@ -498,10 +499,13 @@ describe('WorkerBatchCoordinator', () => {
     await expect(stalePoll).resolves.toEqual({ type: 'idle' });
     await expect(reconciliation).resolves.toMatchObject({ type: 'manifest' });
     expect(port.downloadArtifact).toHaveBeenCalledOnce();
-    expect(events).toEqual([
-      expect.objectContaining({ type: 'manifest', manifest: expect.objectContaining({ images: [expect.objectContaining({ status: 'generating' })] }) }),
-      expect.objectContaining({ type: 'manifest', manifest: expect.objectContaining({ images: [expect.objectContaining({ status: 'downloaded' })] }) }),
-    ]);
+    expect(events).toHaveLength(5);
+    expect(events.map((event) => (
+      (event as Extract<WorkerBatchEvent, { type: 'manifest' }>).manifest.images[0].status
+    ))).toEqual(['downloaded', 'generating', 'downloaded', 'downloaded', 'downloaded']);
+    expect(events.map((event) => (
+      (event as Extract<WorkerBatchEvent, { type: 'manifest' }>).receipts.length
+    ))).toEqual([0, 0, 0, 1, 1]);
   });
 
   it('serializes create and owner-poll synchronization without losing newer ready state', async () => {
@@ -529,7 +533,10 @@ describe('WorkerBatchCoordinator', () => {
     ]);
     expect(port.downloadArtifact).toHaveBeenCalledOnce();
     expect(port.getBatch).toHaveBeenCalledTimes(2);
-    expect(events).toHaveLength(2);
+    expect(events).toHaveLength(4);
+    expect(events.map((event) => (
+      (event as Extract<WorkerBatchEvent, { type: 'manifest' }>).receipts.length
+    ))).toEqual([0, 1, 1, 1]);
     expect(events.at(-1)).toMatchObject({
       type: 'manifest',
       manifest: { images: [{ status: 'downloaded' }] },
@@ -633,7 +640,15 @@ describe('WorkerBatchCoordinator', () => {
     expect(downloadArtifact.mock.calls.map(([input]) => input.index)).toEqual([22, 23, 24]);
     expect(downloadArtifact.mock.calls.every(([input]) => input.batchName === 'Atlas of Quiet Work')).toBe(true);
     expect(getBatch).toHaveBeenCalledTimes(3);
-    expect(events).toHaveLength(1);
+    expect(events).toHaveLength(6);
+    expect(events.map((candidate) => (
+      (candidate as Extract<WorkerBatchEvent, { type: 'manifest' }>).receipts.length
+    ))).toEqual([21, 22, 22, 23, 24, 24]);
+    expect(events[2]).toMatchObject({
+      type: 'manifest',
+      manifest: { images: expect.arrayContaining([expect.objectContaining({ index: 23, status: 'ready' })]) },
+      receipts: expect.arrayContaining([expect.objectContaining({ index: 22 })]),
+    });
 
     await expect(coordinator.poll()).resolves.toMatchObject({
       type: 'manifest',
@@ -642,6 +657,104 @@ describe('WorkerBatchCoordinator', () => {
     expect(downloadArtifact).toHaveBeenCalledTimes(3);
     expect(port.readReceipts).toHaveBeenCalledOnce();
     expect(getBatch).toHaveBeenCalledTimes(4);
+  });
+
+  it('emits ready state and each deferred durable receipt in order before terminal completion', async () => {
+    const firstDownload = deferred<LocalDownloadReceipt>();
+    const secondDownload = deferred<LocalDownloadReceipt>();
+    const readyTerminal = terminalManifest(['ready', 'ready']);
+    const downloadedTerminal = terminalManifest(['downloaded', 'downloaded']);
+    const getBatch = vi.fn()
+      .mockResolvedValueOnce({ status: 200, body: readyTerminal })
+      .mockResolvedValue({ status: 200, body: downloadedTerminal });
+    const downloadArtifact = vi.fn((input: Parameters<WorkerBatchPort['downloadArtifact']>[0]) => (
+      input.index === 1 ? firstDownload.promise : secondDownload.promise
+    ));
+    const port = fakePort({
+      status: vi.fn(async () => ({ status: 200, body: releasedStatus() })),
+      getBatch,
+      downloadArtifact,
+    });
+    const coordinator = new WorkerBatchCoordinator(port, batchId);
+    const events: WorkerBatchEvent[] = [];
+    coordinator.subscribe((event) => events.push(event));
+
+    const polling = coordinator.poll();
+    await vi.waitFor(() => expect(downloadArtifact).toHaveBeenCalledTimes(1));
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'manifest',
+        manifest: expect.objectContaining({ images: expect.arrayContaining([expect.objectContaining({ index: 1, status: 'ready' })]) }),
+        receipts: [],
+      }),
+    ]);
+
+    firstDownload.resolve(terminalReceipt(1));
+    await vi.waitFor(() => expect(downloadArtifact).toHaveBeenCalledTimes(2));
+    expect(events).toEqual([
+      expect.objectContaining({ type: 'manifest', receipts: [] }),
+      expect.objectContaining({ type: 'manifest', receipts: [expect.objectContaining({ index: 1 })] }),
+    ]);
+
+    secondDownload.resolve(terminalReceipt(2));
+    await expect(polling).resolves.toMatchObject({
+      type: 'manifest',
+      manifest: { state: 'completed', progress: { downloaded: 2, total: 2 } },
+      receipts: [expect.objectContaining({ index: 1 }), expect.objectContaining({ index: 2 })],
+    });
+    expect(events).toEqual([
+      expect.objectContaining({ type: 'manifest', receipts: [] }),
+      expect.objectContaining({ type: 'manifest', receipts: [expect.objectContaining({ index: 1 })] }),
+      expect.objectContaining({
+        type: 'manifest',
+        receipts: [expect.objectContaining({ index: 1 }), expect.objectContaining({ index: 2 })],
+      }),
+      expect.objectContaining({
+        type: 'manifest',
+        manifest: expect.objectContaining({ state: 'completed' }),
+        receipts: [expect.objectContaining({ index: 1 }), expect.objectContaining({ index: 2 })],
+      }),
+    ]);
+    expect(downloadArtifact.mock.calls.map(([input]) => input.index)).toEqual([1, 2]);
+    expect(getBatch).toHaveBeenCalledTimes(2);
+  });
+
+  it('publishes every ordered saved count from 1 through 24', async () => {
+    const readyTerminal = terminalManifest(
+      Array.from({ length: 24 }, () => 'ready' as const),
+    );
+    const downloadedTerminal = terminalManifest(
+      Array.from({ length: 24 }, () => 'downloaded' as const),
+    );
+    const getBatch = vi.fn()
+      .mockResolvedValueOnce({ status: 200, body: readyTerminal })
+      .mockResolvedValue({ status: 200, body: downloadedTerminal });
+    const downloadArtifact = vi.fn(async (
+      input: Parameters<WorkerBatchPort['downloadArtifact']>[0],
+    ) => terminalReceipt(input.index));
+    const port = fakePort({
+      status: vi.fn(async () => ({ status: 200, body: releasedStatus() })),
+      getBatch,
+      downloadArtifact,
+    });
+    const coordinator = new WorkerBatchCoordinator(port, batchId);
+    const savedCounts: number[] = [];
+    coordinator.subscribe((event) => {
+      if (event.type !== 'manifest') return;
+      const saved = event.receipts.length;
+      if (saved > (savedCounts.at(-1) ?? 0)) savedCounts.push(saved);
+    });
+
+    await expect(coordinator.poll()).resolves.toMatchObject({
+      type: 'manifest',
+      manifest: { state: 'completed', progress: { downloaded: 24, total: 24 } },
+    });
+
+    expect(savedCounts).toEqual(Array.from({ length: 24 }, (_, index) => index + 1));
+    expect(downloadArtifact.mock.calls.map(([input]) => input.index)).toEqual(
+      Array.from({ length: 24 }, (_, index) => index + 1),
+    );
+    expect(getBatch).toHaveBeenCalledTimes(2);
   });
 
   it('bounds an unreflected terminal acknowledgement and completes on a later retry', async () => {
@@ -672,6 +785,8 @@ describe('WorkerBatchCoordinator', () => {
     expect(getBatch).toHaveBeenCalledTimes(2);
     expect(downloadArtifact).toHaveBeenCalledOnce();
     expect(events).toEqual([
+      expect.objectContaining({ type: 'manifest', receipts: [] }),
+      expect.objectContaining({ type: 'manifest', receipts: [expect.objectContaining({ index: 1 })] }),
       expect.objectContaining({
         type: 'error',
         code: 'terminal_reconciliation_pending',
@@ -688,7 +803,7 @@ describe('WorkerBatchCoordinator', () => {
     expect(downloadArtifact).toHaveBeenLastCalledWith(
       expect.objectContaining({ batchName: 'Retryable terminal batch', index: 1 }),
     );
-    expect(events).toHaveLength(2);
+    expect(events).toHaveLength(5);
     expect(events.at(-1)).toMatchObject({ type: 'manifest' });
   });
 

@@ -6,7 +6,8 @@ import { projectBusyBatch, projectOwnedManifest, projectPodSnapshot } from './ru
 
 const batchId = '11111111-1111-4111-8111-111111111111';
 
-function workerManifest() {
+function workerManifest(imageStatus: 'ready' | 'downloaded' = 'downloaded') {
+  const acknowledged = imageStatus === 'downloaded';
   return parseWorkerManifest({
     schema_version: 1,
     batch_id: batchId,
@@ -23,7 +24,7 @@ function workerManifest() {
       index: 1,
       prompt: 'A handpicked documentary still',
       seed: 700,
-      status: 'downloaded',
+      status: imageStatus,
       attempts: 1,
       retry_rounds: 0,
       filename: 'artifacts/000001.jpg',
@@ -31,9 +32,58 @@ function workerManifest() {
       size_bytes: 2_048,
       generation_ms: 8_000,
       error: null,
-      receipt: { sha256: 'a'.repeat(64), size_bytes: 2_048, acknowledged_at: '2026-08-01T10:01:00.000Z' },
+      receipt: acknowledged
+        ? { sha256: 'a'.repeat(64), size_bytes: 2_048, acknowledged_at: '2026-08-01T10:01:00.000Z' }
+        : null,
     }],
-    progress: { total: 1, completed: 1, downloaded: 1, failed: 0, cancelled: 0, processed: 1, current_index: null },
+    progress: { total: 1, completed: 1, downloaded: acknowledged ? 1 : 0, failed: 0, cancelled: 0, processed: 1, current_index: null },
+  });
+}
+
+function partialFailureManifest() {
+  return parseWorkerManifest({
+    schema_version: 1,
+    batch_id: batchId,
+    owner: { user_id: 'lakshman', display_name: 'Lakshman' },
+    state: 'completed',
+    created_at: '2026-08-01T10:00:00.000Z',
+    updated_at: '2026-08-01T10:01:00.000Z',
+    completed_at: '2026-08-01T10:01:00.000Z',
+    interrupted_at: null,
+    pause_requested: false,
+    cancel_requested: false,
+    settings: { width: 1280, height: 720 },
+    images: [
+      {
+        index: 1,
+        prompt: 'A completed documentary still',
+        seed: 700,
+        status: 'downloaded',
+        attempts: 1,
+        retry_rounds: 0,
+        filename: 'artifacts/000001.jpg',
+        sha256: 'a'.repeat(64),
+        size_bytes: 2_048,
+        generation_ms: 8_000,
+        error: null,
+        receipt: { sha256: 'a'.repeat(64), size_bytes: 2_048, acknowledged_at: '2026-08-01T10:01:00.000Z' },
+      },
+      {
+        index: 2,
+        prompt: 'A failed documentary still',
+        seed: 701,
+        status: 'failed',
+        attempts: 3,
+        retry_rounds: 2,
+        filename: null,
+        sha256: null,
+        size_bytes: null,
+        generation_ms: null,
+        error: { code: 'generation_failed', message: 'Generation failed safely.' },
+        receipt: null,
+      },
+    ],
+    progress: { total: 2, completed: 1, downloaded: 1, failed: 1, cancelled: 0, processed: 2, current_index: null },
   });
 }
 
@@ -92,22 +142,60 @@ describe('production runtime projection', () => {
     expect(projected.matchingPodIds).toEqual(['podone1', 'podtwo2']);
   });
 
-  it('uses only verified local receipts to publish library assets', () => {
-    const manifest = workerManifest();
+  it('requires both a verified local receipt and worker acknowledgement before completion', () => {
+    const manifest = workerManifest('ready');
     const none = projectOwnedManifest(manifest, [], {
       name: 'History Brief', destination: '/safe/folder', estimatedSecondsPerImage: 8.4, hourlyRate: 0.5,
     }, Date.parse('2026-08-02T10:01:00.000Z'));
     expect(none.assets).toEqual([]);
+    expect(none.batch.phase).toBe('running');
     expect(none.batch.prompts[0].status).toBe('ready');
+    expect(none.batch.statusMessage).toBe('Saving completed images · 0 of 1 verified locally');
     expect(none.batch.aspectRatio).toBe('9:16');
 
-    const verified = projectOwnedManifest(manifest, [{
+    const localReceipt = {
       schemaVersion: 1, batchId, index: 1, filename: `batches/${batchId}/000001.jpg`, sha256: 'a'.repeat(64), sizeBytes: 2_048, verifiedAtUnixMs: 1,
-    }], {
+    } as const;
+    const awaitingAcknowledgement = projectOwnedManifest(manifest, [localReceipt], {
+      name: 'History Brief', destination: '/safe/folder', estimatedSecondsPerImage: 8.4, hourlyRate: 0.5,
+    }, Date.parse('2026-08-02T10:01:00.000Z'));
+    expect(awaitingAcknowledgement.assets).toHaveLength(1);
+    expect(awaitingAcknowledgement.batch.phase).toBe('running');
+    expect(awaitingAcknowledgement.batch.statusMessage).toBe('Saving completed images · 1 of 1 verified locally');
+
+    const verified = projectOwnedManifest(workerManifest('downloaded'), [localReceipt], {
       name: 'History Brief', destination: '/safe/folder', estimatedSecondsPerImage: 8.4, hourlyRate: 0.5,
     }, Date.parse('2026-08-02T10:01:00.000Z'));
     expect(verified.assets).toHaveLength(1);
+    expect(verified.batch.phase).toBe('complete');
+    expect(verified.batch.prompts.filter((prompt) => prompt.status === 'downloaded')).toHaveLength(1);
     expect(verified.batch.estimatedCost).toBeCloseTo(0.5 / 60);
+  });
+
+  it('delays partial failure until every successful artifact has a matching local receipt', () => {
+    const manifest = partialFailureManifest();
+    const context = {
+      name: 'Mixed result brief', destination: '/safe/folder', estimatedSecondsPerImage: 8.4, hourlyRate: 0.5,
+    };
+
+    const saving = projectOwnedManifest(manifest, [], context);
+    expect(saving.batch.phase).toBe('running');
+    expect(saving.batch.statusMessage).toBe('Saving completed images · 0 of 1 verified locally');
+    expect(saving.batch.prompts.map((prompt) => prompt.status)).toEqual(['ready', 'failed']);
+    expect(saving.assets).toEqual([]);
+
+    const settled = projectOwnedManifest(manifest, [{
+      schemaVersion: 1,
+      batchId,
+      index: 1,
+      filename: `batches/${batchId}/000001.jpg`,
+      sha256: 'a'.repeat(64),
+      sizeBytes: 2_048,
+      verifiedAtUnixMs: 1,
+    }], context);
+    expect(settled.batch.phase).toBe('partial_failure');
+    expect(settled.batch.prompts.map((prompt) => prompt.status)).toEqual(['downloaded', 'failed']);
+    expect(settled.assets).toHaveLength(1);
   });
 
   it('projects a foreign batch as progress-only with no prompts or destination disclosure', () => {

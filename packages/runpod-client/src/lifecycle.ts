@@ -324,6 +324,9 @@ export class RunPodLifecycleController {
       ...(options.expectedImageCount === undefined
         ? {}
         : { expectedImageCount: options.expectedImageCount }),
+      ...(options.suppressTransientPhase === true
+        ? { suppressTransientPhase: true }
+        : {}),
       signal: deadline.signal,
     };
     const queued = this.#enqueueMutation(() => this.#refresh(boundedOptions));
@@ -336,7 +339,9 @@ export class RunPodLifecycleController {
         retryable: true,
         details: { timeoutMs: refreshTimeoutMs },
       });
-      this.#publish({ ...this.#snapshot, phase: "error", error: safeErrorSummary(timeoutError) });
+      if (options.suppressTransientPhase !== true) {
+        this.#publish({ ...this.#snapshot, phase: "error", error: safeErrorSummary(timeoutError) });
+      }
       throw timeoutError;
     }).finally(deadline.dispose);
   }
@@ -352,12 +357,18 @@ export class RunPodLifecycleController {
     // oscillating between 4% and 39% while the same Pod is booting/loading.
     const hasActiveSelection = this.#snapshot.selectedPodId !== null &&
       this.#snapshot.pods.some((pod) => pod.id === this.#snapshot.selectedPodId && isActivePod(pod));
-    this.#publish({
-      ...this.#snapshot,
-      phase: hasActiveSelection ? this.#snapshot.phase : "selecting",
-      expectedImageCount,
-      error: null,
-    });
+    // A background cross-client observation must not flash an otherwise
+    // offline Create screen through `selecting` just to prove that another
+    // client has not started or stopped a Pod. Foreground refresh/start
+    // retains the normal visible lifecycle feedback.
+    if (options.suppressTransientPhase !== true) {
+      this.#publish({
+        ...this.#snapshot,
+        phase: hasActiveSelection ? this.#snapshot.phase : "selecting",
+        expectedImageCount,
+        error: null,
+      });
+    }
 
     const inventoryRequest = {
       gpuIds: this.#enabledGpuIds(),
@@ -452,11 +463,13 @@ export class RunPodLifecycleController {
         retryable: true,
       });
       if (runPodError.code === "operation_aborted") throw runPodError;
-      this.#publish({
-        ...this.#snapshot,
-        phase: "error",
-        error: safeErrorSummary(runPodError),
-      });
+      if (options.suppressTransientPhase !== true) {
+        this.#publish({
+          ...this.#snapshot,
+          phase: "error",
+          error: safeErrorSummary(runPodError),
+        });
+      }
       throw runPodError;
     }
   }
@@ -812,6 +825,11 @@ export class RunPodLifecycleController {
         });
         throw aborted;
       }
+      // DELETE 404 is an authoritative race outcome: the exact Pod existed
+      // during revalidation but another client removed it before this request
+      // reached RunPod. Preserve the typed absence so the desktop can perform
+      // a read-only reconciliation instead of rendering a false stop failure.
+      if (sourceError.code === "pod_not_found") throw sourceError;
       const terminationError = new RunPodClientError({
         code: "pod_termination_failed",
         message:

@@ -329,6 +329,14 @@ export interface StopGpuResult {
 export interface RefreshOptions {
   readonly expectedImageCount?: number;
   readonly signal?: AbortSignal;
+  /**
+   * Keep the last known UI phase in place for the full read-only observation,
+   * including a failed observation. The returned promise still rejects so a
+   * foreground readiness gate can fail closed; this option only suppresses
+   * transient UI publication. An explicit Refresh Status action retains its
+   * normal lifecycle feedback.
+   */
+  readonly suppressTransientPhase?: boolean;
 }
 
 export interface WaitUntilReadyOptions extends RefreshOptions {

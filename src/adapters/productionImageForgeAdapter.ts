@@ -60,6 +60,7 @@ export type ProductionRuntimeEvent =
   | { type: 'busy'; batch: BatchState }
   | { type: 'idle' }
   | { type: 'create-recovery'; marker: PodState['createRecovery'] }
+  | { type: 'notice'; tone: 'info' | 'success' | 'warning'; title: string; message: string }
   | { type: 'error'; scope: 'pod' | 'batch'; code?: string; message: string; retryable: boolean };
 
 function recoveredBatchName(
@@ -116,9 +117,10 @@ export interface ProductionRuntimeFacade {
   getAuthoritativePodState?(): PodState | null;
   restoreLocalLibrary(state: AppState): Promise<void>;
   refresh(state: AppState): Promise<void>;
+  observe(state: AppState): Promise<void>;
   startGpu(state: AppState): Promise<void>;
   stopGpu(state: AppState): Promise<void>;
-  startBatch(batch: BatchState): Promise<void>;
+  startBatch(state: AppState): Promise<void>;
   pollBatch(state: AppState): Promise<void>;
   beginNewBatch(): void;
   controlBatch(
@@ -143,6 +145,9 @@ class ProductionRuntime implements ProductionRuntimeFacade {
   #reconciledRecoveredBatch = false;
   #localLibraryRestored = false;
   #localLibraryRestore: Promise<void> | null = null;
+  #pollBatchInFlight: Promise<void> | null = null;
+  #deferWorkerError = false;
+  #deferredWorkerError: Extract<WorkerBatchEvent, { type: 'error' }> | null = null;
 
   constructor(
     port: ProductionDesktopPort,
@@ -213,6 +218,17 @@ class ProductionRuntime implements ProductionRuntimeFacade {
     }
   }
 
+  async observe(state: AppState): Promise<void> {
+    this.#captureState(state);
+    const count = state.batch?.prompts.length || state.draft.prompts.length || 450;
+    const snapshot = await this.#gpu.observe(
+      state.setup.studioProfile,
+      count,
+      state.settings.slowEmergencyGpuEnabled,
+    );
+    if (snapshot.phase === 'offline') await this.#port.clearWorkerSession();
+  }
+
   async startGpu(state: AppState): Promise<void> {
     this.#captureState(state);
     try {
@@ -246,14 +262,27 @@ class ProductionRuntime implements ProductionRuntimeFacade {
       throw new Error('The confirmed Pod changed before termination; refresh RunPod status and confirm again.');
     }
     try {
-      await this.#gpu.stop(expectedPodId);
+      const result = await this.#gpu.stop(expectedPodId);
+      if (result.alreadyStopped) {
+        this.#emit({
+          type: 'notice',
+          tone: 'info',
+          title: 'GPU already stopped',
+          message: 'The confirmed ImageForge GPU was already stopped or is no longer an active ImageForge target on another client. Status is now synchronized; no second termination was sent.',
+        });
+      }
     } catch (error) {
       this.#emitError('pod', error, 'ImageForge could not confirm GPU termination.');
       throw error;
     }
   }
 
-  async startBatch(batch: BatchState): Promise<void> {
+  async startBatch(state: AppState): Promise<void> {
+    this.#captureState(state);
+    const batch = state.batch;
+    if (batch === null || batch.phase !== 'validating') {
+      throw new Error('A validated local batch is required before worker submission.');
+    }
     this.#presentation = {
       name: batch.name,
       destination: batch.destination,
@@ -269,21 +298,46 @@ class ProductionRuntime implements ProductionRuntimeFacade {
         batch.name,
       );
     } catch (error) {
+      // A remote Stop can land after the strict Generate preflight but before
+      // the worker POST settles. Reconcile the authoritative lifecycle once
+      // more so the Pod's offline event interrupts the provisional batch and
+      // supersedes the secondary proxy/schema error only when absence is
+      // actually proven by RunPod.
+      if (await this.#workerFailureWasRemoteStop(state)) return;
       this.#emitError('batch', error, 'ImageForge could not create the batch.');
       throw error;
     }
   }
 
-  async pollBatch(state: AppState): Promise<void> {
+  pollBatch(state: AppState): Promise<void> {
     this.#captureState(state);
+    if (this.#pollBatchInFlight !== null) return this.#pollBatchInFlight;
+    const operation = this.#pollBatch(state).finally(() => {
+      if (this.#pollBatchInFlight === operation) this.#pollBatchInFlight = null;
+    });
+    this.#pollBatchInFlight = operation;
+    return operation;
+  }
+
+  async #pollBatch(state: AppState): Promise<void> {
     if (!await this.#ensureRecoveredReceipts(state)) return;
+    this.#deferWorkerError = true;
+    this.#deferredWorkerError = null;
     try {
       await this.#worker.poll();
     } catch (error) {
-      // WorkerBatchCoordinator already emitted one classified, redacted
-      // failure event. Keep polling ownership single and avoid duplicate UI
-      // errors for the same failed request.
+      if (await this.#workerFailureWasRemoteStop(state)) {
+        // The worker failure was only a symptom of another client stopping the
+        // shared Pod. The authoritative Pod event already moved the UI offline;
+        // do not overwrite it with a stale schema/proxy error.
+        this.#deferredWorkerError = null;
+        return;
+      }
+      this.#flushDeferredWorkerError();
       throw error;
+    } finally {
+      this.#deferWorkerError = false;
+      this.#deferredWorkerError = null;
     }
   }
 
@@ -347,6 +401,23 @@ class ProductionRuntime implements ProductionRuntimeFacade {
         hourlyRate: state.pod.hourlyRate,
       };
     }
+  }
+
+  async #workerFailureWasRemoteStop(state: AppState): Promise<boolean> {
+    let snapshot: RunPodSnapshot;
+    try {
+      const count = state.batch?.prompts.length || state.draft.prompts.length || 450;
+      snapshot = await this.#gpu.observe(
+        state.setup.studioProfile,
+        count,
+        state.settings.slowEmergencyGpuEnabled,
+      );
+    } catch {
+      return false;
+    }
+    if (snapshot.phase !== 'offline') return false;
+    await this.#port.clearWorkerSession();
+    return true;
   }
 
   async #portMarker(): Promise<NonNullable<PodState['createRecovery']> | null> {
@@ -473,13 +544,11 @@ class ProductionRuntime implements ProductionRuntimeFacade {
       return;
     }
     if (event.type === 'error') {
-      this.#emit({
-        type: 'error',
-        scope: 'batch',
-        message: event.message,
-        retryable: event.retryable,
-        ...(event.code ? { code: event.code } : {}),
-      });
+      if (this.#deferWorkerError) {
+        this.#deferredWorkerError = event;
+        return;
+      }
+      this.#emitWorkerError(event);
       return;
     }
     const restoredName = recoveredBatchName(event.manifest.batchId, event.receipts);
@@ -508,6 +577,22 @@ class ProductionRuntime implements ProductionRuntimeFacade {
 
   #emit(event: ProductionRuntimeEvent): void {
     for (const listener of this.#listeners) listener(event);
+  }
+
+  #flushDeferredWorkerError(): void {
+    const event = this.#deferredWorkerError;
+    this.#deferredWorkerError = null;
+    if (event !== null) this.#emitWorkerError(event);
+  }
+
+  #emitWorkerError(event: Extract<WorkerBatchEvent, { type: 'error' }>): void {
+    this.#emit({
+      type: 'error',
+      scope: 'batch',
+      message: event.message,
+      retryable: event.retryable,
+      ...(event.code ? { code: event.code } : {}),
+    });
   }
 
   #emitError(scope: 'pod' | 'batch', error: unknown, fallback: string): void {

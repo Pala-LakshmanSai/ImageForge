@@ -51,7 +51,7 @@ function batchStatus(
   completed: number,
   total: number,
   failed: number,
-  selectedIndex?: number,
+  selected?: BatchPrompt,
 ) {
   if (phase === 'complete') return `All ${total} images saved`;
   if (phase === 'partial_failure') return `${completed} images saved · ${failed} need attention`;
@@ -62,7 +62,14 @@ function batchStatus(
   if (phase === 'cancelled') return 'Batch cancelled';
   if (phase === 'error') return 'Batch needs attention';
   if (phase === 'validating') return 'Checking prompts and output folder';
-  if (phase === 'running') return selectedIndex ? `Creating image ${selectedIndex} of ${total}` : 'Starting generation';
+  if (phase === 'running' && selected) {
+    if (selected.status === 'ready' || selected.status === 'downloading') {
+      return `Saving image ${selected.index} of ${total}`;
+    }
+    if (selected.status === 'downloaded') return `Saving completed images · ${completed} verified locally`;
+    return `Creating image ${selected.index} of ${total}`;
+  }
+  if (phase === 'running') return 'Starting generation';
   return 'Preparing batch';
 }
 
@@ -233,6 +240,7 @@ function NoBatch({ state, dispatch }: Pick<ScreenProps, 'state' | 'dispatch'>) {
 export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
   const batch = state.batch;
   const [selectedId, setSelectedId] = useState<string | undefined>();
+  const manualSelectionRef = useRef(false);
   const [downloadingIndex, setDownloadingIndex] = useState<number | null>(null);
 
   async function downloadImage(prompt: BatchPrompt): Promise<void> {
@@ -284,8 +292,13 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
   }, [batch]);
 
   useEffect(() => {
-    if (!selectedId && currentPrompt) setSelectedId(currentPrompt.id);
-  }, [currentPrompt, selectedId]);
+    manualSelectionRef.current = false;
+    setSelectedId(undefined);
+  }, [batch?.id]);
+
+  useEffect(() => {
+    if (!manualSelectionRef.current && currentPrompt) setSelectedId(currentPrompt.id);
+  }, [currentPrompt]);
 
   if (!batch) return <NoBatch state={state} dispatch={dispatch} />;
 
@@ -295,14 +308,19 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
   const canManage = adapter.mode === 'production'
     ? batch.canManage === true
     : batch.owner === state.settings.userName;
-  const isControllable = canManage && ['running', 'paused'].includes(batch.phase);
+  const hasGenerationWork = batch.prompts.some((prompt) =>
+    ['pending', 'generating', 'retrying'].includes(prompt.status),
+  );
+  const isControllable = canManage && (
+    batch.phase === 'paused' || (batch.phase === 'running' && hasGenerationWork)
+  );
   const isLocked = batch.phase === 'locked';
   const isReconnecting = state.pod.phase === 'reconnecting';
   const isError = batch.phase === 'error' || state.pod.phase === 'error';
   const isInterrupted = batch.phase === 'interrupted';
   const canResolveInterrupted = isInterrupted && canManage;
   const settled = ['complete', 'partial_failure', 'cancelled'].includes(batch.phase);
-  const status = batchStatus(batch.phase, counts.completed, counts.total, counts.failed, selectedPrompt?.index);
+  const status = batchStatus(batch.phase, counts.completed, counts.total, counts.failed, currentPrompt);
   const revealTarget = batch.prompts.find(
     (prompt) => prompt.status === 'downloaded' && prompt.filename,
   )?.filename;
@@ -425,7 +443,14 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
               <span>You can see overall progress only. No images or prompts will be saved to this computer.</span>
             </div>
           ) : (
-            <PromptQueue prompts={batch.prompts} selectedId={selectedPrompt?.id} onSelect={(prompt) => setSelectedId(prompt.id)} />
+            <PromptQueue
+              prompts={batch.prompts}
+              selectedId={selectedPrompt?.id}
+              onSelect={(prompt) => {
+                manualSelectionRef.current = true;
+                setSelectedId(prompt.id);
+              }}
+            />
           )}
         </section>
 

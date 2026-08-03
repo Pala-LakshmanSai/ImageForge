@@ -24,6 +24,17 @@ function buttonMatching(pattern: RegExp): HTMLButtonElement | null {
     }) ?? null;
 }
 
+function savedImageCount(): number | null {
+  const progress = document.querySelector('.progress-hero__linear');
+  const match = progress ? visibleText(progress).match(/\b(\d+)\s+saved/i) : null;
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+
+function displayedBatchPhase(): string | null {
+  const badge = document.querySelector('.progress-heading .phase-badge');
+  return badge ? visibleText(badge).toLowerCase() : null;
+}
+
 async function clickButton(description: string, pattern: RegExp): Promise<void> {
   const button = await waitFor(description, () => buttonMatching(pattern));
   button.click();
@@ -109,6 +120,15 @@ export async function runNativeSmoke(): Promise<void> {
     await clickButton('fake Start GPU control', /^Start GPU$/);
     await waitFor('fake GPU readiness', () => buttonMatching(/Stop GPU/) ? true : null);
     await clickButton('fake batch launch', /Generate \d+ images/);
+    const firstSavedCount = await waitFor('first incremental image save', () => {
+      const count = savedImageCount();
+      const phase = displayedBatchPhase();
+      return count !== null && count >= 1 && phase === 'running' ? count : null;
+    }, 30_000);
+    const nextSavedCount = await waitFor('a later incremental image save', () => {
+      const count = savedImageCount();
+      return count !== null && count > firstSavedCount && displayedBatchPhase() === 'running' ? count : null;
+    }, 30_000);
     await waitFor('fake batch completion', () => buttonMatching(/^New brief$/) ? true : null, 30_000);
     await clickButton('folder reveal control', /Show in folder/);
     await clickButton('Library navigation', /^Library$/);
@@ -126,7 +146,7 @@ export async function runNativeSmoke(): Promise<void> {
     await waitFor('Download success', () => document.body.textContent?.includes('Image downloaded') ? true : null);
     await clickButton('image detail', /^Open details for Atlas of Quiet Work · 001\b/);
     await waitFor('image detail actions', () => buttonMatching(/^Show Atlas of Quiet Work · 001 in folder\b/) ? true : null);
-    await record(true, 'onboarding, reference add/remove/re-add, fast fake batch, named minimal Library, per-image Download, image detail, and folder reveal passed');
+    await record(true, `onboarding, reference add/remove/re-add, incremental saves ${firstSavedCount}->${nextSavedCount}, fast fake batch, named minimal Library, per-image Download, image detail, and folder reveal passed`);
   } catch (error) {
     await record(false, error instanceof Error ? error.message : 'Native smoke failed.');
   }

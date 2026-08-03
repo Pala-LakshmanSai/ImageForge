@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { RunPodSnapshot } from '@imageforge/runpod-client';
 import { createConfiguredInitialState } from '../domain/reducer';
 import type { CredentialMetadataMap } from '../domain/types';
 import { DEFAULT_STUDIO_PROFILE } from './imageForgeAdapter';
+import { GpuLifecycleCoordinator } from './gpuLifecycleCoordinator';
 import {
   createProductionImageForgeAdapter,
   type ProductionDesktopPort,
@@ -88,6 +90,28 @@ function port(overrides: Partial<ProductionDesktopPort> = {}): ProductionDesktop
   };
 }
 
+function stateWithValidatingBatch() {
+  const state = createConfiguredInitialState();
+  state.batch = {
+    id: 'local-provisional',
+    name: 'History Brief',
+    owner: 'Lakshman',
+    phase: 'validating',
+    prompts: [{
+      id: 'prompt-1', index: 1, sourceLine: 1, text: 'A documentary shipyard at dawn', seed: 700, issues: [], status: 'pending', attempts: 0,
+    }],
+    destination: '/safe/downloads',
+    startedAt: '2026-08-01T10:00:00.000Z',
+    elapsedSeconds: 0,
+    estimatedSecondsPerImage: 8.4,
+    estimatedCost: 0,
+    aspectRatio: '16:9',
+    lockMessage: null,
+    statusMessage: 'Validating',
+  };
+  return state;
+}
+
 describe('production ImageForge adapter', () => {
   it('validates setup without starting compute and returns only vault metadata', async () => {
     const native = port();
@@ -111,31 +135,64 @@ describe('production ImageForge adapter', () => {
     const adapter = createProductionImageForgeAdapter(native);
     const events: ProductionRuntimeEvent[] = [];
     adapter.runtime!.subscribe((event) => events.push(event));
-    const state = createConfiguredInitialState();
-    const batch = {
-      id: 'local-provisional',
-      name: 'History Brief',
-      owner: 'Lakshman',
-      phase: 'validating' as const,
-      prompts: [{
-        id: 'prompt-1', index: 1, sourceLine: 1, text: 'A documentary shipyard at dawn', seed: 700, issues: [], status: 'pending' as const, attempts: 0,
-      }],
-      destination: '/safe/downloads',
-      startedAt: '2026-08-01T10:00:00.000Z',
-      elapsedSeconds: 0,
-      estimatedSecondsPerImage: 8.4,
-      estimatedCost: 0,
-      aspectRatio: '16:9' as const,
-      lockMessage: null,
-      statusMessage: 'Validating',
-    };
+    const state = stateWithValidatingBatch();
     state.pod.hourlyRate = 0.5;
-    await adapter.runtime!.startBatch(batch);
+    await adapter.runtime!.startBatch(state);
 
     const event = events.find((candidate) => candidate.type === 'batch');
     expect(event).toMatchObject({ type: 'batch', batch: { id: batchId, name: 'History Brief', phase: 'complete' } });
     if (event?.type === 'batch') expect(event.assets[0].filename).toBe(`batches/${batchId}/000001.jpg`);
     expect(native.downloadArtifact).not.toHaveBeenCalled();
+  });
+
+  it('suppresses a create-time worker failure when RunPod proves the Pod was stopped remotely', async () => {
+    const native = port({
+      createBatch: vi.fn(async () => ({
+        status: 409,
+        body: { error: { code: 'worker_api_incompatible', message: 'Worker API version is incompatible.', details: null } },
+      })),
+    });
+    const adapter = createProductionImageForgeAdapter(native);
+    const events: ProductionRuntimeEvent[] = [];
+    adapter.runtime!.subscribe((event) => events.push(event));
+    const observe = vi.spyOn(GpuLifecycleCoordinator.prototype, 'observe')
+      .mockResolvedValue({ phase: 'offline' } as unknown as RunPodSnapshot);
+    try {
+      await expect(adapter.runtime!.startBatch(stateWithValidatingBatch())).resolves.toBeUndefined();
+      expect(native.createBatch).toHaveBeenCalledOnce();
+      expect(observe).toHaveBeenCalledOnce();
+      expect(native.clearWorkerSession).toHaveBeenCalledOnce();
+      expect(events.filter((event) => event.type === 'error')).toEqual([]);
+    } finally {
+      observe.mockRestore();
+    }
+  });
+
+  it('preserves a genuine create-time worker failure while RunPod remains active', async () => {
+    const native = port({
+      createBatch: vi.fn(async () => ({
+        status: 503,
+        body: { error: { code: 'worker_unavailable', message: 'Worker is warming.', details: null } },
+      })),
+    });
+    const adapter = createProductionImageForgeAdapter(native);
+    const events: ProductionRuntimeEvent[] = [];
+    adapter.runtime!.subscribe((event) => events.push(event));
+    const observe = vi.spyOn(GpuLifecycleCoordinator.prototype, 'observe')
+      .mockResolvedValue({ phase: 'ready' } as unknown as RunPodSnapshot);
+    try {
+      await expect(adapter.runtime!.startBatch(stateWithValidatingBatch())).rejects.toThrow('Worker is warming.');
+      expect(observe).toHaveBeenCalledOnce();
+      expect(native.clearWorkerSession).not.toHaveBeenCalled();
+      expect(events.filter((event) => event.type === 'error')).toEqual([{
+        type: 'error',
+        scope: 'batch',
+        message: 'Worker is warming.',
+        retryable: true,
+      }]);
+    } finally {
+      observe.mockRestore();
+    }
   });
 
   it('restores a recovered batch name from its durable named-folder receipt', async () => {
@@ -252,15 +309,42 @@ describe('production ImageForge adapter', () => {
     const adapter = createProductionImageForgeAdapter(native);
     const events: ProductionRuntimeEvent[] = [];
     adapter.runtime!.subscribe((event) => events.push(event));
+    const observe = vi.spyOn(GpuLifecycleCoordinator.prototype, 'observe')
+      .mockRejectedValue(new Error('RunPod status unavailable'));
+    try {
+      await expect(adapter.runtime!.pollBatch(createConfiguredInitialState())).rejects.toThrow('Worker is warming.');
+      expect(events).toEqual([{
+        type: 'error',
+        scope: 'batch',
+        code: 'worker_unavailable',
+        message: 'Worker is warming.',
+        retryable: true,
+      }]);
+    } finally {
+      observe.mockRestore();
+    }
+  });
 
-    await expect(adapter.runtime!.pollBatch(createConfiguredInitialState())).rejects.toThrow('Worker is warming.');
-    expect(events).toEqual([{
-      type: 'error',
-      scope: 'batch',
-      code: 'worker_unavailable',
-      message: 'Worker is warming.',
-      retryable: true,
-    }]);
+  it('suppresses a stale worker failure when RunPod authoritatively reports no Pod', async () => {
+    const native = port({
+      status: vi.fn(async () => ({
+        status: 409,
+        body: { error: { code: 'worker_api_incompatible', message: 'Worker API version is incompatible.', details: null } },
+      })),
+    });
+    const adapter = createProductionImageForgeAdapter(native);
+    const events: ProductionRuntimeEvent[] = [];
+    adapter.runtime!.subscribe((event) => events.push(event));
+    const observe = vi.spyOn(GpuLifecycleCoordinator.prototype, 'observe')
+      .mockResolvedValue({ phase: 'offline' } as unknown as RunPodSnapshot);
+    try {
+      await expect(adapter.runtime!.pollBatch(createConfiguredInitialState())).resolves.toBeUndefined();
+      expect(observe).toHaveBeenCalledOnce();
+      expect(events.filter((event) => event.type === 'error')).toEqual([]);
+      expect(native.clearWorkerSession).toHaveBeenCalledOnce();
+    } finally {
+      observe.mockRestore();
+    }
   });
 
   it('clears a restart-persistent create marker only through explicit resolution', async () => {

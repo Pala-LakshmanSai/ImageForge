@@ -163,6 +163,44 @@ describe("RunPodLifecycleController refresh and start", () => {
     assert.equal(phases.slice(selectedIndex + 1).includes("selecting"), false);
   });
 
+  it("keeps an offline screen offline during a background observation", async () => {
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()] });
+    const controller = makeController(provider);
+    const phases: string[] = [];
+    controller.subscribe((snapshot) => phases.push(snapshot.phase));
+
+    await controller.refresh();
+    phases.length = 0;
+    await controller.refresh({ suppressTransientPhase: true });
+
+    assert.equal(controller.getSnapshot().phase, "offline");
+    assert.ok(!phases.includes("selecting"));
+  });
+
+  it("rejects a failed background observation without replacing the last visible phase", async () => {
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()] });
+    const controller = makeController(provider);
+    const phases: string[] = [];
+    controller.subscribe((snapshot) => phases.push(snapshot.phase));
+    await controller.refresh();
+    phases.length = 0;
+    provider.failNext("list", new RunPodClientError({
+      code: "api_network_error",
+      message: "RunPod discovery is temporarily unavailable.",
+      operation: "list_pods",
+      retryable: true,
+    }));
+
+    await assert.rejects(
+      () => controller.refresh({ suppressTransientPhase: true }),
+      (error: unknown) => error instanceof RunPodClientError,
+    );
+
+    assert.equal(controller.getSnapshot().phase, "offline");
+    assert.equal(controller.getSnapshot().error, null);
+    assert.deepEqual(phases, []);
+  });
+
   it("does not create when all live approved inventory is unavailable", async () => {
     const provider = new FakeRunPodProvider({
       inventory: [makeOffer({ availability: "none" })],
@@ -1182,6 +1220,32 @@ describe("RunPodLifecycleController explicit Stop GPU", () => {
         error.code === "termination_confirmation_required",
     );
     assert.equal(provider.calls.terminate.length, 1);
+  });
+
+  it("preserves a typed absence when the exact Pod vanishes during DELETE", async () => {
+    const pod = makePod({ id: "vanishduringdelete1" });
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()], pods: [pod] });
+    provider.onTerminate((_podId, current) => current.setPods([]));
+    const controller = makeController(provider, { token: () => "vanish-delete-token" });
+    await controller.refresh();
+    const confirmation = controller.requestStopConfirmation({
+      intent: "stop_gpu",
+      source: "foreground_user",
+      podId: pod.id,
+    });
+
+    await assert.rejects(
+      () => controller.stopGpu({
+        intent: "confirm_stop_gpu",
+        source: "foreground_user",
+        podId: pod.id,
+        confirmationToken: confirmation.token,
+      }),
+      (error: unknown) =>
+        error instanceof RunPodClientError && error.code === "pod_not_found",
+    );
+    assert.deepEqual(provider.calls.terminate, [pod.id]);
+    assert.notEqual(controller.getSnapshot().phase, "error");
   });
 
   it("revalidates the exact managed Pod identity immediately before DELETE", async () => {

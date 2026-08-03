@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import type { ImageForgeAdapter } from './adapters/imageForgeAdapter';
 import type { ProductionRuntimeFacade } from './adapters/productionImageForgeAdapter';
+import type { ProductionRuntimeEvent } from './adapters/productionImageForgeAdapter';
 import { DEFAULT_STUDIO_PROFILE } from './adapters/imageForgeAdapter';
 import { appReducer, createConfiguredInitialState, createDemoState, createInitialState } from './domain/reducer';
 import type { CredentialMetadataMap, PodState } from './domain/types';
@@ -58,6 +59,7 @@ function productionAdapter() {
     getAuthoritativePodState: vi.fn(() => authoritativePod ?? null),
     restoreLocalLibrary: vi.fn(async () => undefined),
     refresh: vi.fn(async () => undefined),
+    observe: vi.fn(async () => undefined),
     startGpu: vi.fn(async () => undefined),
     stopGpu: vi.fn(async () => undefined),
     startBatch: vi.fn(async () => undefined),
@@ -81,6 +83,7 @@ function productionAdapter() {
     adapter,
     runtime,
     listeners,
+    emit: (event: ProductionRuntimeEvent) => listeners.forEach((listener) => listener(event)),
     setAuthoritativePod: (pod: PodState | null | undefined) => { authoritativePod = pod; },
   };
 }
@@ -105,7 +108,7 @@ describe('ImageForge shell', () => {
     expect(production.adapter.runPodLifecycle).not.toHaveBeenCalled();
   });
 
-  it('keeps read-only RunPod discovery running while the Create screen is idle', async () => {
+  it('uses a bounded, receipt-free cross-client heartbeat while Create is idle', async () => {
     vi.useFakeTimers();
     const production = productionAdapter();
     render(<App initialState={createConfiguredInitialState()} adapter={production.adapter} />);
@@ -113,10 +116,31 @@ describe('ImageForge shell', () => {
     await act(async () => { await Promise.resolve(); });
     expect(production.runtime.refresh).toHaveBeenCalledTimes(1);
     await act(async () => {
-      vi.advanceTimersByTime(2_000);
+      vi.advanceTimersByTime(29_999);
       await Promise.resolve();
     });
-    expect(production.runtime.refresh).toHaveBeenCalledTimes(2);
+    expect(production.runtime.observe).not.toHaveBeenCalled();
+    await act(async () => {
+      vi.advanceTimersByTime(1);
+      await Promise.resolve();
+    });
+    expect(production.runtime.observe).toHaveBeenCalledTimes(1);
+    expect(production.runtime.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a direct synchronized notice when the confirmed GPU was already stopped elsewhere', async () => {
+    const production = productionAdapter();
+    render(<App initialState={createConfiguredInitialState()} adapter={production.adapter} />);
+
+    act(() => production.emit({
+      type: 'notice',
+      tone: 'info',
+      title: 'GPU already stopped',
+      message: 'No second termination was sent.',
+    }));
+
+    expect(await screen.findByText('GPU already stopped')).toBeVisible();
+    expect(screen.getByText('No second termination was sent.')).toBeVisible();
   });
 
   it('waits for native RunPod credential metadata before startup refresh', async () => {
@@ -178,6 +202,59 @@ describe('ImageForge shell', () => {
     await waitFor(() => expect(screen.getByText('GPU is not ready')).toBeVisible());
     expect(production.runtime.startBatch).not.toHaveBeenCalled();
     expect(screen.getByText('Currently offline')).toBeVisible();
+  });
+
+  it('runs a strict Generate preflight even while an advisory observation is in flight', async () => {
+    vi.useFakeTimers();
+    const production = productionAdapter();
+    let releaseObservation!: () => void;
+    vi.mocked(production.runtime.observe).mockImplementation(() => new Promise<void>((resolve) => {
+      releaseObservation = resolve;
+    }));
+    let state = createConfiguredInitialState();
+    state = appReducer(state, {
+      type: 'SET_POD_PHASE',
+      phase: 'ready',
+      progress: 100,
+      detail: 'Model warm',
+      podId: 'pod-stopped-remotely',
+      gpu: 'RTX 4090',
+      vram: '24 GB',
+      hourlyRate: 0.54,
+    });
+    state = appReducer(state, { type: 'SET_PROMPT_TEXT', text: 'A sufficiently detailed editorial documentary frame at dawn' });
+    state = appReducer(state, { type: 'SET_DESTINATION', path: '/tmp/imageforge-output' });
+    production.setAuthoritativePod({
+      ...state.pod,
+      phase: 'offline',
+      phaseProgress: 0,
+      statusDetail: 'GPU is safely offline',
+      gpu: null,
+      vram: null,
+      hourlyRate: null,
+      health: 'offline',
+      podId: null,
+      matchingPodIds: [],
+    });
+
+    render(<App initialState={state} adapter={production.adapter} />);
+    await act(async () => { await Promise.resolve(); });
+    expect(production.runtime.refresh).toHaveBeenCalledOnce();
+    act(() => { vi.advanceTimersByTime(30_000); });
+    expect(production.runtime.observe).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole('button', { name: /Generate 1 images/i }));
+    await act(async () => {
+      await Promise.resolve();
+      vi.advanceTimersByTime(0);
+      await Promise.resolve();
+    });
+
+    expect(production.runtime.refresh).toHaveBeenCalledTimes(2);
+    expect(production.runtime.startBatch).not.toHaveBeenCalled();
+    await act(async () => {
+      releaseObservation();
+      await Promise.resolve();
+    });
   });
 
   it('labels a read-only inventory refresh without implying that a GPU is starting', () => {
@@ -359,6 +436,67 @@ describe('ImageForge shell', () => {
     const queue = screen.getByLabelText('450 prompts');
     expect(queue.querySelectorAll('.prompt-row').length).toBeLessThan(30);
     expect(queue).not.toHaveTextContent(/seed/i);
+  });
+
+  it('advances saved counts and live preview one image at a time from production events', () => {
+    const production = productionAdapter();
+    const state = createDemoState();
+    state.activeView = 'progress';
+    const source = state.batch!;
+    const basePrompts = source.prompts.slice(0, 3).map((prompt, index) => ({
+      ...prompt,
+      index: index + 1,
+      status: 'pending' as const,
+      filename: undefined,
+      checksum: undefined,
+    }));
+    render(<App initialState={{ ...state, batch: { ...source, prompts: basePrompts } }} adapter={production.adapter} />);
+    const listener = [...production.listeners][0];
+    const emitBatch = (statuses: readonly ('ready' | 'downloaded' | 'generating' | 'pending')[]) => {
+      const prompts = basePrompts.map((prompt, index) => ({
+        ...prompt,
+        status: statuses[index],
+        ...(statuses[index] === 'downloaded'
+          ? { filename: `batches/Live progress/${String(index + 1).padStart(6, '0')}.jpg`, checksum: 'a'.repeat(64) }
+          : {}),
+      }));
+      act(() => listener({
+        type: 'batch',
+        batch: { ...source, prompts, phase: 'running', statusMessage: 'Saving images as they finish' },
+        assets: [],
+      }));
+    };
+
+    emitBatch(['ready', 'generating', 'pending']);
+    expect(screen.getByRole('heading', { name: 'Saving image 1 of 3' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Frame 001' })).toBeVisible();
+    expect(screen.getByText('Preparing full image')).toBeVisible();
+    expect(screen.getAllByText('0 saved').length).toBeGreaterThan(0);
+
+    emitBatch(['downloaded', 'generating', 'pending']);
+    expect(screen.getByRole('heading', { name: 'Creating image 2 of 3' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Frame 002' })).toBeVisible();
+    expect(screen.getAllByText('1 saved').length).toBeGreaterThan(0);
+
+    emitBatch(['downloaded', 'downloaded', 'generating']);
+    expect(screen.getByRole('heading', { name: 'Creating image 3 of 3' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Frame 003' })).toBeVisible();
+    expect(screen.getAllByText('2 saved').length).toBeGreaterThan(0);
+
+    const firstPromptRow = screen.getAllByRole('button').find((button) =>
+      button.textContent?.includes(basePrompts[0].text),
+    );
+    expect(firstPromptRow).toBeDefined();
+    fireEvent.click(firstPromptRow!);
+    expect(screen.getByRole('heading', { name: 'Frame 001' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Creating image 3 of 3' })).toBeVisible();
+
+    emitBatch(['downloaded', 'downloaded', 'ready']);
+    expect(screen.getByRole('heading', { name: 'Saving image 3 of 3' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Frame 001' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Pause after frame' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'New brief' })).not.toBeInTheDocument();
   });
 
   it('runs the critical fake Create-to-Progress flow with no backend', async () => {

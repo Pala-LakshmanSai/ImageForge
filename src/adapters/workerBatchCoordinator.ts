@@ -411,6 +411,47 @@ export class WorkerBatchCoordinator {
 
     for (let pass = 0; pass < maxReconciliationPasses; pass += 1) {
       let reconciledThisPass = false;
+      let hasUnreconciledArtifact = false;
+
+      // Publish the freshly observed worker state before waiting on any native
+      // writes. This lets ready rows and previews advance immediately while
+      // preserving sequential, checksum-verified artifact reconciliation.
+      for (const image of manifest.images) {
+        if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
+        if (!['ready', 'downloaded'].includes(image.status)) continue;
+        if (image.sha256 === null || image.sizeBytes === null) {
+          throw new WorkerBatchError(
+            'worker_manifest_invalid',
+            'A ready image is missing its checksum or byte count.',
+            0,
+          );
+        }
+        const local = byIndex.get(image.index);
+        const localMatches = local?.sha256 === image.sha256 && local.sizeBytes === image.sizeBytes;
+        if (local !== undefined && !localMatches) {
+          throw new WorkerBatchError(
+            'local_receipt_conflict',
+            `Local frame ${image.index} does not match the worker manifest.`,
+            0,
+          );
+        }
+        if (
+          !reconciledArtifactIndexes.has(image.index) &&
+          !(localMatches && image.status === 'downloaded')
+        ) {
+          hasUnreconciledArtifact = true;
+        }
+      }
+      if (hasUnreconciledArtifact) {
+        const staged = this.#commit(
+          { type: 'manifest', manifest, receipts },
+          connectionGeneration,
+          stateGeneration,
+        );
+        if (staged.type === 'idle' || !this.#isCurrent(connectionGeneration, stateGeneration)) {
+          return { type: 'idle' };
+        }
+      }
 
       for (const image of manifest.images) {
         if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
@@ -478,6 +519,14 @@ export class WorkerBatchCoordinator {
         byIndex.set(receipt.index, receipt);
         this.#receiptCache.set(manifest.batchId, byIndex);
         receipts = [...byIndex.values()].sort((left, right) => left.index - right.index);
+        const receiptEvent = this.#commit(
+          { type: 'manifest', manifest, receipts },
+          connectionGeneration,
+          stateGeneration,
+        );
+        if (receiptEvent.type === 'idle' || !this.#isCurrent(connectionGeneration, stateGeneration)) {
+          return { type: 'idle' };
+        }
         reconciledArtifactIndexes.add(image.index);
         reconciledThisPass = true;
       }
@@ -501,6 +550,7 @@ export class WorkerBatchCoordinator {
       manifest = parseWorkerManifest(
         requireSuccess(await this.#port.getBatch(manifest.batchId), [200]),
       );
+      if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
     }
 
     throw new WorkerBatchError(

@@ -112,6 +112,20 @@ export class GpuLifecycleCoordinator {
     return controller.refresh({ expectedImageCount });
   }
 
+  /**
+   * A bounded, read-only cross-client heartbeat. It retains the current
+   * visible phase until RunPod returns, so an idle offline screen cannot
+   * flicker through `selecting` between observations.
+   */
+  async observe(
+    profileSource: string,
+    expectedImageCount = 450,
+    allowSlowEmergency = this.#allowSlowEmergency,
+  ): Promise<RunPodSnapshot> {
+    const controller = await this.#ensureController(profileSource, allowSlowEmergency);
+    return controller.refresh({ expectedImageCount, suppressTransientPhase: true });
+  }
+
   async start(
     profileSource: string,
     expectedImageCount: number,
@@ -162,22 +176,56 @@ export class GpuLifecycleCoordinator {
     return snapshot;
   }
 
-  async stop(podId: string): Promise<RunPodSnapshot> {
+  async stop(podId: string): Promise<RunPodSnapshot & { readonly alreadyStopped: boolean }> {
     const controller = this.#controller;
     if (controller === null) throw new Error('Refresh the ImageForge Pod before stopping it.');
+    // The confirmation came from the UI state, which may be stale when a
+    // different ImageForge desktop client stopped the one shared Pod. Re-read
+    // RunPod before issuing DELETE. A missing exact target is reconciliation,
+    // not a failed second termination attempt.
+    const preflight = await controller.refresh({
+      expectedImageCount: controller.getSnapshot().expectedImageCount,
+    });
+    const activeTarget = preflight.pods.some((pod) => pod.id === podId && ['provisioning', 'starting', 'running', 'unknown', 'error'].includes(pod.status));
+    if (!activeTarget) {
+      await this.#port.clearWorkerSession();
+      return Object.freeze({ ...preflight, alreadyStopped: true });
+    }
     const confirmation = controller.requestStopConfirmation({
       intent: 'stop_gpu',
       source: 'foreground_user',
       podId,
     });
-    const result = await controller.stopGpu({
-      intent: 'confirm_stop_gpu',
-      source: 'foreground_user',
-      podId,
-      confirmationToken: confirmation.token,
-    });
+    let result: RunPodSnapshot;
+    try {
+      result = (await controller.stopGpu({
+        intent: 'confirm_stop_gpu',
+        source: 'foreground_user',
+        podId,
+        confirmationToken: confirmation.token,
+      })).snapshot;
+    } catch (error) {
+      // A Pod can disappear in the small gap after the fresh preflight and
+      // before DELETE. Only the typed absence is safely reconcilable; auth,
+      // timeout, and 5xx errors must remain errors for the operator.
+      if (
+        typeof error !== 'object'
+        || error === null
+        || !('code' in error)
+        || error.code !== 'pod_not_found'
+      ) {
+        throw error;
+      }
+      const reconciled = await controller.refresh({
+        expectedImageCount: controller.getSnapshot().expectedImageCount,
+      });
+      const stillActive = reconciled.pods.some((pod) => pod.id === podId && ['provisioning', 'starting', 'running', 'unknown', 'error'].includes(pod.status));
+      if (stillActive) throw error;
+      await this.#port.clearWorkerSession();
+      return Object.freeze({ ...reconciled, alreadyStopped: true });
+    }
     await this.#port.clearWorkerSession();
-    return result.snapshot;
+    return Object.freeze({ ...result, alreadyStopped: false });
   }
 
   dispose(): void {

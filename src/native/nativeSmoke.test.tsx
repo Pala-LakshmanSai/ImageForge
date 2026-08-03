@@ -44,6 +44,6 @@ it('completes the packaged fake workflow through the named Library and Download'
 
   expect(invokeMock).toHaveBeenCalledWith('native_smoke_result', {
     passed: true,
-    detail: expect.stringContaining('named minimal Library'),
+    detail: expect.stringMatching(/incremental saves \d+->\d+.*named minimal Library/),
   });
 }, 60_000);
