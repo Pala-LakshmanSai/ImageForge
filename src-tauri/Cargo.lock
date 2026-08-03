@@ -1589,7 +1589,7 @@ dependencies = [
 
 [[package]]
 name = "imageforge-desktop-core"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "futures-util",
  "hex",

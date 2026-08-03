@@ -27,6 +27,7 @@ import type { ScreenProps } from './types';
 
 function readiness(state: ScreenProps['state']) {
   const previousBatchFinished = state.batch !== null && TERMINAL_BATCH_PHASES.includes(state.batch.phase);
+  const ownedActiveBatch = state.batch !== null && !previousBatchFinished && state.batch.canManage === true;
   return [
     {
       label: 'GPU ready',
@@ -48,12 +49,16 @@ function readiness(state: ScreenProps['state']) {
         ? 'Ready for a new batch'
         : previousBatchFinished
           ? 'Previous batch still open'
-          : 'Another batch is running',
+          : ownedActiveBatch
+            ? 'Your batch is active'
+            : 'Another batch is running',
       detail: state.batch === null
         ? 'No other batch is using the GPU'
         : previousBatchFinished
           ? 'Choose New brief before starting another batch'
-          : `${state.batch.owner} · ${state.batch.phase.replace('_', ' ')}`,
+          : ownedActiveBatch
+            ? `Your batch · ${state.batch.phase.replace('_', ' ')}`
+            : `${state.batch.owner} · ${state.batch.phase.replace('_', ' ')}`,
       ready: state.batch === null,
     },
   ];
@@ -90,6 +95,7 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
   const errors = state.draft.issues.filter((issue) => issue.level === 'error');
   const warnings = state.draft.issues.filter((issue) => issue.level === 'warning');
   const activeBatch = state.batch && !TERMINAL_BATCH_PHASES.includes(state.batch.phase);
+  const ownedActiveBatch = activeBatch && state.batch?.canManage === true;
   const destinationLocked = state.batch !== null && !['complete', 'cancelled'].includes(state.batch.phase);
   const terminalBatch = state.batch && TERMINAL_BATCH_PHASES.includes(state.batch.phase);
   const checklist = readiness(state);
@@ -197,8 +203,10 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
         <aside className="lock-banner" role="status">
           <span><LockKeyhole size={20} /></span>
           <div>
-            <strong>Another batch is already running</strong>
-            <p>{state.batch?.owner} is {state.batch?.phase.replace('_', ' ')} “{state.batch?.name}”. ImageForge runs one batch at a time and does not queue another.</p>
+            <strong>{ownedActiveBatch ? 'Your batch is active' : 'Another batch is already running'}</strong>
+            <p>{ownedActiveBatch
+              ? `Your batch is ${state.batch?.phase.replace('_', ' ')} “${state.batch?.name}”. Open Progress to monitor it.`
+              : `${state.batch?.owner} is ${state.batch?.phase.replace('_', ' ')} “${state.batch?.name}”. ImageForge runs one batch at a time and does not queue another.`}</p>
           </div>
           <Button compact onClick={() => dispatch({ type: 'NAVIGATE', view: 'progress' })}>View progress</Button>
         </aside>

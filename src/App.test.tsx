@@ -163,6 +163,27 @@ describe('ImageForge shell', () => {
     expect(screen.getByRole('heading', { name: 'Finish these items' })).toBeVisible();
   });
 
+  it('distinguishes an owned active batch from a remote batch lock', () => {
+    const owned = createDemoState();
+    owned.activeView = 'create';
+    owned.batch = { ...owned.batch!, phase: 'validating', canManage: true };
+    const ownedProduction = productionAdapter();
+    const { unmount } = render(<App initialState={owned} adapter={ownedProduction.adapter} />);
+
+    expect(screen.getAllByText('Your batch is active')).toHaveLength(2);
+    expect(screen.queryByText('Another batch is already running')).not.toBeInTheDocument();
+    expect(screen.getByText('Your batch · validating')).toBeVisible();
+
+    unmount();
+    const remote = appReducer(createConfiguredInitialState(), { type: 'PREVIEW_SCENARIO', scenario: 'locked' });
+    remote.activeView = 'create';
+    render(<App initialState={remote} adapter={immediateAdapter()} />);
+
+    expect(screen.getAllByText('Another batch is already running')).toHaveLength(1);
+    expect(screen.getByText('Sujal · locked')).toBeVisible();
+    expect(screen.queryByText('Your batch is active')).not.toBeInTheDocument();
+  });
+
   it('blocks duplicate starts and exposes explicit ambiguous-create recovery', async () => {
     const user = userEvent.setup();
     const production = productionAdapter();

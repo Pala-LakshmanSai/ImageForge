@@ -196,6 +196,7 @@ function buildDemoBatch(phase: BatchState['phase'] = 'running'): BatchState {
     id: 'batch-20260801-01',
     name: 'Atlas of Quiet Work',
     owner: 'Lakshman',
+    canManage: true,
     phase,
     prompts,
     destination: defaultDestinationForPlatform(),
@@ -484,6 +485,7 @@ function scenarioState(state: AppState, scenario: OperationalScenario): AppState
     batch = {
       ...baseBatch,
       owner: 'Sujal',
+      canManage: false,
       lockMessage: 'Sujal is generating 9 of 24 images. ImageForge never creates a hidden queue.',
       statusMessage: 'Locked by Sujal · 9 of 24 complete',
     };

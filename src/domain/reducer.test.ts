@@ -249,7 +249,7 @@ describe('appReducer', () => {
   it('authors other-user lock, duplicate Pod, recovery, failure, and complete scenarios', () => {
     let state = createInitialState();
     state = appReducer(state, { type: 'PREVIEW_SCENARIO', scenario: 'locked' });
-    expect(state.batch).toMatchObject({ phase: 'locked', owner: 'Sujal' });
+    expect(state.batch).toMatchObject({ phase: 'locked', owner: 'Sujal', canManage: false });
     const locked = state;
     expect(appReducer(state, { type: 'TOGGLE_BATCH_PAUSE' }).batch).toEqual(locked.batch);
 
