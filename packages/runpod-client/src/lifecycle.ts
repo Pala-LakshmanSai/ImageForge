@@ -229,6 +229,11 @@ export class RunPodLifecycleController {
   readonly #listeners = new Set<SnapshotListener>();
   readonly #confirmations = new Map<string, PendingConfirmation>();
   readonly #knownCreatedPods = new Map<string, ManagedPod>();
+  // A create response can arrive before list discovery exposes the Pod. Keep
+  // that exact result so an immediate second Start cannot create a duplicate,
+  // but distinguish it from a Pod that was observed live and later terminated
+  // from another client.
+  readonly #knownCreatedPodObserved = new Set<string>();
   #snapshot: RunPodSnapshot;
   #startPromise: Promise<StartGpuResult> | null = null;
   #unresolvedStartRequestId: string | null = null;
@@ -832,6 +837,7 @@ export class RunPodLifecycleController {
       }
     }
     this.#knownCreatedPods.delete(intent.podId);
+    this.#knownCreatedPodObserved.delete(intent.podId);
     const remainingPods = this.#snapshot.pods.filter((pod) => pod.id !== intent.podId);
     const snapshot = this.#snapshotForViews(
       this.#snapshot.inventory,
@@ -1046,6 +1052,9 @@ export class RunPodLifecycleController {
       );
       const enriched = await this.#enrichPods(pods, signal);
       const discoveredCreated = enriched.views.find((pod) => pod.id === created.id);
+      if (discoveredCreated !== undefined) {
+        this.#knownCreatedPodObserved.add(created.id);
+      }
       const createdView = this.#podView(created, null, null);
       const discoveryWarnings = discoveredCreated === undefined
         ? [
@@ -1157,6 +1166,12 @@ export class RunPodLifecycleController {
             signal,
             "worker_health",
           );
+          if (this.#knownCreatedPods.has(pod.id)) {
+            // A healthy worker reached through the exact create response is
+            // authoritative observation even when RunPod's list endpoint is
+            // still eventually consistent and omits the Pod.
+            this.#knownCreatedPodObserved.add(pod.id);
+          }
           return this.#podView(pod, health, null);
         } catch (error) {
           const healthErrorValue = asRunPodClientError(error, {
@@ -1214,12 +1229,16 @@ export class RunPodLifecycleController {
   ): Promise<{ readonly pods: readonly ManagedPod[]; readonly warnings: readonly SnapshotWarning[] }> {
     const merged = new Map(discovered.map((pod) => [pod.id, pod] as const));
     for (const pod of discovered) {
-      if (this.#knownCreatedPods.has(pod.id)) this.#knownCreatedPods.set(pod.id, pod);
+      if (this.#knownCreatedPods.has(pod.id)) {
+        this.#knownCreatedPods.set(pod.id, pod);
+        this.#knownCreatedPodObserved.add(pod.id);
+      }
     }
     const warnings: SnapshotWarning[] = [];
     for (const [podId, retained] of this.#knownCreatedPods) {
       if (merged.has(podId)) continue;
       let verified: ManagedPod | null = null;
+      let revalidationFailed = false;
       try {
         verified = await awaitWithAbort(
           this.#provider.getPod(podId, this.#discoveryCriteria(), signal),
@@ -1234,10 +1253,44 @@ export class RunPodLifecycleController {
           retryable: true,
         });
         if (knownError.code === "operation_aborted") throw knownError;
+        revalidationFailed = true;
       }
-      const surfaced = verified ?? retained;
-      if (verified !== null) this.#knownCreatedPods.set(podId, verified);
-      merged.set(podId, surfaced);
+      if (verified === null) {
+        // A successful list followed by an exact 404 is authoritative: the
+        // Pod was terminated elsewhere (for example, from another user's
+        // ImageForge client). Do not keep projecting the stale retained Pod
+        // or the desktop will continue to advertise GPU-ready and permit a
+        // batch against a dead worker. An omitted create result remains
+        // retained until list discovery observes it; this preserves the
+        // existing duplicate-start safety during RunPod eventual consistency.
+        // Once observed, a 404 is authoritative. Revalidation failures also
+        // retain the Pod for Stop safety during transient outages.
+        if (!revalidationFailed) {
+          const wasObserved = this.#knownCreatedPodObserved.has(podId);
+          if (!wasObserved) {
+            merged.set(podId, retained);
+            warnings.push(Object.freeze({
+              code: "post_create_discovery_failed",
+              message: "A previously created Pod is not present in list discovery and remains bound by its exact ID.",
+              podIds: Object.freeze([podId]),
+            }));
+            continue;
+          }
+          this.#knownCreatedPods.delete(podId);
+          this.#knownCreatedPodObserved.delete(podId);
+          continue;
+        }
+        merged.set(podId, retained);
+        warnings.push(Object.freeze({
+          code: "post_create_discovery_failed",
+          message: "A previously created Pod is not present in list discovery and remains bound by its exact ID.",
+          podIds: Object.freeze([podId]),
+        }));
+        continue;
+      }
+      this.#knownCreatedPods.set(podId, verified);
+      this.#knownCreatedPodObserved.add(podId);
+      merged.set(podId, verified);
       warnings.push(Object.freeze({
         code: "post_create_discovery_failed",
         message: "A previously created Pod is not present in list discovery and remains bound by its exact ID.",

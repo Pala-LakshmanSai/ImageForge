@@ -937,6 +937,46 @@ describe("RunPodLifecycleController refresh and start", () => {
     assert.equal(newSnapshot.phase, "loading");
   });
 
+  it("drops a known Pod after another client terminates it", async () => {
+    const pod = makePod({ id: "externallystopped1", status: "running" });
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()], pods: [pod] });
+    const health = new FakeWorkerHealthProbe();
+    health.setHealth(pod.proxyUrl, { schemaVersion: 1, phase: "ready", phaseProgress: 1 });
+    const controller = makeController(provider, { health });
+
+    const connected = await controller.refresh();
+    assert.equal(connected.selectedPodId, pod.id);
+    assert.equal(connected.phase, "ready");
+
+    // Simulate Sujal's client terminating this Pod. The next authoritative
+    // list is empty and the exact-ID GET returns 404 from RunPod.
+    provider.setPods([]);
+    const synchronized = await controller.refresh();
+    assert.equal(synchronized.selectedPodId, null);
+    assert.equal(synchronized.phase, "offline");
+    assert.equal(synchronized.pods.length, 0);
+  });
+
+  it("uses a healthy exact create proxy as observation when list discovery lags", async () => {
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()] });
+    const omitted = makePod({ id: "healthobserved1", status: "running" });
+    provider.onCreate(() => omitted);
+    const health = new FakeWorkerHealthProbe();
+    health.setHealth(omitted.proxyUrl, { schemaVersion: 1, phase: "ready", phaseProgress: 1 });
+    const controller = makeController(provider, { health });
+
+    await controller.startGpu({ intent: "start_gpu", source: "foreground_user", requestId: "lagginglist1" });
+    const healthy = await controller.refresh();
+    assert.equal(healthy.selectedPodId, omitted.id);
+    assert.equal(healthy.phase, "ready");
+
+    // The exact worker was observed healthy even though list discovery still
+    // omits it; a later cross-client 404 must now clear the stale selection.
+    const synchronized = await controller.refresh();
+    assert.equal(synchronized.selectedPodId, null);
+    assert.equal(synchronized.phase, "offline");
+  });
+
   it("surfaces every worker boot phase on the freshly derived proxy", async () => {
     const pod = makePod({ id: "phasepod1", status: "provisioning" });
     const provider = new FakeRunPodProvider({ inventory: [makeOffer()], pods: [pod] });

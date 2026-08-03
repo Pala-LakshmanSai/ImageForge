@@ -6,7 +6,7 @@ import type { ImageForgeAdapter } from './adapters/imageForgeAdapter';
 import type { ProductionRuntimeFacade } from './adapters/productionImageForgeAdapter';
 import { DEFAULT_STUDIO_PROFILE } from './adapters/imageForgeAdapter';
 import { appReducer, createConfiguredInitialState, createDemoState, createInitialState } from './domain/reducer';
-import type { CredentialMetadataMap } from './domain/types';
+import type { CredentialMetadataMap, PodState } from './domain/types';
 
 function immediateAdapter(configured = true): ImageForgeAdapter {
   let credentials: CredentialMetadataMap = {
@@ -49,11 +49,13 @@ function immediateAdapter(configured = true): ImageForgeAdapter {
 
 function productionAdapter() {
   const listeners = new Set<Parameters<ProductionRuntimeFacade['subscribe']>[0]>();
+  let authoritativePod: PodState | null | undefined;
   const runtime: ProductionRuntimeFacade = {
     subscribe: vi.fn((listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
     }),
+    getAuthoritativePodState: vi.fn(() => authoritativePod ?? null),
     restoreLocalLibrary: vi.fn(async () => undefined),
     refresh: vi.fn(async () => undefined),
     startGpu: vi.fn(async () => undefined),
@@ -75,7 +77,12 @@ function productionAdapter() {
     validateBatch: vi.fn(() => () => undefined),
     runBatchClock: vi.fn(() => () => undefined),
   };
-  return { adapter, runtime, listeners };
+  return {
+    adapter,
+    runtime,
+    listeners,
+    setAuthoritativePod: (pod: PodState | null | undefined) => { authoritativePod = pod; },
+  };
 }
 
 afterEach(() => {
@@ -98,6 +105,20 @@ describe('ImageForge shell', () => {
     expect(production.adapter.runPodLifecycle).not.toHaveBeenCalled();
   });
 
+  it('keeps read-only RunPod discovery running while the Create screen is idle', async () => {
+    vi.useFakeTimers();
+    const production = productionAdapter();
+    render(<App initialState={createConfiguredInitialState()} adapter={production.adapter} />);
+
+    await act(async () => { await Promise.resolve(); });
+    expect(production.runtime.refresh).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      vi.advanceTimersByTime(2_000);
+      await Promise.resolve();
+    });
+    expect(production.runtime.refresh).toHaveBeenCalledTimes(2);
+  });
+
   it('waits for native RunPod credential metadata before startup refresh', async () => {
     let resolveMetadata!: (credentials: CredentialMetadataMap) => void;
     const metadata = new Promise<CredentialMetadataMap>((resolve) => { resolveMetadata = resolve; });
@@ -118,6 +139,45 @@ describe('ImageForge shell', () => {
       workerToken: { configured: false, suffix: null, provider: 'macOS Keychain' },
     });
     await waitFor(() => expect(production.runtime.refresh).toHaveBeenCalledOnce());
+  });
+
+  it('revalidates the shared GPU before production generation and blocks a stale ready card', async () => {
+    const user = userEvent.setup();
+    const production = productionAdapter();
+    let state = createConfiguredInitialState();
+    state = appReducer(state, {
+      type: 'SET_POD_PHASE',
+      phase: 'ready',
+      progress: 100,
+      detail: 'Model warm',
+      podId: 'pod-stopped-by-sujal',
+      gpu: 'RTX 4090',
+      vram: '24 GB',
+      hourlyRate: 0.54,
+    });
+    state = appReducer(state, { type: 'SET_PROMPT_TEXT', text: 'A sufficiently detailed editorial documentary frame at dawn' });
+    state = appReducer(state, { type: 'SET_DESTINATION', path: '/tmp/imageforge-output' });
+    production.setAuthoritativePod({
+      ...state.pod,
+      phase: 'offline',
+      phaseProgress: 0,
+      statusDetail: 'GPU is safely offline',
+      gpu: null,
+      vram: null,
+      hourlyRate: null,
+      health: 'offline',
+      podId: null,
+      matchingPodIds: [],
+    });
+
+    render(<App initialState={state} adapter={production.adapter} />);
+    const generate = screen.getByRole('button', { name: /Generate 1 images/i });
+    expect(generate).toBeEnabled();
+    await user.click(generate);
+
+    await waitFor(() => expect(screen.getByText('GPU is not ready')).toBeVisible());
+    expect(production.runtime.startBatch).not.toHaveBeenCalled();
+    expect(screen.getByText('Currently offline')).toBeVisible();
   });
 
   it('labels a read-only inventory refresh without implying that a GPU is starting', () => {

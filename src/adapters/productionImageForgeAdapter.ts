@@ -112,6 +112,8 @@ function projectRecoveredLibrary(
 
 export interface ProductionRuntimeFacade {
   subscribe(listener: (event: ProductionRuntimeEvent) => void): () => void;
+  /** Returns the last Pod state observed by the authoritative RunPod refresh. */
+  getAuthoritativePodState?(): PodState | null;
   restoreLocalLibrary(state: AppState): Promise<void>;
   refresh(state: AppState): Promise<void>;
   startGpu(state: AppState): Promise<void>;
@@ -162,6 +164,10 @@ class ProductionRuntime implements ProductionRuntimeFacade {
     return () => this.#listeners.delete(listener);
   }
 
+  getAuthoritativePodState(): PodState | null {
+    return this.#pod;
+  }
+
   async restoreLocalLibrary(state: AppState): Promise<void> {
     if (this.#recoveredBatchId === null || this.#localLibraryRestored) return;
     if (this.#localLibraryRestore !== null) return this.#localLibraryRestore;
@@ -193,6 +199,12 @@ class ProductionRuntime implements ProductionRuntimeFacade {
       throw error;
     }
     await this.#reconcileCreateMarker(snapshot);
+    if (snapshot.phase === 'offline') {
+      // A successful authoritative Pod discovery can prove that another
+      // client stopped compute. Drop the native proxy/session binding too;
+      // otherwise a later worker poll could keep using the old Pod identity.
+      await this.#port.clearWorkerSession();
+    }
     if (snapshot.phase === 'ready') {
       if (!await this.#ensureRecoveredReceipts(state)) return;
       // A worker outage must not obscure the still-live billed Pod. The worker

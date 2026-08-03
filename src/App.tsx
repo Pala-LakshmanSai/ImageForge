@@ -10,7 +10,7 @@ import { BottomNav, TopBar } from './components/AppChrome';
 import { DialogPortal } from './components/DialogPortal';
 import { SetupAssistant } from './components/SetupAssistant';
 import { Button, IconButton } from './components/primitives';
-import { createInitialState, appReducer } from './domain/reducer';
+import { canStartBatch, createInitialState, appReducer } from './domain/reducer';
 import type { AppAction, AppState } from './domain/types';
 import { CreateScreen } from './screens/CreateScreen';
 import { LibraryScreen } from './screens/LibraryScreen';
@@ -37,6 +37,22 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
     adapter.mode === 'production' ? readPersistedBatchRecovery(window.localStorage) : null,
   );
   const clearRecoveryPointerRef = useRef(false);
+  const refreshInFlightRef = useRef<Promise<boolean> | null>(null);
+  const batchStartInFlightRef = useRef(false);
+
+  const refreshProductionStatus = useCallback((): Promise<boolean> => {
+    if (!runtime || !stateRef.current.setup.completed || !stateRef.current.setup.credentials.runpodApiKey.configured) {
+      return Promise.resolve(false);
+    }
+    if (refreshInFlightRef.current !== null) return refreshInFlightRef.current;
+    const operation = runtime.refresh(stateRef.current)
+      .then(() => true, () => false)
+      .finally(() => {
+        if (refreshInFlightRef.current === operation) refreshInFlightRef.current = null;
+      });
+    refreshInFlightRef.current = operation;
+    return operation;
+  }, [runtime]);
 
   useEffect(() => {
     if (!runtime) return;
@@ -71,8 +87,20 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
     // not a gate because Pod discovery must still expose billed compute and
     // its explicit Stop control when that separate credential needs repair.
     if (!runtime || !state.setup.completed || !state.setup.credentials.runpodApiKey.configured) return;
-    void runtime.refresh(stateRef.current).catch(() => undefined);
-  }, [runtime, state.setup.completed, state.setup.credentials.runpodApiKey.configured]);
+    let active = true;
+    const sync = () => {
+      if (active) void refreshProductionStatus();
+    };
+    sync();
+    // RunPod lifecycle polling is read-only. Keep every open macOS and
+    // Windows client aligned when another editor starts or explicitly stops
+    // the shared disposable Pod, even while no batch is running.
+    const timer = window.setInterval(sync, 2_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [refreshProductionStatus, runtime, state.setup.completed, state.setup.credentials.runpodApiKey.configured]);
 
   useEffect(() => {
     let active = true;
@@ -214,6 +242,49 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
       void runtime.controlBatch('cancel', current).catch(() => undefined);
       return;
     }
+    if (action.type === 'START_BATCH') {
+      // A remote Stop GPU can land between the last heartbeat and this click.
+      // Re-read RunPod before allowing the reducer to create a validating
+      // batch, so a stale ready card cannot submit to a dead worker.
+      if (batchStartInFlightRef.current) return;
+      batchStartInFlightRef.current = true;
+      void refreshProductionStatus()
+        .then(async (refreshed) => {
+          if (!refreshed) {
+            dispatch({
+              type: 'SHOW_TOAST',
+              tone: 'warning',
+              title: 'GPU status unavailable',
+              message: 'ImageForge could not verify the shared GPU. Generation is blocked until RunPod status is reachable.',
+            });
+            return;
+          }
+          const authoritativePod = runtime.getAuthoritativePodState?.();
+          if (authoritativePod !== undefined && authoritativePod !== null) {
+            dispatch({ type: 'SYNC_RUNTIME_POD', pod: authoritativePod });
+          }
+          // Let the authoritative Pod event settle before reducer validation.
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+          const latest = stateRef.current;
+          const candidate = authoritativePod === undefined || authoritativePod === null
+            ? latest
+            : { ...latest, pod: authoritativePod };
+          if (!canStartBatch(candidate)) {
+            dispatch({
+              type: 'SHOW_TOAST',
+              tone: 'warning',
+              title: 'GPU is not ready',
+              message: 'The shared GPU was stopped or changed on another ImageForge client. Wait for status to synchronize before generating.',
+            });
+            return;
+          }
+          dispatch(action);
+        })
+        .finally(() => {
+          batchStartInFlightRef.current = false;
+        });
+      return;
+    }
     if (action.type === 'CONFIRM_RESOLVE_CREATE') {
       dispatch(action);
       void runtime.resolveAmbiguousStart().catch((error: unknown) => {
@@ -224,7 +295,7 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
     }
     if (action.type === 'REFRESH_STATUS') {
       dispatch(action);
-      void runtime.refresh(current).catch(() => undefined);
+      void refreshProductionStatus();
       return;
     }
     dispatch(action);
