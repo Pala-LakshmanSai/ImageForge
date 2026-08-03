@@ -773,13 +773,13 @@ fn verify_jpeg_bytes(
             "The local JPEG byte count did not match its receipt.",
         ));
     }
-    if hex::encode(Sha256::digest(&bytes)) != expected_sha256 {
+    if hex::encode(Sha256::digest(bytes)) != expected_sha256 {
         return Err(NativeError::new(
             "download_checksum_mismatch",
             "The local JPEG checksum did not match its receipt.",
         ));
     }
-    let Some((width, height)) = jpeg_dimensions(&bytes) else {
+    let Some((width, height)) = jpeg_dimensions(bytes) else {
         return Err(NativeError::new(
             "download_jpeg_invalid",
             "The downloaded file is not a structurally valid JPEG.",

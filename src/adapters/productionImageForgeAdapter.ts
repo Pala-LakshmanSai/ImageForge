@@ -1,4 +1,4 @@
-import type { RunPodSnapshot } from '@imageforge/runpod-client';
+import type { RunPodSnapshot, StopGuardDecision } from '@imageforge/runpod-client';
 import type {
   AppState,
   BatchState,
@@ -7,6 +7,7 @@ import type {
   CredentialMetadataMap,
   LibraryAsset,
   PodState,
+  StudioSyncState,
 } from '../domain/types';
 import type { NativeDestinationMetadata } from '../native/tauriBridge';
 import {
@@ -22,9 +23,11 @@ import {
 } from './imageForgeAdapter';
 import {
   WorkerBatchCoordinator,
+  isWorkerLocalSyncError,
   type LocalDownloadReceipt,
   type WorkerBatchEvent,
   type WorkerBatchPort,
+  type WorkerHttpResult,
 } from './workerBatchCoordinator';
 import {
   projectBusyBatch,
@@ -32,6 +35,13 @@ import {
   projectPodSnapshot,
   type BatchPresentationContext,
 } from './runtimeProjection';
+import {
+  StudioContractError,
+  projectStudioState,
+  requireStudioState,
+  validateFinalizationGrant,
+  type StudioState,
+} from './studioContracts';
 
 export interface ProductionDesktopPort extends GpuLifecycleNativePort, WorkerBatchPort {
   chooseDestination(defaultPath: string): Promise<NativeDestinationMetadata | null>;
@@ -51,6 +61,12 @@ export interface ProductionDesktopPort extends GpuLifecycleNativePort, WorkerBat
   writeManifest(batchId: string, content: string): Promise<string>;
   fetchPreview(batchId: string, index: number): Promise<ValidatedImageResponse>;
   downloadAsset(request: DownloadAssetRequest): Promise<string | null>;
+  studioHeartbeat(sessionId: string, availability: 'foreground' | 'background'): Promise<WorkerHttpResult>;
+  studioStatus(sessionId: string): Promise<WorkerHttpResult>;
+  studioCreateStopRequest(requestId: string, sessionId: string, podId: string, gpuDisplayName: string): Promise<WorkerHttpResult>;
+  studioRespondToStopRequest(requestId: string, sessionId: string, decision: 'approve' | 'deny'): Promise<WorkerHttpResult>;
+  studioFinalizeStopRequest(requestId: string, sessionId: string, podId: string, finalizationId: string): Promise<WorkerHttpResult>;
+  studioCancelStopRequest(requestId: string, sessionId: string, podId: string, finalizationId: string | null): Promise<WorkerHttpResult>;
 }
 
 export type ProductionRuntimeEvent =
@@ -60,6 +76,12 @@ export type ProductionRuntimeEvent =
   | { type: 'busy'; batch: BatchState }
   | { type: 'idle' }
   | { type: 'create-recovery'; marker: PodState['createRecovery'] }
+  | { type: 'studio'; studio: StudioSyncState }
+  | { type: 'stop-blocked'; owner: string; completed: number; total: number; message: string }
+  | { type: 'stop-guard-active'; podId: string | null; message: string }
+  | { type: 'stop-failed'; message: string; retryable: boolean }
+  | { type: 'stop-complete'; alreadyStopped: boolean }
+  | { type: 'local-error'; batchId: string; code: string; message: string; retryable: boolean }
   | { type: 'notice'; tone: 'info' | 'success' | 'warning'; title: string; message: string }
   | { type: 'error'; scope: 'pod' | 'batch'; code?: string; message: string; retryable: boolean };
 
@@ -118,8 +140,11 @@ export interface ProductionRuntimeFacade {
   restoreLocalLibrary(state: AppState): Promise<void>;
   refresh(state: AppState): Promise<void>;
   observe(state: AppState): Promise<void>;
+  heartbeat(state: AppState, availability: 'foreground' | 'background'): Promise<void>;
   startGpu(state: AppState): Promise<void>;
-  stopGpu(state: AppState): Promise<void>;
+  requestGpuStop(state: AppState): Promise<void>;
+  respondToGpuStop(requestId: string, decision: 'approve' | 'deny'): Promise<void>;
+  cancelGpuStop(requestId: string): Promise<void>;
   startBatch(state: AppState): Promise<void>;
   pollBatch(state: AppState): Promise<void>;
   beginNewBatch(): void;
@@ -137,6 +162,7 @@ class ProductionRuntime implements ProductionRuntimeFacade {
   readonly #worker: WorkerBatchCoordinator;
   readonly #listeners = new Set<(event: ProductionRuntimeEvent) => void>();
   #pod: PodState | null = null;
+  #podAuthorityEstablished = false;
   #presentation: BatchPresentationContext | null = null;
   #unsubscribeGpu: () => void;
   #unsubscribeWorker: () => void;
@@ -148,6 +174,25 @@ class ProductionRuntime implements ProductionRuntimeFacade {
   #pollBatchInFlight: Promise<void> | null = null;
   #deferWorkerError = false;
   #deferredWorkerError: Extract<WorkerBatchEvent, { type: 'error' }> | null = null;
+  #recoveryDestination: string | null = null;
+  readonly #sessionId: string;
+  #studio: StudioState | null = null;
+  #studioSequence = 0;
+  #acceptedStudioSequence = 0;
+  #heartbeatInFlight: Promise<void> | null = null;
+  #pendingHeartbeatAvailability: 'foreground' | 'background' | null = null;
+  #workerStopGuardActive = false;
+  #stopFinalization: Promise<void> | null = null;
+  #pendingFinalization: {
+    serverInstanceId: string;
+    approvedCoordinationRevision: number;
+    requestId: string;
+    podId: string;
+    finalizationId: string;
+  } | null = null;
+  #stopGuardAttempted = false;
+  #stopGuardConsumed = false;
+  #stopGuardDefinitivelyInvalid = false;
 
   constructor(
     port: ProductionDesktopPort,
@@ -155,10 +200,19 @@ class ProductionRuntime implements ProductionRuntimeFacade {
     recoveredBatchName: string | null = null,
   ) {
     this.#port = port;
+    this.#sessionId = crypto.randomUUID();
     this.#recoveredBatchId = recoveredBatchId;
     this.#recoveredBatchName = recoveredBatchName;
-    this.#gpu = new GpuLifecycleCoordinator(port);
-    this.#worker = new WorkerBatchCoordinator(port, recoveredBatchId);
+    this.#gpu = new GpuLifecycleCoordinator(
+      port,
+      undefined,
+      ({ podId }) => this.#consumeStopGuard(podId),
+    );
+    this.#worker = new WorkerBatchCoordinator(
+      port,
+      recoveredBatchId,
+      (batchId) => this.#prepareRecoveredLocalBatch(batchId),
+    );
     if (recoveredBatchName !== null) this.#worker.setBatchName(recoveredBatchName);
     this.#unsubscribeGpu = this.#gpu.subscribe((snapshot) => this.#onPodSnapshot(snapshot));
     this.#unsubscribeWorker = this.#worker.subscribe((event) => this.#onWorkerEvent(event));
@@ -177,10 +231,27 @@ class ProductionRuntime implements ProductionRuntimeFacade {
     if (this.#recoveredBatchId === null || this.#localLibraryRestored) return;
     if (this.#localLibraryRestore !== null) return this.#localLibraryRestore;
     this.#captureState(state);
+    // This is a read-only device-local Library projection and remains
+    // available offline. Worker acknowledgement/reconciliation is separate
+    // and stays behind status-confirmed ownership in #prepareRecoveredLocalBatch.
     const operation = this.#restoreLocalLibrary(state);
     this.#localLibraryRestore = operation;
     try {
       await operation;
+    } catch (error) {
+      const safe = runtimeError(
+        error,
+        'local_library_unavailable',
+        'The previous local ImageForge library could not be restored yet.',
+      );
+      this.#emit({
+        type: 'local-error',
+        batchId: this.#recoveredBatchId,
+        code: safe.code ?? 'local_library_unavailable',
+        message: safe.message,
+        retryable: safe.retryable,
+      });
+      throw error;
     } finally {
       if (this.#localLibraryRestore === operation) this.#localLibraryRestore = null;
     }
@@ -231,6 +302,38 @@ class ProductionRuntime implements ProductionRuntimeFacade {
     if (snapshot.phase === 'offline') await this.#port.clearWorkerSession();
   }
 
+  heartbeat(state: AppState, availability: 'foreground' | 'background'): Promise<void> {
+    this.#captureState(state);
+    // Coalesce transport work without dropping the newest visibility state. A
+    // foreground event arriving behind an in-flight background heartbeat (or
+    // vice versa) is flushed immediately after the current request settles.
+    this.#pendingHeartbeatAvailability = availability;
+    if (this.#heartbeatInFlight !== null) return this.#heartbeatInFlight;
+    const operation = this.#flushPendingHeartbeats().finally(() => {
+      if (this.#heartbeatInFlight === operation) this.#heartbeatInFlight = null;
+    });
+    this.#heartbeatInFlight = operation;
+    return operation;
+  }
+
+  async #flushPendingHeartbeats(): Promise<void> {
+    while (this.#pendingHeartbeatAvailability !== null) {
+      const availability = this.#pendingHeartbeatAvailability;
+      this.#pendingHeartbeatAvailability = null;
+      await this.#heartbeat(availability);
+    }
+  }
+
+  async #heartbeat(availability: 'foreground' | 'background'): Promise<void> {
+    const sequence = this.#nextStudioSequence();
+    const studio = requireStudioState(
+      await this.#port.studioHeartbeat(this.#sessionId, availability),
+      [200],
+    );
+    if (!this.#acceptStudio(studio, sequence)) return;
+    await this.#maybeFinalizeApprovedStop();
+  }
+
   async startGpu(state: AppState): Promise<void> {
     this.#captureState(state);
     try {
@@ -252,30 +355,107 @@ class ProductionRuntime implements ProductionRuntimeFacade {
       this.#emitError('pod', error, 'ImageForge could not start a GPU safely.');
       throw error;
     }
-    if (!await this.#ensureRecoveredReceipts(state)) return;
-    await this.#worker.poll();
+    try {
+      await this.#worker.poll();
+    } catch (error) {
+      if (!isWorkerLocalSyncError(error)) throw error;
+    }
   }
 
-  async stopGpu(state: AppState): Promise<void> {
+  async requestGpuStop(state: AppState): Promise<void> {
     this.#captureState(state);
-    const expectedPodId = state.pod.stopTargetPodId ?? state.pod.podId;
+    const expectedPodId = state.pod.podId;
     if (expectedPodId === null) throw new Error('No verified ImageForge Pod is selected.');
-    if (state.pod.podId !== expectedPodId) {
-      throw new Error('The confirmed Pod changed before termination; refresh RunPod status and confirm again.');
-    }
+    const gpuDisplayName = state.pod.gpu ?? 'ImageForge GPU';
     try {
-      const result = await this.#gpu.stop(expectedPodId);
-      if (result.alreadyStopped) {
-        this.#emit({
-          type: 'notice',
-          tone: 'info',
-          title: 'GPU already stopped',
-          message: 'The confirmed ImageForge GPU was already stopped or is no longer an active ImageForge target on another client. Status is now synchronized; no second termination was sent.',
-        });
-      }
+      // A heartbeat establishes this ephemeral session and obtains the latest
+      // worker epoch before the explicit stop request is created.
+      await this.heartbeat(state, 'foreground');
+      const requestId = crypto.randomUUID();
+      const sequence = this.#nextStudioSequence();
+      const studio = requireStudioState(
+        await this.#port.studioCreateStopRequest(
+          requestId,
+          this.#sessionId,
+          expectedPodId,
+          gpuDisplayName,
+        ),
+        [201],
+      );
+      if (this.#acceptStudio(studio, sequence)) await this.#maybeFinalizeApprovedStop();
     } catch (error) {
-      this.#emitError('pod', error, 'ImageForge could not confirm GPU termination.');
-      throw error;
+      if (error instanceof StudioContractError && error.code === 'stop_blocked_by_active_batch') {
+        const owner = safeDetailString(error.details?.owner) ?? 'Another editor';
+        const completed = safeDetailInteger(error.details?.completed);
+        const total = safeDetailInteger(error.details?.total);
+        this.#emit({
+          type: 'stop-blocked',
+          owner,
+          completed,
+          total,
+          message: error.message,
+        });
+        return;
+      }
+      if (error instanceof StudioContractError && error.code === 'stop_request_in_progress') {
+        try {
+          const sequence = this.#nextStudioSequence();
+          const studio = requireStudioState(await this.#port.studioStatus(this.#sessionId), [200]);
+          if (this.#acceptStudio(studio, sequence)) await this.#maybeFinalizeApprovedStop();
+          return;
+        } catch (statusError) {
+          this.#emitStopFailure(statusError, 'The existing GPU stop request could not be synchronized.');
+          return;
+        }
+      }
+      this.#emitStopFailure(error, 'ImageForge could not coordinate GPU termination. The GPU remains running.');
+    }
+  }
+
+  async respondToGpuStop(requestId: string, decision: 'approve' | 'deny'): Promise<void> {
+    try {
+      const sequence = this.#nextStudioSequence();
+      const studio = requireStudioState(
+        await this.#port.studioRespondToStopRequest(requestId, this.#sessionId, decision),
+        [200],
+      );
+      this.#acceptStudio(studio, sequence);
+    } catch (error) {
+      this.#emitStopFailure(error, 'Your GPU stop response could not be confirmed. The GPU remains running.');
+    }
+  }
+
+  async cancelGpuStop(requestId: string): Promise<void> {
+    try {
+      const request = this.#studio?.stopRequest;
+      const currentPodId = this.#pod?.podId ?? null;
+      if (request === null || request === undefined || request.requestId !== requestId) {
+        throw {
+          code: 'stop_request_mismatch',
+          message: 'The synchronized GPU stop request changed before cancellation. Refresh shared status.',
+          retryable: false,
+        };
+      }
+      if (currentPodId === null || request.podId !== currentPodId) {
+        throw {
+          code: 'termination_target_mismatch',
+          message: 'The synchronized GPU stop request belongs to another Pod. No cancellation was sent.',
+          retryable: false,
+        };
+      }
+      const sequence = this.#nextStudioSequence();
+      const studio = requireStudioState(
+        await this.#port.studioCancelStopRequest(
+          requestId,
+          this.#sessionId,
+          request.podId,
+          request.finalizationId,
+        ),
+        [200],
+      );
+      this.#acceptStudio(studio, sequence);
+    } catch (error) {
+      this.#emitStopFailure(error, 'The GPU stop request could not be cancelled. Refresh shared status before trying again.');
     }
   }
 
@@ -300,6 +480,7 @@ class ProductionRuntime implements ProductionRuntimeFacade {
         batch.name,
       );
     } catch (error) {
+      if (isWorkerLocalSyncError(error)) return;
       // A remote Stop can land after the strict Generate preflight but before
       // the worker POST settles. Reconcile the authoritative lifecycle once
       // more so the Pod's offline event interrupts the provisional batch and
@@ -322,12 +503,12 @@ class ProductionRuntime implements ProductionRuntimeFacade {
   }
 
   async #pollBatch(state: AppState): Promise<void> {
-    if (!await this.#ensureRecoveredReceipts(state)) return;
     this.#deferWorkerError = true;
     this.#deferredWorkerError = null;
     try {
       await this.#worker.poll();
     } catch (error) {
+      if (isWorkerLocalSyncError(error)) return;
       if (await this.#workerFailureWasRemoteStop(state)) {
         // The worker failure was only a symptom of another client stopping the
         // shared Pod. The authoritative Pod event already moved the UI offline;
@@ -378,6 +559,252 @@ class ProductionRuntime implements ProductionRuntimeFacade {
     this.#emit({ type: 'create-recovery', marker: null });
   }
 
+  #nextStudioSequence(): number {
+    this.#studioSequence += 1;
+    return this.#studioSequence;
+  }
+
+  #acceptStudio(studio: StudioState, sequence: number): boolean {
+    // RunPod is the lifecycle authority. A worker response issued before an
+    // authoritative Offline observation can arrive after the native session
+    // clear because the pinned request is allowed to finish first. Never let
+    // that old epoch revive presence or a finalization request.
+    if (this.#pod === null || this.#pod.phase === 'offline') return false;
+    if (sequence < this.#acceptedStudioSequence) return false;
+    if (
+      this.#studio !== null
+      && studio.serverInstanceId === this.#studio.serverInstanceId
+      && studio.coordinationRevision < this.#studio.coordinationRevision
+    ) {
+      return false;
+    }
+    if (this.#studio !== null && studio.serverInstanceId !== this.#studio.serverInstanceId) {
+      // A worker restart is a new coordination epoch. Never carry a deletion
+      // grant across it, even if a prior request completes later.
+      this.#pendingFinalization = null;
+      this.#stopGuardAttempted = false;
+      this.#stopGuardConsumed = false;
+      this.#stopGuardDefinitivelyInvalid = false;
+    }
+    this.#acceptedStudioSequence = sequence;
+    this.#studio = studio;
+    this.#emit({ type: 'studio', studio: projectStudioState(studio) });
+    // A shared finalization marker can survive a worker restart even though
+    // the ephemeral studio request does not. Preserve the independently
+    // observed worker admission veto across an otherwise idle heartbeat.
+    if (this.#workerStopGuardActive && studio.stopRequest === null) {
+      this.#emit({
+        type: 'stop-guard-active',
+        podId: this.#pod?.podId ?? null,
+        message: 'GPU Stop is finalizing; new generation is temporarily blocked.',
+      });
+    }
+    return true;
+  }
+
+  async #maybeFinalizeApprovedStop(): Promise<void> {
+    const studio = this.#studio;
+    if (studio === null) return;
+    const request = studio.stopRequest;
+    if (
+      request === null
+      || request.state !== 'approved'
+      || request.requester.sessionId !== studio.currentSession.sessionId
+    ) {
+      return;
+    }
+    if (this.#stopFinalization !== null) return this.#stopFinalization;
+    if (this.#pod?.podId !== request.podId) {
+      this.#emitStopFailure(
+        { code: 'termination_target_mismatch', message: 'The confirmed Pod changed before final authorization.', retryable: false },
+        'The confirmed Pod changed before final authorization.',
+      );
+      return;
+    }
+    const finalizationId = crypto.randomUUID();
+    this.#pendingFinalization = {
+      serverInstanceId: studio.serverInstanceId,
+      approvedCoordinationRevision: studio.coordinationRevision,
+      requestId: request.requestId,
+      podId: request.podId,
+      finalizationId,
+    };
+    this.#stopGuardAttempted = false;
+    this.#stopGuardConsumed = false;
+    this.#stopGuardDefinitivelyInvalid = false;
+    const operation = this.#finalizeApprovedStop(request.requestId, request.podId, finalizationId)
+      .finally(() => {
+        if (this.#stopFinalization === operation) this.#stopFinalization = null;
+      });
+    this.#stopFinalization = operation;
+    return operation;
+  }
+
+  async #finalizeApprovedStop(requestId: string, podId: string, finalizationId: string): Promise<void> {
+    try {
+      const result = await this.#gpu.stop(podId);
+      this.#pendingFinalization = null;
+      this.#stopGuardAttempted = false;
+      this.#stopGuardConsumed = false;
+      this.#stopGuardDefinitivelyInvalid = false;
+      this.#emit({ type: 'stop-complete', alreadyStopped: result.alreadyStopped });
+    } catch (error) {
+      const ambiguous = typeof error === 'object'
+        && error !== null
+        && (error as { mayHaveSucceeded?: unknown }).mayHaveSucceeded === true;
+      const guardAttempted = this.#stopGuardAttempted;
+      const guardConsumed = this.#stopGuardConsumed;
+      const guardDefinitivelyInvalid = this.#stopGuardDefinitivelyInvalid;
+      if (!ambiguous && (!guardAttempted || guardConsumed || guardDefinitivelyInvalid)) {
+        try {
+          const sequence = this.#nextStudioSequence();
+          const studio = requireStudioState(
+            await this.#port.studioCancelStopRequest(
+              requestId,
+              this.#sessionId,
+              podId,
+              guardConsumed || guardDefinitivelyInvalid ? finalizationId : null,
+            ),
+            [200],
+          );
+          this.#acceptStudio(studio, sequence);
+        } catch {
+          // The original stop failure remains authoritative. A worker-side
+          // finalization grant also expires on its own bounded TTL.
+        }
+      }
+      this.#pendingFinalization = null;
+      this.#stopGuardAttempted = false;
+      this.#stopGuardConsumed = false;
+      this.#stopGuardDefinitivelyInvalid = false;
+      if (guardAttempted && !guardConsumed && !guardDefinitivelyInvalid) {
+        const synchronized = await this.#synchronizeStudioStatus();
+        if (
+          synchronized?.stopRequest !== null
+          && synchronized?.stopRequest !== undefined
+          && ['pending', 'denied', 'expired', 'cancelled'].includes(synchronized.stopRequest.state)
+        ) {
+          return;
+        }
+      }
+      this.#emitStopFailure(
+        error,
+        ambiguous
+          ? 'RunPod did not confirm whether termination completed. ImageForge will not claim the GPU stopped; refresh shared status.'
+          : 'The exact GPU was not terminated. The approval guard was cancelled or will expire safely.',
+      );
+    }
+  }
+
+  async #consumeStopGuard(podId: string): Promise<StopGuardDecision> {
+    const pending = this.#pendingFinalization;
+    if (pending === null || pending.podId !== podId) {
+      return {
+        allow: false,
+        code: 'stop_guard_failed',
+        message: 'The GPU stop approval is missing or belongs to another Pod.',
+        retryable: false,
+      };
+    }
+    this.#stopGuardAttempted = true;
+    const finalizeStartedAt = Date.now();
+    try {
+      const sequence = this.#nextStudioSequence();
+      const studio = requireStudioState(
+        await this.#port.studioFinalizeStopRequest(
+          pending.requestId,
+          this.#sessionId,
+          pending.podId,
+          pending.finalizationId,
+        ),
+        [200],
+      );
+      const validation = validateFinalizationGrant(
+        studio,
+        {
+          serverInstanceId: pending.serverInstanceId,
+          approvedCoordinationRevision: pending.approvedCoordinationRevision,
+          sessionId: this.#sessionId,
+          requestId: pending.requestId,
+          podId,
+          finalizationId: pending.finalizationId,
+        },
+        Date.now() - finalizeStartedAt,
+      );
+      if (!validation.valid) {
+        this.#stopGuardDefinitivelyInvalid = true;
+        return {
+          allow: false,
+          code: 'stop_guard_failed',
+          message: `The worker returned an invalid GPU deletion guard (${validation.reason}).`,
+          retryable: false,
+        };
+      }
+      if (!this.#acceptStudio(studio, sequence)) {
+        // A newer heartbeat or mutation won the race. Only that accepted
+        // state may authorize DELETE, and it must expose the same exact grant.
+        const acceptedValidation = this.#studio === null
+          ? { valid: false as const, reason: 'revision_stale' as const }
+          : validateFinalizationGrant(
+              this.#studio,
+              {
+                serverInstanceId: pending.serverInstanceId,
+                approvedCoordinationRevision: pending.approvedCoordinationRevision,
+                sessionId: this.#sessionId,
+                requestId: pending.requestId,
+                podId,
+                finalizationId: pending.finalizationId,
+              },
+              Date.now() - finalizeStartedAt,
+            );
+        if (!acceptedValidation.valid) {
+          this.#stopGuardDefinitivelyInvalid = true;
+          return {
+            allow: false,
+            code: 'stop_guard_failed',
+            message: `A newer shared state invalidated the GPU deletion guard (${acceptedValidation.reason}).`,
+            retryable: false,
+          };
+        }
+      }
+      this.#stopGuardConsumed = true;
+      return { allow: true };
+    } catch (error) {
+      if (error instanceof StudioContractError && error.status === 200) {
+        this.#stopGuardDefinitivelyInvalid = true;
+      }
+      const safe = runtimeError(error, 'stop_guard_failed', 'GPU stop authorization failed; the GPU remains running.');
+      const code = error instanceof StudioContractError
+        ? stopGuardCode(error.code, this.#studio?.stopRequest?.state ?? null)
+        : 'stop_guard_failed';
+      return {
+        allow: false,
+        code,
+        message: safe.message,
+        retryable: safe.retryable,
+        ...(error instanceof StudioContractError
+          ? { details: safePrimitiveDetails(error.details) }
+          : {}),
+      };
+    }
+  }
+
+  #emitStopFailure(error: unknown, fallback: string): void {
+    const safe = runtimeError(error, 'stop_guard_failed', fallback);
+    this.#emit({ type: 'stop-failed', message: safe.message, retryable: safe.retryable });
+  }
+
+  async #synchronizeStudioStatus(): Promise<StudioState | null> {
+    try {
+      const sequence = this.#nextStudioSequence();
+      const studio = requireStudioState(await this.#port.studioStatus(this.#sessionId), [200]);
+      this.#acceptStudio(studio, sequence);
+      return studio;
+    } catch {
+      return null;
+    }
+  }
+
   dispose(): void {
     this.#unsubscribeGpu();
     this.#unsubscribeWorker();
@@ -386,7 +813,12 @@ class ProductionRuntime implements ProductionRuntimeFacade {
   }
 
   #captureState(state: AppState): void {
-    this.#pod = state.pod;
+    // AppState is a presentation snapshot and can lag an authoritative
+    // RunPod observation by a render. Seed from it only until this runtime has
+    // observed RunPod itself; otherwise a later call carrying stale Ready data
+    // could revive the worker epoch after Offline was already proven.
+    if (!this.#podAuthorityEstablished) this.#pod = state.pod;
+    this.#recoveryDestination = state.settings.defaultDestination;
     if (state.batch && state.batch.phase !== 'locked') {
       this.#worker.setBatchName(state.batch.name);
       this.#presentation = {
@@ -436,25 +868,22 @@ class ProductionRuntime implements ProductionRuntimeFacade {
     };
   }
 
-  async #ensureRecoveredReceipts(state: AppState): Promise<boolean> {
-    if (this.#recoveredBatchId === null || this.#reconciledRecoveredBatch) return true;
-    try {
-      // Restore the native destination before asking it to hash/ack anything;
-      // this closes the startup race between React folder validation and the
-      // first worker poll.
-      await this.#port.validateDestination(state.settings.defaultDestination);
-      await this.#port.reconcileReceipts(this.#recoveredBatchId);
-      this.#reconciledRecoveredBatch = true;
-      return true;
-    } catch (error) {
-      this.#emit({
-        type: 'error',
-        scope: 'batch',
-        message: error instanceof Error ? error.message : 'The recovered local receipts are not ready yet.',
+  async #prepareRecoveredLocalBatch(batchId: string): Promise<void> {
+    if (batchId !== this.#recoveredBatchId || this.#reconciledRecoveredBatch) return;
+    const destination = this.#recoveryDestination;
+    if (destination === null) {
+      throw {
+        code: 'destination_unavailable',
+        message: 'Choose and verify a writable ImageForge downloads folder.',
         retryable: true,
-      });
-      return false;
+      };
     }
+    // This hook runs only after /v1/status and an owned manifest have been
+    // confirmed by WorkerBatchCoordinator. Device-local recovery therefore
+    // cannot hide shared Ready/busy truth on another computer.
+    await this.#port.validateDestination(destination);
+    await this.#port.reconcileReceipts(batchId);
+    this.#reconciledRecoveredBatch = true;
   }
 
   async #restoreLocalLibrary(state: AppState): Promise<void> {
@@ -532,16 +961,41 @@ class ProductionRuntime implements ProductionRuntimeFacade {
 
   #onPodSnapshot(snapshot: RunPodSnapshot): void {
     if (this.#pod === null) return;
+    this.#podAuthorityEstablished = true;
     this.#pod = projectPodSnapshot(snapshot, this.#pod);
+    if (this.#pod.phase === 'offline') {
+      // Advance past every studio request already issued for the old worker
+      // session. This remains effective if a replacement Pod becomes Ready
+      // before a late response settles.
+      this.#acceptedStudioSequence = this.#nextStudioSequence();
+      this.#studio = null;
+      this.#pendingHeartbeatAvailability = null;
+      this.#pendingFinalization = null;
+      this.#stopGuardAttempted = false;
+      this.#stopGuardConsumed = false;
+      this.#stopGuardDefinitivelyInvalid = false;
+      this.#workerStopGuardActive = false;
+    }
     this.#emit({ type: 'pod', pod: this.#pod });
   }
 
   #onWorkerEvent(event: WorkerBatchEvent): void {
     if (event.type === 'idle') {
+      this.#workerStopGuardActive = false;
       this.#emit({ type: 'idle' });
       return;
     }
+    if (event.type === 'stop-pending') {
+      this.#workerStopGuardActive = true;
+      this.#emit({
+        type: 'stop-guard-active',
+        podId: this.#pod?.podId ?? null,
+        message: event.message,
+      });
+      return;
+    }
     if (event.type === 'busy') {
+      this.#workerStopGuardActive = false;
       this.#emit({ type: 'busy', batch: projectBusyBatch(event.summary) });
       return;
     }
@@ -553,6 +1007,17 @@ class ProductionRuntime implements ProductionRuntimeFacade {
       this.#emitWorkerError(event);
       return;
     }
+    if (event.type === 'local-error') {
+      this.#emit({
+        type: 'local-error',
+        batchId: event.batchId,
+        code: event.code,
+        message: event.message,
+        retryable: event.retryable,
+      });
+      return;
+    }
+    this.#workerStopGuardActive = false;
     const restoredName = recoveredBatchName(event.manifest.batchId, event.receipts);
     if (
       restoredName !== null
@@ -598,10 +1063,68 @@ class ProductionRuntime implements ProductionRuntimeFacade {
   }
 
   #emitError(scope: 'pod' | 'batch', error: unknown, fallback: string): void {
-    const message = error instanceof Error && error.message ? error.message : fallback;
-    const retryable = typeof error === 'object' && error !== null && 'retryable' in error && error.retryable === true;
-    this.#emit({ type: 'error', scope, message, retryable });
+    this.#emit({ type: 'error', scope, ...runtimeError(error, undefined, fallback) });
   }
+}
+
+function runtimeError(
+  error: unknown,
+  fallbackCode: string | undefined,
+  fallbackMessage: string,
+): { code?: string; message: string; retryable: boolean } {
+  if (typeof error === 'object' && error !== null) {
+    const candidate = error as { code?: unknown; message?: unknown; retryable?: unknown };
+    const code = typeof candidate.code === 'string' ? candidate.code : fallbackCode;
+    const message = typeof candidate.message === 'string' && candidate.message
+      ? candidate.message
+      : fallbackMessage;
+    return {
+      ...(code === undefined ? {} : { code }),
+      message,
+      retryable: candidate.retryable === true,
+    };
+  }
+  return {
+    ...(fallbackCode === undefined ? {} : { code: fallbackCode }),
+    message: error instanceof Error && error.message ? error.message : fallbackMessage,
+    retryable: false,
+  };
+}
+
+function safeDetailString(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 && value.length <= 120
+    ? value
+    : null;
+}
+
+function safeDetailInteger(value: unknown): number {
+  return Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : 0;
+}
+
+function safePrimitiveDetails(
+  details: Readonly<Record<string, unknown>> | null,
+): Readonly<Record<string, string | number | boolean | null>> {
+  if (details === null) return {};
+  return Object.fromEntries(
+    Object.entries(details)
+      .filter(([, value]) => value === null || ['string', 'number', 'boolean'].includes(typeof value))
+      .slice(0, 8),
+  ) as Readonly<Record<string, string | number | boolean | null>>;
+}
+
+function stopGuardCode(
+  code: string,
+  state: StudioState['stopRequest'] extends infer _Request
+    ? 'pending' | 'approved' | 'denied' | 'expired' | 'cancelled' | 'finalizing' | null
+    : never,
+): NonNullable<StopGuardDecision['code']> {
+  if (code === 'stop_blocked_by_active_batch') return 'stop_blocked_by_active_batch';
+  if (code === 'gpu_stop_pending') return 'gpu_stop_pending';
+  if (code === 'stop_approval_pending') return 'stop_consent_pending';
+  if (code === 'stop_consent_denied' || state === 'denied') return 'stop_consent_denied';
+  if (code === 'stop_consent_expired' || state === 'expired' || state === 'cancelled') return 'stop_consent_expired';
+  if (code === 'stop_request_not_approved' && state === 'pending') return 'stop_consent_pending';
+  return 'stop_guard_failed';
 }
 
 export function createProductionImageForgeAdapter(

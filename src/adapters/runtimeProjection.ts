@@ -227,20 +227,31 @@ export function projectOwnedManifest(
 }
 
 export function projectBusyBatch(summary: WorkerBatchSummary): BatchState {
+  const lockMessage = summary.state === 'paused'
+    ? `Paused after ${summary.progress.processed} of ${summary.progress.total} images were processed.`
+    : summary.state === 'interrupted'
+      ? `Interrupted after ${summary.progress.processed} of ${summary.progress.total} images; the owner can resume from the durable manifest.`
+      : `${summary.progress.completed} of ${summary.progress.total} images are generated.`;
+  const statusMessage = summary.state === 'paused'
+    ? `${summary.owner.displayName} paused after ${summary.progress.processed} of ${summary.progress.total}`
+    : summary.state === 'interrupted'
+      ? `${summary.owner.displayName} has a resumable interrupted batch`
+      : `${summary.owner.displayName} is generating ${summary.progress.completed} of ${summary.progress.total}`;
   return {
     id: summary.batchId,
     name: `${summary.owner.displayName}’s active batch`,
     owner: summary.owner.displayName,
     canManage: false,
     phase: 'locked',
+    remoteState: summary.state,
     prompts: [],
     destination: 'Owner’s selected computer',
     startedAt: new Date().toISOString(),
     elapsedSeconds: 0,
     estimatedSecondsPerImage: 8.4,
     estimatedCost: 0,
-    lockMessage: `${summary.progress.completed} of ${summary.progress.total} images are generated.`,
-    statusMessage: `${summary.owner.displayName} is generating ${summary.progress.completed} of ${summary.progress.total}`,
+    lockMessage,
+    statusMessage,
     aspectRatio: DEFAULT_ASPECT_RATIO,
     reportedProgress: {
       total: summary.progress.total,

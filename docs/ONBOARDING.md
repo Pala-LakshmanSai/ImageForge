@@ -34,14 +34,20 @@ Advanced identifiers remain collapsed unless troubleshooting is requested.
 5. Images are written in prompt order to the selected local folder as they
    become available. Interrupted downloads resume from `.part` files and become
    final only after checksum verification.
-6. When generation and downloads are complete, press **Stop GPU**. Because a
-   network-volume Pod cannot be stopped, the confirmation says that compute is
-   terminated while ImageForge files and model weights remain on the volume.
+6. When generation and downloads are complete, press **Stop GPU**. An active
+   batch always vetoes termination. If another editor is foreground and the
+   worker is idle, they receive a named **Keep GPU running** / **Approve stop**
+   request. Any denial, timeout, or uncertain connection keeps the GPU running.
+   After unanimous approval, the confirmation says that compute is terminated
+   while ImageForge files and model weights remain on the volume.
 
 ## Recovery promises
 
 - Closing or sleeping the laptop does not cancel server-side generation.
 - Reopening the app discovers the current Pod and active batch.
+- Shared worker status appears before device-local receipt recovery, so a stale
+  or inaccessible folder on one computer never hides the other editor's live
+  batch or demotes a Ready GPU.
 - A replacement Pod gets a new ID; the app discovers it and reconciles the
   durable manifest from the network volume.
 - Ready images are never regenerated when their artifact and checksum match.

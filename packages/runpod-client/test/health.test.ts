@@ -174,7 +174,7 @@ function healthPayload(phase: string, progress: number): Record<string, unknown>
   return {
     schema_version: 1,
     service: "imageforge-worker",
-    version: "0.1.2",
+    version: "0.1.3",
     process: { status: "ok", uptime_ms: 100 },
     model: {
       id: "black-forest-labs/FLUX.2-klein-4B",

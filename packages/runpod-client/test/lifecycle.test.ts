@@ -7,6 +7,7 @@ import {
   RunPodLifecycleController,
   deriveRunPodProxyUrl,
   type RunPodClientConfig,
+  type StopGuard,
 } from "../src/index.js";
 import { makeConfig, makeOffer, makePod } from "./helpers.js";
 
@@ -16,6 +17,7 @@ function makeController(
     readonly health?: FakeWorkerHealthProbe;
     readonly now?: () => number;
     readonly token?: () => string;
+    readonly stopGuard?: StopGuard;
     readonly configOverrides?: Partial<RunPodClientConfig>;
   } = {},
 ): RunPodLifecycleController {
@@ -25,6 +27,7 @@ function makeController(
     ...(options.health === undefined ? {} : { workerHealthProbe: options.health }),
     ...(options.now === undefined ? {} : { clock: { now: options.now } }),
     ...(options.token === undefined ? {} : { tokenFactory: options.token }),
+    ...(options.stopGuard === undefined ? {} : { stopGuard: options.stopGuard }),
   });
 }
 
@@ -1135,6 +1138,316 @@ describe("RunPodLifecycleController refresh and start", () => {
 });
 
 describe("RunPodLifecycleController explicit Stop GPU", () => {
+  it("runs the stop guard after exact Pod revalidation and sends no DELETE on a typed veto", async () => {
+    const pod = makePod({ id: "guardedstop1" });
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()], pods: [pod] });
+    const order: string[] = [];
+    const originalGet = provider.getPod.bind(provider);
+    provider.getPod = (async (podId, criteria, signal) => {
+      order.push(`get:${podId}`);
+      return originalGet(podId, criteria, signal);
+    }) as typeof provider.getPod;
+    const controller = makeController(provider, {
+      token: () => "guarded-stop-token",
+      stopGuard: async ({ pod: currentPod, podId }) => {
+        order.push(`guard:${currentPod.id}`);
+        assert.equal(currentPod.id, podId);
+        return {
+          allow: false,
+          code: "stop_blocked_by_active_batch",
+          message: "Another editor is generating.",
+          retryable: true,
+        };
+      },
+    });
+    await controller.refresh();
+    const confirmation = controller.requestStopConfirmation({
+      intent: "stop_gpu",
+      source: "foreground_user",
+      podId: pod.id,
+    });
+
+    await assert.rejects(
+      () => controller.stopGpu({
+        intent: "confirm_stop_gpu",
+        source: "foreground_user",
+        podId: pod.id,
+        confirmationToken: confirmation.token,
+      }),
+      (error: unknown) =>
+        error instanceof RunPodClientError &&
+        error.code === "stop_blocked_by_active_batch" &&
+        error.retryable,
+    );
+    assert.deepEqual(order, [`get:${pod.id}`, `guard:${pod.id}`]);
+    assert.equal(provider.calls.terminate.length, 0);
+    assert.notEqual(controller.getSnapshot().phase, "stopping");
+    assert.equal(controller.getSnapshot().selectedPodId, pod.id);
+  });
+
+  it("keeps the Pod running and sends no DELETE when stop authorization fails", async () => {
+    const pod = makePod({ id: "guardfailure1" });
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()], pods: [pod] });
+    const controller = makeController(provider, {
+      token: () => "guard-failure-token",
+      stopGuard: async () => {
+        throw new Error("worker authorization unavailable");
+      },
+    });
+    await controller.refresh();
+    const confirmation = controller.requestStopConfirmation({
+      intent: "stop_gpu",
+      source: "foreground_user",
+      podId: pod.id,
+    });
+
+    await assert.rejects(
+      () => controller.stopGpu({
+        intent: "confirm_stop_gpu",
+        source: "foreground_user",
+        podId: pod.id,
+        confirmationToken: confirmation.token,
+      }),
+      (error: unknown) =>
+        error instanceof RunPodClientError &&
+        error.code === "stop_guard_failed" &&
+        error.retryable,
+    );
+    assert.equal(provider.calls.terminate.length, 0);
+    assert.equal(controller.getSnapshot().selectedPodId, pod.id);
+    assert.notEqual(controller.getSnapshot().phase, "offline");
+  });
+
+  it("times out a pending stop guard without DELETE and ignores a late approval", async () => {
+    const pod = makePod({ id: "guardtimeout1" });
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()], pods: [pod] });
+    let resolveGuard!: (decision: { readonly allow: true }) => void;
+    const guardEntered = deferred();
+    const guardPromise = new Promise<{ readonly allow: true }>((resolve) => {
+      resolveGuard = resolve;
+    });
+    const controller = makeController(provider, {
+      token: () => "guard-timeout-token",
+      configOverrides: { operationTimeoutMs: 100 },
+      stopGuard: async () => {
+        guardEntered.resolve();
+        return guardPromise;
+      },
+    });
+    await controller.refresh();
+    const phases: string[] = [];
+    const unsubscribe = controller.subscribe((snapshot) => phases.push(snapshot.phase));
+    const confirmation = controller.requestStopConfirmation({
+      intent: "stop_gpu",
+      source: "foreground_user",
+      podId: pod.id,
+    });
+    const intent = {
+      intent: "confirm_stop_gpu" as const,
+      source: "foreground_user" as const,
+      podId: pod.id,
+      confirmationToken: confirmation.token,
+    };
+    const pending = controller.stopGpu(intent);
+    await guardEntered.promise;
+
+    await assert.rejects(
+      () => pending,
+      (error: unknown) =>
+        error instanceof RunPodClientError &&
+        error.code === "stop_guard_failed" &&
+        !error.mayHaveSucceeded,
+    );
+    resolveGuard({ allow: true });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.deepEqual(provider.calls.terminate, []);
+    assert.equal(phases.includes("stopping"), false);
+    assert.equal(phases.includes("offline"), false);
+    assert.equal((await controller.refresh()).selectedPodId, pod.id);
+    await assert.rejects(
+      () => controller.stopGpu(intent),
+      (error: unknown) =>
+        error instanceof RunPodClientError &&
+        error.code === "termination_confirmation_required",
+    );
+    unsubscribe();
+  });
+
+  it("aborts a pending stop guard without DELETE and ignores a late approval", async () => {
+    const pod = makePod({ id: "guardabort1" });
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()], pods: [pod] });
+    let resolveGuard!: (decision: { readonly allow: true }) => void;
+    const guardEntered = deferred();
+    const guardPromise = new Promise<{ readonly allow: true }>((resolve) => {
+      resolveGuard = resolve;
+    });
+    const controller = makeController(provider, {
+      token: () => "guard-abort-token",
+      stopGuard: async () => {
+        guardEntered.resolve();
+        return guardPromise;
+      },
+    });
+    await controller.refresh();
+    const phases: string[] = [];
+    const unsubscribe = controller.subscribe((snapshot) => phases.push(snapshot.phase));
+    const confirmation = controller.requestStopConfirmation({
+      intent: "stop_gpu",
+      source: "foreground_user",
+      podId: pod.id,
+    });
+    const intent = {
+      intent: "confirm_stop_gpu" as const,
+      source: "foreground_user" as const,
+      podId: pod.id,
+      confirmationToken: confirmation.token,
+    };
+    const abort = new AbortController();
+    const pending = controller.stopGpu(intent, abort.signal);
+    await guardEntered.promise;
+    abort.abort();
+
+    await assert.rejects(
+      () => pending,
+      (error: unknown) =>
+        error instanceof RunPodClientError &&
+        error.code === "operation_aborted" &&
+        !error.mayHaveSucceeded,
+    );
+    resolveGuard({ allow: true });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.deepEqual(provider.calls.terminate, []);
+    assert.equal(phases.includes("stopping"), false);
+    assert.equal(phases.includes("offline"), false);
+    assert.equal((await controller.refresh()).selectedPodId, pod.id);
+    await assert.rejects(
+      () => controller.stopGpu(intent),
+      (error: unknown) =>
+        error instanceof RunPodClientError &&
+        error.code === "termination_confirmation_required",
+    );
+    unsubscribe();
+  });
+
+  it("allows at most one DELETE across simultaneous guarded controllers", async () => {
+    const pod = makePod({ id: "simultaneousguard1" });
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()], pods: [pod] });
+    const firstGuardEntered = deferred();
+    const releaseFirstGuard = deferred();
+    let guardCalls = 0;
+    const sharedGuard: StopGuard = async () => {
+      guardCalls += 1;
+      if (guardCalls === 1) {
+        firstGuardEntered.resolve();
+        await releaseFirstGuard.promise;
+        return { allow: true };
+      }
+      return {
+        allow: false,
+        code: "gpu_stop_pending",
+        message: "Another exact-Pod stop is already finalizing.",
+        retryable: true,
+      };
+    };
+    const first = makeController(provider, {
+      token: () => "simultaneous-first-token",
+      stopGuard: sharedGuard,
+    });
+    const second = makeController(provider, {
+      token: () => "simultaneous-second-token",
+      stopGuard: sharedGuard,
+    });
+    await Promise.all([first.refresh(), second.refresh()]);
+    const firstConfirmation = first.requestStopConfirmation({
+      intent: "stop_gpu",
+      source: "foreground_user",
+      podId: pod.id,
+    });
+    const secondConfirmation = second.requestStopConfirmation({
+      intent: "stop_gpu",
+      source: "foreground_user",
+      podId: pod.id,
+    });
+
+    const firstStop = first.stopGpu({
+      intent: "confirm_stop_gpu",
+      source: "foreground_user",
+      podId: pod.id,
+      confirmationToken: firstConfirmation.token,
+    });
+    await firstGuardEntered.promise;
+    const secondStop = second.stopGpu({
+      intent: "confirm_stop_gpu",
+      source: "foreground_user",
+      podId: pod.id,
+      confirmationToken: secondConfirmation.token,
+    });
+    await assert.rejects(
+      () => secondStop,
+      (error: unknown) =>
+        error instanceof RunPodClientError &&
+        error.code === "gpu_stop_pending" &&
+        error.retryable,
+    );
+    releaseFirstGuard.resolve();
+    await firstStop;
+
+    assert.deepEqual(provider.calls.terminate, [pod.id]);
+    const [firstOffline, secondOffline] = await Promise.all([first.refresh(), second.refresh()]);
+    assert.equal(firstOffline.phase, "offline");
+    assert.equal(secondOffline.phase, "offline");
+  });
+
+  it("converges two controllers after a shared Pod starts and is stopped remotely", async () => {
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()] });
+    const health = new FakeWorkerHealthProbe();
+    const first = makeController(provider, { health, token: () => "first-stop-token" });
+    const second = makeController(provider, { health, token: () => "second-stop-token" });
+
+    const started = await first.startGpu({
+      intent: "start_gpu",
+      source: "foreground_user",
+      requestId: "shared-sync-start1",
+    });
+    const sharedPod = makePod({
+      id: started.pod.id,
+      name: started.pod.name,
+      startRequestId: started.pod.startRequestId,
+      status: "running",
+    });
+    provider.setPods([sharedPod]);
+    health.setHealth(sharedPod.proxyUrl, { schemaVersion: 1, phase: "ready", phaseProgress: 1 });
+
+    const firstReady = await first.refresh();
+    const secondReady = await second.refresh();
+    assert.equal(firstReady.selectedPodId, sharedPod.id);
+    assert.equal(secondReady.selectedPodId, sharedPod.id);
+    assert.equal(firstReady.proxyUrl, secondReady.proxyUrl);
+    assert.equal(firstReady.phase, "ready");
+    assert.equal(secondReady.phase, "ready");
+
+    const confirmation = first.requestStopConfirmation({
+      intent: "stop_gpu",
+      source: "foreground_user",
+      podId: sharedPod.id,
+    });
+    await first.stopGpu({
+      intent: "confirm_stop_gpu",
+      source: "foreground_user",
+      podId: sharedPod.id,
+      confirmationToken: confirmation.token,
+    });
+    const secondOffline = await second.refresh();
+    assert.equal(secondOffline.selectedPodId, null);
+    assert.equal(secondOffline.proxyUrl, null);
+    assert.equal(secondOffline.phase, "offline");
+    assert.deepEqual(provider.calls.terminate, [sharedPod.id]);
+  });
+
   it("requires a Pod-bound confirmation before termination", async () => {
     const provider = new FakeRunPodProvider({
       inventory: [makeOffer()],
@@ -1274,9 +1587,9 @@ describe("RunPodLifecycleController explicit Stop GPU", () => {
           source: "foreground_user",
           podId: "changedidentity1",
           confirmationToken: confirmation.token,
-        }),
+      }),
       (error: unknown) =>
-        error instanceof RunPodClientError && error.code === "pod_not_found",
+        error instanceof RunPodClientError && error.code === "termination_target_mismatch",
     );
     assert.equal(provider.calls.get.length, 1);
     assert.equal(provider.calls.terminate.length, 0);

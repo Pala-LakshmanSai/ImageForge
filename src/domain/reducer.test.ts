@@ -409,4 +409,183 @@ describe('appReducer', () => {
     expect(state.batch?.phase).toBe('interrupted');
     expect(state.batch?.prompts.some((prompt) => prompt.status === 'generating')).toBe(false);
   });
+
+  it('keeps Ready and remote busy truth when device-local receipt recovery fails', () => {
+    let state = readyDraft(1);
+    const lockedBatch: BatchState = {
+      id: '33333333-3333-4333-8333-333333333333',
+      name: 'Sujal’s active batch',
+      owner: 'Sujal',
+      canManage: false,
+      phase: 'locked',
+      prompts: [],
+      destination: 'Sujal’s computer',
+      startedAt: '2026-08-03T09:00:00.000Z',
+      elapsedSeconds: 42,
+      estimatedSecondsPerImage: 8.4,
+      estimatedCost: 0,
+      lockMessage: '73 of 450 images are complete.',
+      statusMessage: 'Sujal is generating image 074 of 450',
+      aspectRatio: '16:9',
+      reportedProgress: { total: 450, completed: 73, failed: 0, cancelled: 0, currentIndex: 74 },
+    };
+    state = appReducer(state, { type: 'SYNC_RUNTIME_BUSY', batch: lockedBatch });
+    state = appReducer(state, {
+      type: 'RUNTIME_LOCAL_ERROR',
+      batchId: '11111111-1111-4111-8111-111111111111',
+      code: 'destination_unavailable',
+      message: 'Choose a writable Windows folder.',
+      retryable: true,
+    });
+
+    expect(state.pod.phase).toBe('ready');
+    expect(state.batch).toEqual(lockedBatch);
+    expect(state.localSyncIssue).toMatchObject({ code: 'destination_unavailable' });
+  });
+
+  it('moves a remote locked batch to truthful unmanageable interruption when RunPod proves Offline', () => {
+    let state = appReducer(createConfiguredInitialState(), { type: 'PREVIEW_SCENARIO', scenario: 'locked' });
+    const completed = batchCounts(state.batch).completed;
+    state = appReducer(state, {
+      type: 'SYNC_RUNTIME_POD',
+      pod: {
+        ...state.pod,
+        phase: 'offline',
+        phaseProgress: 0,
+        statusDetail: 'GPU is safely offline',
+        health: 'offline',
+        podId: null,
+        matchingPodIds: [],
+      },
+    });
+
+    expect(state.batch).toMatchObject({
+      phase: 'interrupted',
+      canManage: false,
+      remoteState: 'interrupted',
+    });
+    expect(state.batch?.statusMessage).toContain('offline');
+    expect(batchCounts(state.batch).completed).toBe(completed);
+  });
+
+  it('settles an in-flight coordinated stop when authoritative RunPod truth proves its exact Pod offline', () => {
+    let state = readyDraft(1);
+    state.studio.stop = {
+      ...state.studio.stop,
+      phase: 'pending',
+      requestId: '44444444-4444-4444-8444-444444444444',
+      podId: 'pod-test-1',
+      gpuDisplayName: 'RTX 4090',
+      isRequester: true,
+    };
+
+    state = appReducer(state, {
+      type: 'SYNC_RUNTIME_POD',
+      pod: {
+        ...state.pod,
+        phase: 'offline',
+        phaseProgress: 0,
+        statusDetail: 'GPU is safely offline',
+        health: 'offline',
+        podId: null,
+        matchingPodIds: [],
+      },
+    });
+
+    expect(state.studio.stop).toMatchObject({
+      phase: 'stopped',
+      podId: 'pod-test-1',
+      finalizationId: null,
+      finalizationExpiresAt: null,
+      retryable: false,
+    });
+
+    state = appReducer(state, {
+      type: 'SYNC_STUDIO_STATE',
+      studio: {
+        ...state.studio,
+        stop: {
+          ...state.studio.stop,
+          phase: 'finalizing',
+          finalizationId: '55555555-5555-4555-8555-555555555555',
+          finalizationExpiresAt: '2026-08-01T10:01:00.000Z',
+        },
+      },
+    });
+    expect(state.studio.stop.phase).toBe('stopped');
+  });
+
+  it('blocks Generate for an adopted worker finalization guard and releases it only on idle admission truth', () => {
+    let state = readyDraft(1);
+    expect(canStartBatch(state)).toBe(true);
+
+    state = appReducer(state, {
+      type: 'RUNTIME_STOP_GUARD_ACTIVE',
+      podId: 'pod-test-1',
+      message: 'GPU Stop is finalizing; new generation is temporarily blocked.',
+    });
+    expect(state.studio.stop).toMatchObject({
+      phase: 'finalizing',
+      podId: 'pod-test-1',
+      reason: 'worker_finalization_guard',
+    });
+    expect(canStartBatch(state)).toBe(false);
+
+    state = appReducer(state, { type: 'RUNTIME_BATCH_IDLE' });
+    expect(state.studio.stop.phase).toBe('idle');
+    expect(canStartBatch(state)).toBe(true);
+  });
+
+  it('allows generation during approval but blocks it only while the deletion guard is finalizing', () => {
+    const ready = readyDraft(1);
+    const pending = appReducer(ready, {
+      type: 'SYNC_STUDIO_STATE',
+      studio: {
+        ...ready.studio,
+        connected: true,
+        stop: {
+          ...ready.studio.stop,
+          phase: 'pending',
+          requestId: '44444444-4444-4444-8444-444444444444',
+          podId: ready.pod.podId,
+          gpuDisplayName: 'RTX 4090',
+          isRequester: true,
+          responseDeadline: '2026-08-03T10:00:30.000Z',
+        },
+      },
+    });
+    expect(canStartBatch(pending)).toBe(true);
+
+    const finalizing = appReducer(pending, {
+      type: 'SYNC_STUDIO_STATE',
+      studio: {
+        ...pending.studio,
+        stop: {
+          ...pending.studio.stop,
+          phase: 'finalizing',
+          finalizationExpiresAt: '2026-08-03T10:00:40.000Z',
+        },
+      },
+    });
+    expect(canStartBatch(finalizing)).toBe(false);
+  });
+
+  it('returns a generation race to Create when the final GPU-stop guard wins', () => {
+    let state = readyDraft(1);
+    state = appReducer(state, { type: 'START_BATCH', startedAt: '2026-08-03T10:00:00.000Z' });
+    expect(state.batch?.phase).toBe('validating');
+
+    state = appReducer(state, {
+      type: 'RUNTIME_ERROR',
+      scope: 'batch',
+      code: 'gpu_stop_pending',
+      message: 'GPU termination is being finalized.',
+      retryable: true,
+    });
+
+    expect(state.pod.phase).toBe('ready');
+    expect(state.batch).toBeNull();
+    expect(state.activeView).toBe('create');
+    expect(state.toast?.title).toBe('GPU stop is finalizing');
+  });
 });

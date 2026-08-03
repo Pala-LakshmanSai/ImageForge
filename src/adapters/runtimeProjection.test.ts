@@ -249,5 +249,26 @@ describe('production runtime projection', () => {
     expect(projected.prompts).toEqual([]);
     expect(projected.destination).toBe('Owner’s selected computer');
     expect(projected.reportedProgress).toMatchObject({ total: 400, completed: 17 });
+    expect(projected).toMatchObject({
+      phase: 'locked',
+      remoteState: 'running',
+      statusMessage: 'Sujal is generating 17 of 400',
+    });
+
+    const paused = projectBusyBatch({ ...status.activeBatch!, state: 'paused' });
+    expect(paused).toMatchObject({
+      phase: 'locked',
+      remoteState: 'paused',
+      statusMessage: 'Sujal paused after 17 of 400',
+    });
+    expect(paused.lockMessage).toContain('Paused after 17');
+
+    const interrupted = projectBusyBatch({ ...status.activeBatch!, state: 'interrupted' });
+    expect(interrupted).toMatchObject({
+      phase: 'locked',
+      remoteState: 'interrupted',
+      statusMessage: 'Sujal has a resumable interrupted batch',
+    });
+    expect(interrupted.lockMessage).toContain('owner can resume');
   });
 });

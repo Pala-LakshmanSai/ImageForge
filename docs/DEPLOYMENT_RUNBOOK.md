@@ -107,13 +107,23 @@ even if a hand-edited profile asks for one.
 4. Paste/import prompts, choose a local folder, and start the one shared batch.
 5. Keep ImageForge open while it verifies and renames each downloaded image.
    Reopening the app resumes missing `.part` files and receipts.
-6. Press **Stop GPU**, inspect the exact Pod/GPU/cost confirmation, and confirm.
+6. Press **Stop GPU** and inspect the exact Pod/GPU/cost confirmation. A live
+   batch vetoes termination. When idle, every other live foreground editor must
+   approve; denial, timeout, or connectivity uncertainty leaves the GPU
+   running. Only after unanimous approval and exact-Pod revalidation does the
+   app terminate compute.
 
 There is deliberately no idle timer or automatic termination. If both editors
 press Start simultaneously, every matching Pod is shown as a duplicate-cost
 warning and neither is silently deleted. The shared-volume worker lease is a
 defense-in-depth control, and the selected EU-RO-1 volume/image combination has
 passed the two-Pod qualification below.
+
+Both installed clients should converge on the same Pod phase and shared batch
+owner/progress within the bounded foreground observation interval. Opening a
+second client must show worker status before attempting device-local receipt
+reconciliation. If RunPod is offline, that state wins over late worker status
+and any in-flight batch is shown as interrupted rather than ready or running.
 
 ## 6. Release-only paid checks
 

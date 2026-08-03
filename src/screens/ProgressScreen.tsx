@@ -22,7 +22,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { batchCounts } from '../domain/reducer';
-import type { BatchPrompt } from '../domain/types';
+import type { BatchPrompt, BatchState } from '../domain/types';
 import { aspectRatioOption } from '../domain/aspectRatio';
 import { SimulatedImage } from '../components/SimulatedImage';
 import { PreviewImage } from '../components/PreviewImage';
@@ -52,11 +52,16 @@ function batchStatus(
   total: number,
   failed: number,
   selected?: BatchPrompt,
+  remoteState?: BatchState['remoteState'],
 ) {
   if (phase === 'complete') return `All ${total} images saved`;
   if (phase === 'partial_failure') return `${completed} images saved · ${failed} need attention`;
   if (phase === 'paused') return `Paused after ${completed} images`;
-  if (phase === 'locked') return 'Another user is running this batch';
+  if (phase === 'locked') {
+    if (remoteState === 'paused') return 'Another user paused this batch';
+    if (remoteState === 'interrupted') return 'Another user can resume this interrupted batch';
+    return 'Another user is running this batch';
+  }
   if (phase === 'reconnecting') return 'Reconnecting to the GPU';
   if (phase === 'interrupted') return 'Generation was interrupted';
   if (phase === 'cancelled') return 'Batch cancelled';
@@ -320,7 +325,20 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
   const isInterrupted = batch.phase === 'interrupted';
   const canResolveInterrupted = isInterrupted && canManage;
   const settled = ['complete', 'partial_failure', 'cancelled'].includes(batch.phase);
-  const status = batchStatus(batch.phase, counts.completed, counts.total, counts.failed, currentPrompt);
+  const displayedPhase = isLocked ? (batch.remoteState ?? batch.phase) : batch.phase;
+  const status = batchStatus(
+    batch.phase,
+    counts.completed,
+    counts.total,
+    counts.failed,
+    currentPrompt,
+    batch.remoteState,
+  );
+  const remoteActivity = batch.remoteState === 'paused'
+    ? 'paused this batch'
+    : batch.remoteState === 'interrupted'
+      ? 'has a resumable interrupted batch'
+      : 'is running this batch';
   const revealTarget = batch.prompts.find(
     (prompt) => prompt.status === 'downloaded' && prompt.filename,
   )?.filename;
@@ -331,7 +349,7 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
         <div>
           <div className="heading-status-row">
             <Eyebrow>Progress</Eyebrow>
-            <PhaseBadge tone={phaseTone(batch.phase)}>{batch.phase.replace('_', ' ')}</PhaseBadge>
+            <PhaseBadge tone={phaseTone(displayedPhase)}>{displayedPhase.replace('_', ' ')}</PhaseBadge>
           </div>
           <h1>{batch.name}</h1>
           <p>{batch.owner} · {counts.total} images · {state.pod.gpu ?? 'GPU disconnected'}</p>
@@ -377,7 +395,7 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
       {isLocked ? (
         <aside className="state-banner state-banner--locked" role="status">
           <LockKeyhole size={22} />
-          <div><strong>{batch.owner} is running this batch</strong><span>{batch.lockMessage} You can watch overall progress but cannot pause, cancel, or join.</span></div>
+          <div><strong>{batch.owner} {remoteActivity}</strong><span>{batch.lockMessage} You can watch overall progress but cannot pause, cancel, or join.</span></div>
         </aside>
       ) : null}
       {isReconnecting ? (

@@ -52,8 +52,10 @@ export interface WorkerReferencePayload {
 
 export type WorkerBatchEvent =
   | { type: 'idle' }
+  | { type: 'stop-pending'; message: string }
   | { type: 'busy'; summary: WorkerBatchSummary }
   | { type: 'manifest'; manifest: WorkerManifest; receipts: readonly LocalDownloadReceipt[] }
+  | { type: 'local-error'; batchId: string; code: string; message: string; retryable: boolean }
   | { type: 'error'; code: string; message: string; retryable: boolean };
 
 export class WorkerBatchError extends Error {
@@ -68,6 +70,31 @@ export class WorkerBatchError extends Error {
     this.status = status;
     this.retryable = retryableOverride ?? (status === 408 || status === 409 || status === 423 || status === 429 || status >= 500);
   }
+}
+
+class WorkerLocalSyncError extends WorkerBatchError {
+  constructor(code: string, message: string, retryable = true) {
+    super(code, message, 0, retryable);
+    this.name = 'WorkerLocalSyncError';
+  }
+}
+
+export function isWorkerLocalSyncError(error: unknown): boolean {
+  return error instanceof WorkerLocalSyncError;
+}
+
+function localSyncError(error: unknown, fallbackCode: string, fallbackMessage: string): WorkerLocalSyncError {
+  if (error instanceof WorkerLocalSyncError) return error;
+  if (typeof error === 'object' && error !== null) {
+    const candidate = error as { code?: unknown; message?: unknown; retryable?: unknown };
+    if (typeof candidate.code === 'string' && typeof candidate.message === 'string') {
+      return new WorkerLocalSyncError(candidate.code, candidate.message, candidate.retryable !== false);
+    }
+  }
+  if (error instanceof Error && error.message) {
+    return new WorkerLocalSyncError(fallbackCode, error.message);
+  }
+  return new WorkerLocalSyncError(fallbackCode, fallbackMessage);
 }
 
 type BatchControl = 'pause' | 'resume' | 'cancel' | 'retry_failed';
@@ -110,7 +137,7 @@ function validateReceipt(receipt: LocalDownloadReceipt, batchId: string): LocalD
     !Number.isSafeInteger(receipt.verifiedAtUnixMs) ||
     receipt.verifiedAtUnixMs < 0
   ) {
-    throw new WorkerBatchError('local_receipt_invalid', 'A local download receipt is invalid.', 0);
+    throw new WorkerLocalSyncError('local_receipt_invalid', 'A local download receipt is invalid.', false);
   }
   return { ...receipt };
 }
@@ -136,6 +163,7 @@ function requireSuccess(result: WorkerHttpResult, expected: readonly number[]): 
 
 export class WorkerBatchCoordinator {
   readonly #port: WorkerBatchPort;
+  readonly #prepareOwnedBatch: ((batchId: string) => Promise<void>) | null;
   readonly #listeners = new Set<(event: WorkerBatchEvent) => void>();
   #ownedBatchId: string | null = null;
   #batchName: string | null = null;
@@ -148,9 +176,14 @@ export class WorkerBatchCoordinator {
   #operationTail: Promise<void> = Promise.resolve();
   #mutationTail: Promise<void> = Promise.resolve();
 
-  constructor(port: WorkerBatchPort, recoveredBatchId: string | null = null) {
+  constructor(
+    port: WorkerBatchPort,
+    recoveredBatchId: string | null = null,
+    prepareOwnedBatch: ((batchId: string) => Promise<void>) | null = null,
+  ) {
     this.#port = port;
     this.#ownedBatchId = recoveredBatchId;
+    this.#prepareOwnedBatch = prepareOwnedBatch;
   }
 
   subscribe(listener: (event: WorkerBatchEvent) => void): () => void {
@@ -243,9 +276,15 @@ export class WorkerBatchCoordinator {
       );
       if (result === null) return { type: 'idle' };
       if (result.status === 423) {
-        // Always read status after the rejected create. Reusing a poll that
-        // began before the 423 can hide the worker's authoritative lock.
-        return this.#pollOnce(connectionGeneration, stateGeneration);
+        const failure = workerFailure(result);
+        if (['batch_busy', 'worker_volume_locked', 'worker_standby'].includes(failure.code)) {
+          // Always read status after a generation-busy rejection. Reusing a
+          // poll that began before the 423 can hide the durable worker lease.
+          return this.#pollOnce(connectionGeneration, stateGeneration);
+        }
+        // `gpu_stop_pending` is not batch busy: the short finalization guard is
+        // the only other generation veto and must remain typed/actionable.
+        throw failure;
       }
       const manifest = parseWorkerManifest(requireSuccess(result, [201]));
       this.#ownedBatchId = manifest.batchId;
@@ -318,6 +357,12 @@ export class WorkerBatchCoordinator {
       const status = parseWorkerStatus(requireSuccess(await this.#port.status(), [200]));
       if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
       if (status.activeBatch === null) {
+        const releasedEvent: WorkerBatchEvent = status.ready && !status.permissions.canCreate
+          ? {
+              type: 'stop-pending',
+              message: 'GPU Stop is finalizing; new generation is temporarily blocked.',
+            }
+          : { type: 'idle' };
         // The worker releases its shared lease as soon as generation reaches a
         // terminal state. Keep the known owner batch ID long enough to fetch
         // that terminal manifest and reconcile every ready artifact; otherwise
@@ -334,7 +379,7 @@ export class WorkerBatchCoordinator {
         }
         this.#ownedBatchId = null;
         this.#observedBusyBatchId = null;
-        return this.#commit({ type: 'idle' }, connectionGeneration, stateGeneration);
+        return this.#commit(releasedEvent, connectionGeneration, stateGeneration);
       }
       if (!status.permissions.isOwner) {
         this.#observedBusyBatchId = status.activeBatch.batchId;
@@ -353,6 +398,7 @@ export class WorkerBatchCoordinator {
       return await this.#synchronizeOwnedManifest(manifest, connectionGeneration, stateGeneration);
     } catch (error) {
       if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
+      if (error instanceof WorkerLocalSyncError) throw error;
       const safe = error instanceof WorkerBatchError
         ? error
         : typeof error === 'object' && error !== null &&
@@ -382,12 +428,46 @@ export class WorkerBatchCoordinator {
     if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
     let manifest = initial;
     const cached = this.#receiptCache.get(manifest.batchId);
+    const initiallyKnownReceipts = [...(cached?.values() ?? [])]
+      .sort((left, right) => left.index - right.index);
+    // The worker manifest is shared truth. Keep a receipt-free projection so
+    // any later device-local failure can be published before its actionable
+    // local error instead of hiding Ready or the worker-confirmed batch.
+    const sharedEvent = { type: 'manifest', manifest, receipts: initiallyKnownReceipts } as const;
+    const visibleSharedState = this.#commit(
+      sharedEvent,
+      connectionGeneration,
+      stateGeneration,
+    );
+    if (visibleSharedState.type === 'idle') return visibleSharedState;
+
+    try {
+      if (this.#prepareOwnedBatch !== null) {
+        try {
+          await this.#prepareOwnedBatch(manifest.batchId);
+        } catch (error) {
+          throw localSyncError(
+            error,
+            'local_recovery_unavailable',
+            'The local download recovery state is not available yet.',
+          );
+        }
+      }
     const byIndex = cached ?? new Map<number, LocalDownloadReceipt>();
     if (cached === undefined) {
-      const rawReceipts = await this.#port.readReceipts(
-        manifest.batchId,
-        this.#batchName ?? undefined,
-      );
+      let rawReceipts: LocalDownloadReceipt[];
+      try {
+        rawReceipts = await this.#port.readReceipts(
+          manifest.batchId,
+          this.#batchName ?? undefined,
+        );
+      } catch (error) {
+        throw localSyncError(
+          error,
+          'local_receipts_unavailable',
+          'The local download receipts are not available yet.',
+        );
+      }
       if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
       for (const receipt of rawReceipts) {
         const valid = validateReceipt(receipt, manifest.batchId);
@@ -402,7 +482,9 @@ export class WorkerBatchCoordinator {
       }
       this.#receiptCache.set(manifest.batchId, byIndex);
     }
-    let receipts = [...byIndex.values()].sort((left, right) => left.index - right.index);
+    let receipts = cached === undefined && byIndex.size > 0
+      ? [...byIndex.values()].sort((left, right) => left.index - right.index)
+      : initiallyKnownReceipts;
     const reconciledArtifactIndexes = new Set<number>();
     // At most one successful native download/acknowledgement is attempted for
     // each artifact in this synchronization. The extra pass either commits a
@@ -429,10 +511,10 @@ export class WorkerBatchCoordinator {
         const local = byIndex.get(image.index);
         const localMatches = local?.sha256 === image.sha256 && local.sizeBytes === image.sizeBytes;
         if (local !== undefined && !localMatches) {
-          throw new WorkerBatchError(
+          throw new WorkerLocalSyncError(
             'local_receipt_conflict',
             `Local frame ${image.index} does not match the worker manifest.`,
-            0,
+            false,
           );
         }
         if (
@@ -443,11 +525,13 @@ export class WorkerBatchCoordinator {
         }
       }
       if (hasUnreconciledArtifact) {
-        const staged = this.#commit(
-          { type: 'manifest', manifest, receipts },
-          connectionGeneration,
-          stateGeneration,
-        );
+        const staged = manifest === initial && receipts === initiallyKnownReceipts
+          ? sharedEvent
+          : this.#commit(
+              { type: 'manifest', manifest, receipts },
+              connectionGeneration,
+              stateGeneration,
+            );
         if (staged.type === 'idle' || !this.#isCurrent(connectionGeneration, stateGeneration)) {
           return { type: 'idle' };
         }
@@ -497,10 +581,10 @@ export class WorkerBatchCoordinator {
             reconciledThisPass = true;
             continue;
           }
-          throw new WorkerBatchError(
+          throw new WorkerLocalSyncError(
             'local_receipt_conflict',
             `Local frame ${image.index} does not match the worker manifest.`,
-            0,
+            false,
           );
         }
         const receipt = validateReceipt(
@@ -533,13 +617,13 @@ export class WorkerBatchCoordinator {
 
       if (!reconciledThisPass) {
         if (isTerminalManifest(manifest) && manifest.images.some((image) => image.status === 'ready')) {
-          throw new WorkerBatchError(
+          throw new WorkerLocalSyncError(
             'terminal_reconciliation_pending',
             'A verified image is still awaiting worker acknowledgement.',
-            409,
           );
         }
         if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
+        if (manifest === initial && receipts === initiallyKnownReceipts) return sharedEvent;
         return this.#commit(
           { type: 'manifest', manifest, receipts },
           connectionGeneration,
@@ -553,11 +637,25 @@ export class WorkerBatchCoordinator {
       if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
     }
 
-    throw new WorkerBatchError(
+    throw new WorkerLocalSyncError(
       'worker_reconciliation_limit',
       'Artifact reconciliation did not reach a stable worker manifest.',
-      409,
     );
+    } catch (error) {
+      if (!(error instanceof WorkerLocalSyncError)) throw error;
+      this.#commit(
+        {
+          type: 'local-error',
+          batchId: manifest.batchId,
+          code: error.code,
+          message: error.message,
+          retryable: error.retryable,
+        },
+        connectionGeneration,
+        stateGeneration,
+      );
+      throw error;
+    }
   }
 
   #downloadArtifactOnce(input: {
@@ -588,7 +686,13 @@ export class WorkerBatchCoordinator {
       }
       return active.promise;
     }
-    const operation = this.#port.downloadArtifact(input).finally(() => {
+    const operation = this.#port.downloadArtifact(input).catch((error: unknown) => {
+      throw localSyncError(
+        error,
+        'local_download_unavailable',
+        `Frame ${input.index} could not be saved to this device yet.`,
+      );
+    }).finally(() => {
       if (this.#artifactDownloads.get(key)?.promise === operation) {
         this.#artifactDownloads.delete(key);
       }

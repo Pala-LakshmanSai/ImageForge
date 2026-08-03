@@ -38,6 +38,9 @@ jobs:
       - name: Install Windows TypeScript compiler companion
         run: npm install --no-save --package-lock=false --ignore-scripts @typescript/typescript-win32-x64@7.0.2
 
+      - name: Validate deterministic two-client fixture
+        run: node scripts/native-two-client-smoke-server.mjs --self-test
+
       - name: Run frontend tests
         run: npm test
 
@@ -173,6 +176,185 @@ jobs:
             }
           }
 
+      - name: Run installed Windows two-client coordination smoke
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundleDir = Join-Path $env:GITHUB_WORKSPACE 'src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis'
+          $installer = @(Get-ChildItem -LiteralPath $bundleDir -Filter '*-setup.exe' -File)
+          if ($installer.Count -ne 1) {
+            throw "Expected exactly one NSIS installer in $bundleDir; found $($installer.Count)."
+          }
+          $buildDir = Join-Path $env:GITHUB_WORKSPACE 'src-tauri/target/x86_64-pc-windows-msvc/release'
+          $builtBinary = @(Get-ChildItem -LiteralPath $buildDir -Filter '*.exe' -File |
+            Where-Object { $_.Name -notmatch '(?i)(setup|uninstall)' })
+          if ($builtBinary.Count -ne 1) {
+            throw "Expected exactly one built application executable in $buildDir; found $($builtBinary.Count)."
+          }
+
+          $installRoot = Join-Path $env:RUNNER_TEMP 'imageforge-two-client-smoke'
+          $uiResult = Join-Path $env:RUNNER_TEMP 'imageforge-native-smoke-result.txt'
+          $resultA = Join-Path $env:RUNNER_TEMP 'imageforge-native-smoke-a.txt'
+          $resultB = Join-Path $env:RUNNER_TEMP 'imageforge-native-smoke-b.txt'
+          $audit = Join-Path $env:RUNNER_TEMP 'ImageForge-windows-two-client-smoke-audit.json'
+          $serverOut = Join-Path $env:RUNNER_TEMP 'imageforge-two-client-server.stdout'
+          $serverErr = Join-Path $env:RUNNER_TEMP 'imageforge-two-client-server.stderr'
+          $profileA = Join-Path $env:RUNNER_TEMP 'imageforge-webview-a'
+          $profileB = Join-Path $env:RUNNER_TEMP 'imageforge-webview-b'
+          $clientA = $null
+          $clientB = $null
+          $server = $null
+          try {
+            foreach ($path in @($installRoot, $profileA, $profileB)) {
+              if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+              New-Item -ItemType Directory -Path $path -Force | Out-Null
+            }
+            foreach ($path in @($resultA, $resultB, $audit, $serverOut, $serverErr)) {
+              Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            }
+            $installResult = Start-Process -FilePath $installer[0].FullName `
+              -ArgumentList @('/S', "/D=$installRoot") -Wait -PassThru
+            if ($installResult.ExitCode -ne 0) {
+              throw "Two-client NSIS install failed with exit code $($installResult.ExitCode)."
+            }
+            $installedExe = Join-Path $installRoot $builtBinary[0].Name
+            if (-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) {
+              throw "Installed application executable was not found at $installedExe."
+            }
+
+            $key = ([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N'))
+            $fixtureScript = Join-Path $env:GITHUB_WORKSPACE 'scripts/native-two-client-smoke-server.mjs'
+            $server = Start-Process -FilePath 'node' -PassThru `
+              -ArgumentList @($fixtureScript, '--audit', $audit) `
+              -Environment @{ IMAGEFORGE_NATIVE_SMOKE_KEY = $key } `
+              -RedirectStandardOutput $serverOut -RedirectStandardError $serverErr
+            $readyDeadline = (Get-Date).AddSeconds(20)
+            while ((-not (Test-Path -LiteralPath $serverOut) -or (Get-Item -LiteralPath $serverOut).Length -eq 0) -and (Get-Date) -lt $readyDeadline) {
+              if ($server.HasExited) {
+                throw "Two-client fixture exited before readiness: $(Get-Content -Raw -LiteralPath $serverErr -ErrorAction SilentlyContinue)"
+              }
+              Start-Sleep -Milliseconds 200
+            }
+            if (-not (Test-Path -LiteralPath $serverOut) -or (Get-Item -LiteralPath $serverOut).Length -eq 0) {
+              throw 'Two-client fixture did not report its loopback origin.'
+            }
+            $ready = (Get-Content -LiteralPath $serverOut | Select-Object -First 1) | ConvertFrom-Json
+            if ($ready.event -ne 'ready' -or $ready.origin -notmatch '^http://127\.0\.0\.1:\d+/$') {
+              throw 'Two-client fixture reported an invalid loopback origin.'
+            }
+
+            $clientA = Start-Process -FilePath $installedExe -WorkingDirectory $installRoot -PassThru -Environment @{
+              IMAGEFORGE_NATIVE_SMOKE = 'two-client'
+              IMAGEFORGE_NATIVE_SMOKE_ROLE = 'A'
+              IMAGEFORGE_NATIVE_SMOKE_RESULT = $resultA
+              IMAGEFORGE_NATIVE_SMOKE_FIXTURE = [string]$ready.origin
+              IMAGEFORGE_NATIVE_SMOKE_KEY = $key
+              IMAGEFORGE_NATIVE_SMOKE_PROFILE = $profileA
+            }
+            $clientB = Start-Process -FilePath $installedExe -WorkingDirectory $installRoot -PassThru -Environment @{
+              IMAGEFORGE_NATIVE_SMOKE = 'two-client'
+              IMAGEFORGE_NATIVE_SMOKE_ROLE = 'B'
+              IMAGEFORGE_NATIVE_SMOKE_RESULT = $resultB
+              IMAGEFORGE_NATIVE_SMOKE_FIXTURE = [string]$ready.origin
+              IMAGEFORGE_NATIVE_SMOKE_KEY = $key
+              IMAGEFORGE_NATIVE_SMOKE_PROFILE = $profileB
+            }
+            if ($clientA.Id -eq $clientB.Id) { throw 'Two-client smoke did not create distinct Windows processes.' }
+            $windowDeadline = (Get-Date).AddSeconds(30)
+            do {
+              Start-Sleep -Milliseconds 500
+              $clientA.Refresh()
+              $clientB.Refresh()
+              if ($clientA.HasExited -or $clientB.HasExited) {
+                throw 'A two-client ImageForge process exited before creating its native window.'
+              }
+            } while (($clientA.MainWindowHandle -eq 0 -or $clientB.MainWindowHandle -eq 0) -and (Get-Date) -lt $windowDeadline)
+            if ($clientA.MainWindowHandle -eq 0 -or $clientB.MainWindowHandle -eq 0) {
+              throw 'Both installed ImageForge clients did not create independent native windows.'
+            }
+
+            $smokeDeadline = (Get-Date).AddMinutes(3)
+            while ((-not (Test-Path -LiteralPath $resultA) -or -not (Test-Path -LiteralPath $resultB)) -and (Get-Date) -lt $smokeDeadline) {
+              $clientA.Refresh()
+              $clientB.Refresh()
+              if ($clientA.HasExited -or $clientB.HasExited) {
+                throw 'A two-client ImageForge process exited before reporting its result.'
+              }
+              Start-Sleep -Milliseconds 500
+            }
+            if (-not (Test-Path -LiteralPath $resultA) -or -not (Test-Path -LiteralPath $resultB)) {
+              throw 'The installed two-client Windows smoke timed out.'
+            }
+            $reportA = Get-Content -Raw -LiteralPath $resultA
+            $reportB = Get-Content -Raw -LiteralPath $resultB
+            if ($reportA -notmatch '(?m)^PASS$' -or $reportB -notmatch '(?m)^PASS$') {
+              throw "Installed two-client Windows smoke failed. A: $reportA B: $reportB"
+            }
+            $reportedPidA = [regex]::Match($reportA, '(?m)^pid=(\d+); window=main;').Groups[1].Value
+            $reportedPidB = [regex]::Match($reportB, '(?m)^pid=(\d+); window=main;').Groups[1].Value
+            if ($reportedPidA -ne [string]$clientA.Id -or $reportedPidB -ne [string]$clientB.Id) {
+              throw 'The two-client Windows reports did not come from the two launched native-window processes.'
+            }
+            if (-not (Test-Path -LiteralPath $audit -PathType Leaf)) {
+              throw 'The two-client Windows fixture audit was not written.'
+            }
+            $auditObject = Get-Content -Raw -LiteralPath $audit | ConvertFrom-Json
+            if ($auditObject.passed -ne $true -or $auditObject.unexpectedCreates -ne 0 -or $auditObject.unexpectedDeletes -ne 0) {
+              throw 'The two-client Windows fixture audit did not pass.'
+            }
+            Copy-Item -LiteralPath $audit -Destination (Join-Path $bundleDir 'ImageForge-windows-two-client-smoke-audit.json') -Force
+            Copy-Item -LiteralPath $resultA -Destination (Join-Path $bundleDir 'ImageForge-windows-two-client-A.txt') -Force
+            Copy-Item -LiteralPath $resultB -Destination (Join-Path $bundleDir 'ImageForge-windows-two-client-B.txt') -Force
+
+            $uiDetail = (Get-Content -LiteralPath $uiResult | Select-Object -Skip 1) -join ' '
+            $detailA = (Get-Content -LiteralPath $resultA | Select-Object -Skip 1) -join ' '
+            $detailB = (Get-Content -LiteralPath $resultB | Select-Object -Skip 1) -join ' '
+            @('PASS', "UI: $uiDetail", "Two-client: $detailA | $detailB") | Set-Content -Encoding utf8 -LiteralPath $uiResult
+          }
+          finally {
+            foreach ($process in @($clientA, $clientB, $server)) {
+              if ($null -ne $process -and -not $process.HasExited) {
+                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                $process.WaitForExit(5000)
+                $process.Refresh()
+                if (-not $process.HasExited) {
+                  throw "Smoke process $($process.Id) did not stop during cleanup."
+                }
+              }
+            }
+            if (Test-Path -LiteralPath $installRoot) {
+              $uninstaller = Join-Path $installRoot 'uninstall.exe'
+              if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
+                $uninstallResult = Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait -PassThru
+                if ($uninstallResult.ExitCode -ne 0) {
+                  throw "Two-client NSIS uninstall failed with exit code $($uninstallResult.ExitCode)."
+                }
+              }
+              Remove-Item -LiteralPath $installRoot -Recurse -Force -ErrorAction SilentlyContinue
+              if (Test-Path -LiteralPath $installRoot) {
+                throw "Two-client NSIS install root remained after cleanup: $installRoot."
+              }
+            }
+            foreach ($path in @($profileA, $profileB)) {
+              Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+              if (Test-Path -LiteralPath $path) {
+                throw "Two-client WebView profile remained after cleanup: $path."
+              }
+            }
+          }
+
+      - name: Upload failed Windows two-client smoke diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: imageforge-windows-two-client-smoke-diagnostics-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/imageforge-native-smoke-*.txt
+            ${{ runner.temp }}/ImageForge-windows-two-client-smoke-audit.json
+            ${{ runner.temp }}/imageforge-two-client-server.stdout
+            ${{ runner.temp }}/imageforge-two-client-server.stderr
+          if-no-files-found: ignore
+
       - name: Write Windows release metadata
         shell: pwsh
         run: |
@@ -186,6 +368,10 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer[0].FullName).Hash.ToLowerInvariant()
           $smokeResult = Join-Path $env:RUNNER_TEMP 'imageforge-native-smoke-result.txt'
           $smokeDetail = (Get-Content -LiteralPath $smokeResult | Select-Object -Skip 1) -join ' '
+          $twoClientAudit = Join-Path $bundleDir 'ImageForge-windows-two-client-smoke-audit.json'
+          $twoClientAuditHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $twoClientAudit).Hash.ToLowerInvariant()
+          $twoClientResultA = Join-Path $bundleDir 'ImageForge-windows-two-client-A.txt'
+          $twoClientResultB = Join-Path $bundleDir 'ImageForge-windows-two-client-B.txt'
           [ordered]@{
             product = 'ImageForge'
             version = [string]$package.version
@@ -197,8 +383,15 @@ jobs:
             sha256 = $hash
             signing = 'unsigned beta installer'
             notarization = 'not applicable'
-            native_smoke = 'install, WebView2, native launch/window, fake-adapter onboarding/reference/batch/Library UI, native Rust filesystem/download tests, cleanup'
+            native_smoke = 'install, WebView2, native launch/window, fake-adapter UI, two installed production-runtime clients, native Rust tests, cleanup'
             native_smoke_detail = $smokeDetail
+            two_client_smoke = 'two distinct installed PIDs/windows and WebView profiles; status-first recovery, shared busy/progress, veto, approve, deny/timeout, generation race, exact bidirectional remote Stop'
+            two_client_smoke_audit = 'ImageForge-windows-two-client-smoke-audit.json'
+            two_client_smoke_audit_sha256 = $twoClientAuditHash
+            two_client_result_a = 'ImageForge-windows-two-client-A.txt'
+            two_client_result_a_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $twoClientResultA).Hash.ToLowerInvariant()
+            two_client_result_b = 'ImageForge-windows-two-client-B.txt'
+            two_client_result_b_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $twoClientResultB).Hash.ToLowerInvariant()
           } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 -LiteralPath (Join-Path $bundleDir 'ImageForge-windows-release-metadata.json')
 
       - name: Upload Windows installer
@@ -208,6 +401,9 @@ jobs:
           path: |
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ImageForge-windows-release-metadata.json
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ImageForge-windows-two-client-smoke-audit.json
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ImageForge-windows-two-client-A.txt
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ImageForge-windows-two-client-B.txt
           if-no-files-found: error
 
   macos:
@@ -225,6 +421,9 @@ jobs:
 
       - name: Install JavaScript dependencies
         run: npm ci
+
+      - name: Validate deterministic two-client fixture
+        run: node scripts/native-two-client-smoke-server.mjs --self-test
 
       - name: Run frontend tests
         run: npm test
@@ -295,6 +494,193 @@ jobs:
           fi
           stop_app
 
+      - name: Run installed macOS two-client coordination smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_dir="$GITHUB_WORKSPACE/src-tauri/target/aarch64-apple-darwin/release/bundle"
+          dmg_candidates=()
+          while IFS= read -r candidate; do dmg_candidates+=("$candidate"); done \
+            < <(find "$bundle_dir/dmg" -maxdepth 1 -type f -name 'ImageForge_*_aarch64.dmg' -print)
+          if [ "${#dmg_candidates[@]}" -ne 1 ]; then
+            echo "Expected exactly one ImageForge DMG; found ${#dmg_candidates[@]}." >&2
+            exit 1
+          fi
+          dmg_path="${dmg_candidates[0]}"
+          mount_dir="$(mktemp -d "$RUNNER_TEMP/imageforge-dmg.XXXXXX")"
+          install_root="$(mktemp -d "$RUNNER_TEMP/imageforge-installed.XXXXXX")"
+          home_a="$(mktemp -d "$RUNNER_TEMP/imageforge-home-a.XXXXXX")"
+          home_b="$(mktemp -d "$RUNNER_TEMP/imageforge-home-b.XXXXXX")"
+          result_a="$RUNNER_TEMP/imageforge-native-smoke-a.txt"
+          result_b="$RUNNER_TEMP/imageforge-native-smoke-b.txt"
+          audit="$RUNNER_TEMP/ImageForge-macos-two-client-smoke-audit.json"
+          server_out="$RUNNER_TEMP/imageforge-two-client-server.stdout"
+          server_err="$RUNNER_TEMP/imageforge-two-client-server.stderr"
+          client_a_pid=""
+          client_b_pid=""
+          server_pid=""
+          mounted=0
+          stop_pid() {
+            local pid="${1:-}"
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+              kill "$pid" 2>/dev/null || true
+              for _ in $(seq 1 10); do
+                if ! kill -0 "$pid" 2>/dev/null; then break; fi
+                sleep 1
+              done
+              if kill -0 "$pid" 2>/dev/null; then
+                kill -9 "$pid" 2>/dev/null || true
+              fi
+              wait "$pid" 2>/dev/null || true
+            fi
+          }
+          cleanup() {
+            local status=$?
+            stop_pid "$client_a_pid"
+            stop_pid "$client_b_pid"
+            stop_pid "$server_pid"
+            if [ "$mounted" -eq 1 ]; then
+              if hdiutil detach "$mount_dir" -force >/dev/null 2>&1; then
+                mounted=0
+              else
+                status=1
+              fi
+            fi
+            if [ "$mounted" -eq 0 ]; then rm -rf "$mount_dir"; fi
+            rm -rf "$install_root" "$home_a" "$home_b"
+            trap - EXIT
+            exit "$status"
+          }
+          trap cleanup EXIT
+          rm -f "$result_a" "$result_b" "$audit" "$server_out" "$server_err"
+
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" "$dmg_path" >/dev/null
+          mounted=1
+          app_candidates=()
+          while IFS= read -r candidate; do app_candidates+=("$candidate"); done \
+            < <(find "$mount_dir" -maxdepth 2 -type d -name 'ImageForge.app' -print)
+          if [ "${#app_candidates[@]}" -ne 1 ]; then
+            echo "Expected exactly one ImageForge.app in the mounted DMG; found ${#app_candidates[@]}." >&2
+            exit 1
+          fi
+          installed_app="$install_root/ImageForge.app"
+          ditto "${app_candidates[0]}" "$installed_app"
+          codesign --verify --deep --strict --verbose=2 "$installed_app"
+          binary_candidates=()
+          while IFS= read -r candidate; do binary_candidates+=("$candidate"); done \
+            < <(find "$installed_app/Contents/MacOS" -maxdepth 1 -type f -perm -111 -print)
+          if [ "${#binary_candidates[@]}" -ne 1 ]; then
+            echo "Expected exactly one installed ImageForge executable; found ${#binary_candidates[@]}." >&2
+            exit 1
+          fi
+          binary_path="${binary_candidates[0]}"
+
+          key="$(openssl rand -hex 32)"
+          IMAGEFORGE_NATIVE_SMOKE_KEY="$key" \
+            node scripts/native-two-client-smoke-server.mjs --audit "$audit" >"$server_out" 2>"$server_err" &
+          server_pid=$!
+          ready_deadline=$((SECONDS + 20))
+          while [ ! -s "$server_out" ] && [ "$SECONDS" -lt "$ready_deadline" ]; do
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              cat "$server_err" >&2 || true
+              echo 'Two-client fixture exited before readiness.' >&2
+              exit 1
+            fi
+            sleep 0.2
+          done
+          if [ ! -s "$server_out" ]; then
+            echo 'Two-client fixture did not report its loopback origin.' >&2
+            exit 1
+          fi
+          ready_line="$(head -n 1 "$server_out")"
+          origin="$(node -e '
+            const value = JSON.parse(process.argv[1]);
+            if (value.event !== "ready" || !/^http:\/\/127\.0\.0\.1:\d+\/$/.test(value.origin)) process.exit(1);
+            process.stdout.write(value.origin);
+          ' "$ready_line")"
+
+          mkdir -p "$home_a/tmp" "$home_b/tmp"
+          HOME="$home_a" TMPDIR="$home_a/tmp" \
+            IMAGEFORGE_NATIVE_SMOKE=two-client \
+            IMAGEFORGE_NATIVE_SMOKE_ROLE=A \
+            IMAGEFORGE_NATIVE_SMOKE_RESULT="$result_a" \
+            IMAGEFORGE_NATIVE_SMOKE_FIXTURE="$origin" \
+            IMAGEFORGE_NATIVE_SMOKE_KEY="$key" \
+            "$binary_path" >"$RUNNER_TEMP/imageforge-client-a.log" 2>&1 &
+          client_a_pid=$!
+          HOME="$home_b" TMPDIR="$home_b/tmp" \
+            IMAGEFORGE_NATIVE_SMOKE=two-client \
+            IMAGEFORGE_NATIVE_SMOKE_ROLE=B \
+            IMAGEFORGE_NATIVE_SMOKE_RESULT="$result_b" \
+            IMAGEFORGE_NATIVE_SMOKE_FIXTURE="$origin" \
+            IMAGEFORGE_NATIVE_SMOKE_KEY="$key" \
+            "$binary_path" >"$RUNNER_TEMP/imageforge-client-b.log" 2>&1 &
+          client_b_pid=$!
+          if [ "$client_a_pid" = "$client_b_pid" ]; then
+            echo 'Two-client smoke did not create distinct macOS processes.' >&2
+            exit 1
+          fi
+
+          smoke_deadline=$((SECONDS + 180))
+          while { [ ! -f "$result_a" ] || [ ! -f "$result_b" ]; } && [ "$SECONDS" -lt "$smoke_deadline" ]; do
+            if ! kill -0 "$client_a_pid" 2>/dev/null || ! kill -0 "$client_b_pid" 2>/dev/null; then
+              cat "$RUNNER_TEMP/imageforge-client-a.log" >&2 || true
+              cat "$RUNNER_TEMP/imageforge-client-b.log" >&2 || true
+              echo 'An installed two-client ImageForge process exited before reporting its result.' >&2
+              exit 1
+            fi
+            sleep 0.5
+          done
+          if [ ! -f "$result_a" ] || [ ! -f "$result_b" ]; then
+            cat "$RUNNER_TEMP/imageforge-client-a.log" >&2 || true
+            cat "$RUNNER_TEMP/imageforge-client-b.log" >&2 || true
+            echo 'The installed two-client macOS smoke timed out.' >&2
+            exit 1
+          fi
+          if ! grep -q '^PASS$' "$result_a" || ! grep -q '^PASS$' "$result_b"; then
+            cat "$result_a" >&2 || true
+            cat "$result_b" >&2 || true
+            exit 1
+          fi
+          reported_pid_a="$(sed -n 's/^pid=\([0-9][0-9]*\); window=main;.*/\1/p' "$result_a")"
+          reported_pid_b="$(sed -n 's/^pid=\([0-9][0-9]*\); window=main;.*/\1/p' "$result_b")"
+          if [ "$reported_pid_a" != "$client_a_pid" ] || [ "$reported_pid_b" != "$client_b_pid" ]; then
+            echo 'The two-client macOS reports did not come from the two launched native-window processes.' >&2
+            exit 1
+          fi
+          if [ ! -f "$audit" ]; then
+            echo 'The two-client macOS fixture audit was not written.' >&2
+            exit 1
+          fi
+          node -e '
+            const fs = require("node:fs");
+            const audit = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            if (audit.passed !== true || audit.unexpectedCreates !== 0 || audit.unexpectedDeletes !== 0) process.exit(1);
+          ' "$audit"
+          cp "$audit" "$bundle_dir/dmg/ImageForge-macos-two-client-smoke-audit.json"
+          cp "$result_a" "$bundle_dir/dmg/ImageForge-macos-two-client-A.txt"
+          cp "$result_b" "$bundle_dir/dmg/ImageForge-macos-two-client-B.txt"
+
+          ui_detail="$(tail -n +2 "$RUNNER_TEMP/imageforge-native-smoke-result.txt" | tr '\n' ' ')"
+          detail_a="$(tail -n +2 "$result_a" | tr '\n' ' ')"
+          detail_b="$(tail -n +2 "$result_b" | tr '\n' ' ')"
+          printf 'PASS\nUI: %s\nTwo-client: %s | %s\n' "$ui_detail" "$detail_a" "$detail_b" \
+            > "$RUNNER_TEMP/imageforge-native-smoke-result.txt"
+
+      - name: Upload failed macOS two-client smoke diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: imageforge-macos-two-client-smoke-diagnostics-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/imageforge-native-smoke-*.txt
+            ${{ runner.temp }}/ImageForge-macos-two-client-smoke-audit.json
+            ${{ runner.temp }}/imageforge-two-client-server.stdout
+            ${{ runner.temp }}/imageforge-two-client-server.stderr
+            ${{ runner.temp }}/imageforge-client-a.log
+            ${{ runner.temp }}/imageforge-client-b.log
+          if-no-files-found: ignore
+
       - name: Write macOS release metadata
         shell: bash
         run: |
@@ -305,6 +691,10 @@ jobs:
           hash="$(shasum -a 256 "$dmg_path" | awk '{print $1}')"
           smoke_detail="$(tail -n +2 "$RUNNER_TEMP/imageforge-native-smoke-result.txt" | tr '\n' ' ')"
           smoke_detail_json="$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$smoke_detail")"
+          two_client_audit="$bundle_dir/dmg/ImageForge-macos-two-client-smoke-audit.json"
+          two_client_audit_hash="$(shasum -a 256 "$two_client_audit" | awk '{print $1}')"
+          two_client_result_a_hash="$(shasum -a 256 "$bundle_dir/dmg/ImageForge-macos-two-client-A.txt" | awk '{print $1}')"
+          two_client_result_b_hash="$(shasum -a 256 "$bundle_dir/dmg/ImageForge-macos-two-client-B.txt" | awk '{print $1}')"
           cat > "$bundle_dir/dmg/ImageForge-macos-release-metadata.json" <<EOF
           {
             "product": "ImageForge",
@@ -317,8 +707,15 @@ jobs:
             "sha256": "$hash",
             "signing": "ad-hoc signed beta",
             "notarization": "not notarized",
-            "native_smoke": "codesign, DMG verification, native launch/window, fake-adapter onboarding/reference/batch/Library UI, native Rust filesystem/download tests",
-            "native_smoke_detail": $smoke_detail_json
+            "native_smoke": "DMG install copy, codesign and DMG verification, fake-adapter UI, two installed production-runtime clients, native Rust tests, cleanup",
+            "native_smoke_detail": $smoke_detail_json,
+            "two_client_smoke": "two distinct installed PIDs/windows and isolated WKWebView stores; status-first recovery, shared busy/progress, veto, approve, deny/timeout, generation race, exact bidirectional remote Stop",
+            "two_client_smoke_audit": "ImageForge-macos-two-client-smoke-audit.json",
+            "two_client_smoke_audit_sha256": "$two_client_audit_hash",
+            "two_client_result_a": "ImageForge-macos-two-client-A.txt",
+            "two_client_result_a_sha256": "$two_client_result_a_hash",
+            "two_client_result_b": "ImageForge-macos-two-client-B.txt",
+            "two_client_result_b_sha256": "$two_client_result_b_hash"
           }
           EOF
 
@@ -330,4 +727,7 @@ jobs:
             src-tauri/target/aarch64-apple-darwin/release/bundle/macos/ImageForge.app
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge_*_aarch64.dmg
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge-macos-release-metadata.json
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge-macos-two-client-smoke-audit.json
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge-macos-two-client-A.txt
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge-macos-two-client-B.txt
           if-no-files-found: error

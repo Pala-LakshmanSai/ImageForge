@@ -1,3 +1,5 @@
+import type { StopGuardErrorCode } from "./errors.js";
+
 export const PRIMARY_APPROVED_GPU_IDS = [
   "NVIDIA GeForce RTX 4090",
   "NVIDIA GeForce RTX 5090",
@@ -307,6 +309,34 @@ export interface StopConfirmation {
   readonly expiresAt: string;
   readonly message: string;
 }
+
+/**
+ * The exact Pod returned by the final read-only stop revalidation. A guard may
+ * use the bounded signal for a short worker/native authorization round trip;
+ * it must not perform RunPod mutations itself.
+ */
+export interface StopGuardContext {
+  readonly podId: string;
+  readonly pod: ManagedPod;
+  readonly signal: AbortSignal;
+}
+
+/**
+ * A stop guard either permits the already-confirmed Pod to be deleted or
+ * returns a typed, user-actionable veto. Returning void is equivalent to an
+ * allowed decision for simple integrations.
+ */
+export interface StopGuardDecision {
+  readonly allow: boolean;
+  readonly code?: StopGuardErrorCode;
+  readonly message?: string;
+  readonly retryable?: boolean;
+  readonly details?: Readonly<Record<string, string | number | boolean | null>>;
+}
+
+export type StopGuard = (
+  context: StopGuardContext,
+) => Promise<StopGuardDecision | void>;
 
 export interface ConfirmedStopIntent {
   readonly intent: "confirm_stop_gpu";

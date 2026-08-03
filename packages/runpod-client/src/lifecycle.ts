@@ -1,5 +1,10 @@
 import { createRunPodClientConfig, type RunPodClientConfigInput } from "./config.js";
-import { RunPodClientError, asRunPodClientError, type RunPodOperation } from "./errors.js";
+import {
+  RunPodClientError,
+  asRunPodClientError,
+  type RunPodOperation,
+  type StopGuardErrorCode,
+} from "./errors.js";
 import { approveCatalogGpu, isEmergencyGpuId, staticGpuPolicy } from "./gpu-policy.js";
 import { buildManagedPodName } from "./real-provider.js";
 import { rankGpuOffers } from "./ranking.js";
@@ -21,6 +26,8 @@ import {
   type RunPodSnapshot,
   type SafeErrorSummary,
   type Sleep,
+  type StopGuard,
+  type StopGuardDecision,
   type SnapshotWarning,
   type StartGpuResult,
   type StopConfirmation,
@@ -38,6 +45,11 @@ export interface RunPodLifecycleControllerOptions {
   readonly clock?: Clock;
   readonly sleep?: Sleep;
   readonly tokenFactory?: TokenFactory;
+  /**
+   * Optional worker/native authorization performed after exact Pod
+   * revalidation and before RunPod DELETE. The guard must not mutate RunPod.
+   */
+  readonly stopGuard?: StopGuard;
 }
 
 type SnapshotListener = (snapshot: RunPodSnapshot) => void;
@@ -59,6 +71,7 @@ interface StartAttemptState {
 
 interface StopAttemptState {
   deleteAttempted: boolean;
+  guardAttempted: boolean;
 }
 
 const ACTIVE_POD_STATUSES = new Set<ManagedPod["status"]>([
@@ -73,6 +86,15 @@ const REUSABLE_POD_STATUSES = new Set<ManagedPod["status"]>([
   "provisioning",
   "starting",
   "running",
+]);
+
+const STOP_GUARD_ERROR_CODES = new Set<StopGuardErrorCode>([
+  "stop_blocked_by_active_batch",
+  "stop_consent_pending",
+  "stop_consent_denied",
+  "stop_consent_expired",
+  "gpu_stop_pending",
+  "stop_guard_failed",
 ]);
 
 // Refresh performs two deliberately ordered remote reads. This multiplier is
@@ -219,6 +241,31 @@ function validateExpectedImageCount(value: number): number {
   return value;
 }
 
+function normalizeStopGuardDecision(value: StopGuardDecision | void): StopGuardDecision {
+  if (value === undefined) return Object.freeze({ allow: true });
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    typeof value.allow !== "boolean"
+  ) {
+    throw new RunPodClientError({
+      code: "stop_guard_failed",
+      message: "The GPU stop authorization returned an invalid decision.",
+      operation: "terminate_pod",
+      retryable: true,
+    });
+  }
+  if (value.code !== undefined && !STOP_GUARD_ERROR_CODES.has(value.code)) {
+    throw new RunPodClientError({
+      code: "stop_guard_failed",
+      message: "The GPU stop authorization returned an unsupported decision.",
+      operation: "terminate_pod",
+      retryable: true,
+    });
+  }
+  return Object.freeze({ ...value });
+}
+
 export class RunPodLifecycleController {
   readonly #provider: RunPodProvider;
   readonly #config: RunPodClientConfig;
@@ -226,6 +273,7 @@ export class RunPodLifecycleController {
   readonly #clock: Clock;
   readonly #sleep: Sleep;
   readonly #tokenFactory: TokenFactory;
+  readonly #stopGuard: StopGuard | null;
   readonly #listeners = new Set<SnapshotListener>();
   readonly #confirmations = new Map<string, PendingConfirmation>();
   readonly #knownCreatedPods = new Map<string, ManagedPod>();
@@ -254,6 +302,7 @@ export class RunPodLifecycleController {
     this.#clock = options.clock ?? { now: () => Date.now() };
     this.#sleep = options.sleep ?? defaultSleep;
     this.#tokenFactory = options.tokenFactory ?? (() => crypto.randomUUID());
+    this.#stopGuard = options.stopGuard ?? null;
     this.#snapshot = Object.freeze({
       revision: 0,
       phase: "offline",
@@ -674,7 +723,7 @@ export class RunPodLifecycleController {
 
   stopGpu(intent: ConfirmedStopIntent, signal?: AbortSignal): Promise<StopGpuResult> {
     const deadline = createOperationDeadline(signal, this.#config.operationTimeoutMs);
-    const attempt: StopAttemptState = { deleteAttempted: false };
+    const attempt: StopAttemptState = { deleteAttempted: false, guardAttempted: false };
     const queued = this.#enqueueMutation(() => this.#stopGpu(intent, deadline.signal, attempt));
     return awaitWithAbort(queued, deadline.signal, "terminate_pod").catch((error: unknown) => {
       if (!deadline.timedOut()) {
@@ -699,12 +748,19 @@ export class RunPodLifecycleController {
         }
         throw stoppedError;
       }
+      const guardTimedOut = !attempt.deleteAttempted && attempt.guardAttempted;
       const timeoutError = new RunPodClientError({
-        code: attempt.deleteAttempted ? "pod_termination_failed" : "pod_discovery_failed",
+        code: attempt.deleteAttempted
+          ? "pod_termination_failed"
+          : guardTimedOut
+            ? "stop_guard_failed"
+            : "pod_discovery_failed",
         message: attempt.deleteAttempted
           ? "Pod termination timed out; refresh to verify whether DELETE succeeded."
-          : "Pod revalidation timed out before DELETE was attempted.",
-        operation: attempt.deleteAttempted ? "terminate_pod" : "get_pod",
+          : guardTimedOut
+            ? "GPU stop authorization timed out; the GPU remains running."
+            : "Pod revalidation timed out before DELETE was attempted.",
+        operation: attempt.deleteAttempted || guardTimedOut ? "terminate_pod" : "get_pod",
         retryable: true,
         mayHaveSucceeded: attempt.deleteAttempted,
         details: { podId: intent.podId, timeoutMs: this.#config.operationTimeoutMs },
@@ -754,8 +810,8 @@ export class RunPodLifecycleController {
     }
     if (!this.#snapshot.pods.some((pod) => pod.id === intent.podId && isActivePod(pod))) {
       throw new RunPodClientError({
-        code: "pod_not_found",
-        message: "The confirmed Pod is no longer active. Refresh before stopping.",
+        code: "termination_target_mismatch",
+        message: "The confirmed Pod changed before revalidation. Refresh and confirm again.",
         operation: "terminate_pod",
         details: { podId: intent.podId },
       });
@@ -785,12 +841,42 @@ export class RunPodLifecycleController {
     }
     if (currentPod === null || !isActivePod(currentPod)) {
       throw new RunPodClientError({
-        code: "pod_not_found",
+        code: "termination_target_mismatch",
         message:
           "The confirmed Pod no longer matches the managed ImageForge profile. Refresh before stopping.",
         operation: "terminate_pod",
         details: { podId: intent.podId },
       });
+    }
+
+    if (this.#stopGuard !== null) {
+      attempt.guardAttempted = true;
+      let decision: StopGuardDecision | void;
+      try {
+        decision = await awaitWithAbort(
+          this.#stopGuard({ podId: intent.podId, pod: currentPod, signal: signal as AbortSignal }),
+          signal,
+          "terminate_pod",
+        );
+      } catch (error) {
+        const guardError = asRunPodClientError(error, {
+          code: "stop_guard_failed",
+          message: "GPU stop authorization failed; the GPU remains running.",
+          operation: "terminate_pod",
+          retryable: true,
+        });
+        throw guardError;
+      }
+      const normalized = normalizeStopGuardDecision(decision);
+      if (!normalized.allow) {
+        throw new RunPodClientError({
+          code: normalized.code ?? "stop_guard_failed",
+          message: normalized.message ?? "GPU stop authorization was not granted.",
+          operation: "terminate_pod",
+          retryable: normalized.retryable ?? true,
+          ...(normalized.details === undefined ? {} : { details: normalized.details }),
+        });
+      }
     }
 
     this.#publish({

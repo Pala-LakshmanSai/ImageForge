@@ -33,9 +33,51 @@ silently terminated.
 - FastAPI lifecycle exposes health before the model is ready.
 - Pipeline loader verifies local weights and loads BF16 directly onto one GPU.
 - A single generation controller owns an atomic active-batch lease.
+- Authenticated studio heartbeats publish only bounded client identity and
+  foreground presence. They never contain prompts, paths, or credentials.
+- Coordinated Stop GPU requests and their short-lived finalization guard live
+  beside the batch lease on the shared volume, so admission and termination
+  cannot race across processes or Pods.
 - Durable JSON manifests live on the network volume. Updates use temp files and
   atomic rename. Completed artifacts are immutable.
 - Preview and full files are downloadable independently with checksums.
+
+### Authoritative studio synchronization
+
+Every desktop treats the live RunPod snapshot and authenticated worker studio
+status as authoritative. A foreground client observes them on a bounded,
+coalesced interval; observation never starts or stops compute. Worker status is
+projected before local receipt reconciliation, so opening a second computer
+shows the current ready, busy, resumable, or finalizing state without waiting
+for that computer's receipt ledger.
+
+The shared worker lease, rather than an open window or a local recovery task,
+is the only generation lock. Exactly one running, paused, or resumable
+interrupted batch can own it. Other clients may prepare prompts while locked,
+but attempting to generate returns the typed owner/progress response instead
+of queueing another batch.
+
+Pod `offline` is a terminal authority boundary for that observation epoch. A
+late worker heartbeat cannot restore a stale ready/running/finalizing state.
+Owned or remotely observed in-flight work is projected as interrupted, local
+worker bindings are cleared, and both computers converge on the same Pod state.
+
+### Coordinated Stop GPU
+
+Stop remains an explicit foreground action. The worker first vetoes the request
+when any running, paused, or resumable interrupted batch owns the lease. When
+the worker is idle, every other live foreground principal must approve once;
+same-principal windows are excluded and multiple windows for one peer are
+deduplicated. A denial, timeout, transport failure, or ambiguous response fails
+closed and leaves the GPU running.
+
+After unanimous approval, the worker atomically installs a bounded finalization
+guard under the shared lease. New Create, Resume, and Retry mutations then
+return `gpu_stop_pending`. The desktop revalidates the exact Pod identity and
+profile before publishing `stopping` or sending RunPod DELETE. Failure releases
+the exact guard idempotently; restart can adopt only a valid, unexpired bounded
+guard. No heartbeat, window close, batch completion, timer, or recovery path
+can terminate compute.
 
 ## State machines
 
@@ -59,6 +101,9 @@ Image: `pending -> generating -> ready -> downloaded` with `generating -> retryi
 - The internal batch UUID remains the worker identity. Native storage maps it
   durably to the sanitized user-entered batch name, migrates legacy UUID
   folders atomically, and preserves that mapping across restart and resume.
+- Receipt recovery is device-local and best-effort. It may enrich an owned
+  batch after authoritative status is visible, but it never decides whether
+  the shared GPU is ready or busy and never hides another owner's live batch.
 
 ## Security boundaries
 

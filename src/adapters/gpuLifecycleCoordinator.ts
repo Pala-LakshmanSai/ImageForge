@@ -5,6 +5,7 @@ import {
   type RunPodClientConfig,
   type RunPodClientConfigInput,
   type RunPodSnapshot,
+  type StopGuard,
 } from '@imageforge/runpod-client';
 import { NATIVE_RUNPOD_API_KEY_SENTINEL } from '../native/tauriBridge';
 import { IMAGEFORGE_WORKER_IMAGE, parseStudioProfile, type StudioProfile } from './imageForgeAdapter';
@@ -22,6 +23,7 @@ export interface GpuLifecycleNativePort {
 
 export type LifecycleControllerFactory = (
   config: RunPodClientConfigInput,
+  stopGuard?: StopGuard,
 ) => RunPodLifecycleController;
 
 function configFor(profile: StudioProfile, allowSlowEmergency: boolean): RunPodClientConfigInput {
@@ -71,16 +73,21 @@ function canReplaceController(snapshot: RunPodSnapshot): boolean {
 export class GpuLifecycleCoordinator {
   readonly #port: GpuLifecycleNativePort;
   readonly #factory: LifecycleControllerFactory;
+  readonly #stopGuard: StopGuard | undefined;
   readonly #listeners = new Set<(snapshot: RunPodSnapshot) => void>();
   #controller: RunPodLifecycleController | null = null;
   #fingerprint: string | null = null;
   #allowSlowEmergency = false;
   #unresolvedRequestId: string | null = null;
   #unsubscribe: (() => void) | null = null;
+  #observationAbort: AbortController | null = null;
+  #observationPromise: Promise<RunPodSnapshot> | null = null;
+  #controllerGeneration = 0;
 
-  constructor(port: GpuLifecycleNativePort, factory?: LifecycleControllerFactory) {
+  constructor(port: GpuLifecycleNativePort, factory?: LifecycleControllerFactory, stopGuard?: StopGuard) {
     this.#port = port;
-    this.#factory = factory ?? ((config) => {
+    this.#stopGuard = stopGuard;
+    this.#factory = factory ?? ((config, controllerStopGuard) => {
       const provider = new RunPodRestProvider({
         apiKeyProvider: () => NATIVE_RUNPOD_API_KEY_SENTINEL,
         fetchTransport: port.runPodFetch,
@@ -89,6 +96,7 @@ export class GpuLifecycleCoordinator {
         provider,
         config,
         workerHealthProbe: new RunPodHealthProbe({ fetchTransport: port.workerHealthFetch }),
+        stopGuard: controllerStopGuard,
       });
     });
   }
@@ -109,6 +117,10 @@ export class GpuLifecycleCoordinator {
     allowSlowEmergency = this.#allowSlowEmergency,
   ): Promise<RunPodSnapshot> {
     const controller = await this.#ensureController(profileSource, allowSlowEmergency);
+    // Foreground/manual/Generate refreshes are authoritative and must not sit
+    // behind a slow advisory heartbeat. Abort the receipt-free observation;
+    // its queued lifecycle work sees the same signal and becomes inert.
+    this.#observationAbort?.abort();
     return controller.refresh({ expectedImageCount });
   }
 
@@ -123,7 +135,19 @@ export class GpuLifecycleCoordinator {
     allowSlowEmergency = this.#allowSlowEmergency,
   ): Promise<RunPodSnapshot> {
     const controller = await this.#ensureController(profileSource, allowSlowEmergency);
-    return controller.refresh({ expectedImageCount, suppressTransientPhase: true });
+    if (this.#observationPromise !== null) return this.#observationPromise;
+    const abort = new AbortController();
+    this.#observationAbort = abort;
+    const operation = controller.refresh({
+      expectedImageCount,
+      suppressTransientPhase: true,
+      signal: abort.signal,
+    }).finally(() => {
+      if (this.#observationPromise === operation) this.#observationPromise = null;
+      if (this.#observationAbort === abort) this.#observationAbort = null;
+    });
+    this.#observationPromise = operation;
+    return operation;
   }
 
   async start(
@@ -179,18 +203,6 @@ export class GpuLifecycleCoordinator {
   async stop(podId: string): Promise<RunPodSnapshot & { readonly alreadyStopped: boolean }> {
     const controller = this.#controller;
     if (controller === null) throw new Error('Refresh the ImageForge Pod before stopping it.');
-    // The confirmation came from the UI state, which may be stale when a
-    // different ImageForge desktop client stopped the one shared Pod. Re-read
-    // RunPod before issuing DELETE. A missing exact target is reconciliation,
-    // not a failed second termination attempt.
-    const preflight = await controller.refresh({
-      expectedImageCount: controller.getSnapshot().expectedImageCount,
-    });
-    const activeTarget = preflight.pods.some((pod) => pod.id === podId && ['provisioning', 'starting', 'running', 'unknown', 'error'].includes(pod.status));
-    if (!activeTarget) {
-      await this.#port.clearWorkerSession();
-      return Object.freeze({ ...preflight, alreadyStopped: true });
-    }
     const confirmation = controller.requestStopConfirmation({
       intent: 'stop_gpu',
       source: 'foreground_user',
@@ -205,22 +217,32 @@ export class GpuLifecycleCoordinator {
         confirmationToken: confirmation.token,
       })).snapshot;
     } catch (error) {
-      // A Pod can disappear in the small gap after the fresh preflight and
-      // before DELETE. Only the typed absence is safely reconcilable; auth,
-      // timeout, and 5xx errors must remain errors for the operator.
-      if (
-        typeof error !== 'object'
-        || error === null
-        || !('code' in error)
-        || error.code !== 'pod_not_found'
-      ) {
+      const code = typeof error === 'object' && error !== null && 'code' in error
+        ? error.code
+        : null;
+      // A preflight absence or profile drift is not a completed Stop. Refresh
+      // so every observer sees a replacement/offline truth, but preserve the
+      // failure and the existing worker binding until ordinary offline
+      // reconciliation handles it.
+      if (code === 'termination_target_mismatch') {
+        await controller.refresh({
+          expectedImageCount: controller.getSnapshot().expectedImageCount,
+        });
         throw error;
       }
+      // A Pod can disappear in the small gap after the fresh preflight and
+      // before DELETE. Only that typed DELETE absence is safely reconcilable;
+      // auth, timeout, and 5xx errors must remain errors for the operator.
+      if (code !== 'pod_not_found') throw error;
       const reconciled = await controller.refresh({
         expectedImageCount: controller.getSnapshot().expectedImageCount,
       });
-      const stillActive = reconciled.pods.some((pod) => pod.id === podId && ['provisioning', 'starting', 'running', 'unknown', 'error'].includes(pod.status));
-      if (stillActive) throw error;
+      // `pod_not_found` reaches this branch only after the exact Pod passed
+      // lifecycle revalidation and RunPod then returned DELETE 404. A newly
+      // active replacement must never be collapsed into "already stopped".
+      const anyActive = reconciled.pods.some((pod) =>
+        ['provisioning', 'starting', 'running', 'unknown', 'error'].includes(pod.status));
+      if (anyActive) throw error;
       await this.#port.clearWorkerSession();
       return Object.freeze({ ...reconciled, alreadyStopped: true });
     }
@@ -229,6 +251,9 @@ export class GpuLifecycleCoordinator {
   }
 
   dispose(): void {
+    this.#observationAbort?.abort();
+    this.#observationAbort = null;
+    this.#observationPromise = null;
     this.#unsubscribe?.();
     this.#unsubscribe = null;
     this.#listeners.clear();
@@ -249,11 +274,14 @@ export class GpuLifecycleCoordinator {
     await this.#port.bindProfile(profile.templateId, profile.networkVolumeId);
     await this.#port.clearWorkerSession();
     this.#unsubscribe?.();
-    const controller = this.#factory(configFor(profile, allowSlowEmergency));
+    const generation = this.#controllerGeneration + 1;
+    this.#controllerGeneration = generation;
+    const controller = this.#factory(configFor(profile, allowSlowEmergency), this.#stopGuard);
     this.#controller = controller;
     this.#fingerprint = fingerprint;
     this.#allowSlowEmergency = allowSlowEmergency;
     this.#unsubscribe = controller.subscribe((snapshot) => {
+      if (generation !== this.#controllerGeneration) return;
       for (const listener of this.#listeners) listener(snapshot);
     });
     return controller;

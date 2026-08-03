@@ -1,3 +1,11 @@
+export type StopGuardErrorCode =
+  | "stop_blocked_by_active_batch"
+  | "stop_consent_pending"
+  | "stop_consent_denied"
+  | "stop_consent_expired"
+  | "gpu_stop_pending"
+  | "stop_guard_failed";
+
 export type RunPodErrorCode =
   | "configuration_invalid"
   | "credential_unavailable"
@@ -21,7 +29,8 @@ export type RunPodErrorCode =
   | "termination_confirmation_expired"
   | "termination_target_mismatch"
   | "pod_termination_failed"
-  | "operation_aborted";
+  | "operation_aborted"
+  | StopGuardErrorCode;
 
 export type RunPodOperation =
   | "configuration"

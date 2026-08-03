@@ -13,6 +13,7 @@ import type {
   PodPhase,
   PodState,
   SettingsState,
+  StudioSyncState,
   ToastState,
   UsageRun,
 } from './types';
@@ -88,6 +89,35 @@ function emptyDraft(): DraftState {
   };
 }
 
+function emptyStudio(): StudioSyncState {
+  return {
+    connected: false,
+    serverInstanceId: null,
+    coordinationRevision: 0,
+    currentSession: null,
+    sessions: [],
+    stop: {
+      phase: 'idle',
+      requestId: null,
+      podId: null,
+      gpuDisplayName: null,
+      requester: null,
+      isRequester: false,
+      canRespond: false,
+      waitingFor: [],
+      approvedBy: [],
+      deniedBy: [],
+      responseDeadline: null,
+      finalizationExpiresAt: null,
+      finalizationId: null,
+      reason: null,
+      message: null,
+      retryable: false,
+      blockedByBatch: null,
+    },
+  };
+}
+
 export function createInitialState(): AppState {
   return {
     activeView: 'create',
@@ -107,6 +137,8 @@ export function createInitialState(): AppState {
     toast: null,
     toastSequence: 0,
     refreshedAt: null,
+    localSyncIssue: null,
+    studio: emptyStudio(),
   };
 }
 
@@ -316,13 +348,14 @@ export function canStartBatch(state: AppState): boolean {
     state.batch === null &&
     state.draft.prompts.length > 0 &&
     state.draft.destination !== null &&
+    state.studio.stop.phase !== 'finalizing' &&
     !hasDraftErrors(state)
   );
 }
 
 export function batchCounts(batch: BatchState | null) {
   if (!batch) return { total: 0, completed: 0, failed: 0, pending: 0, progress: 0 };
-  if (batch.phase === 'locked' && batch.reportedProgress) {
+  if (batch.reportedProgress && (batch.phase === 'locked' || batch.prompts.length === 0)) {
     const { total, completed, failed, cancelled } = batch.reportedProgress;
     const settled = completed + failed + cancelled;
     return {
@@ -629,7 +662,11 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           ? toast(state, 'success', 'GPU ready', 'FLUX.2 Klein 4B is warm and ready for one batch.')
           : {}),
       };
-    case 'SYNC_RUNTIME_POD':
+    case 'SYNC_RUNTIME_POD': {
+      const settledStop = action.pod.phase === 'offline'
+        && state.pod.podId !== null
+        && state.studio.stop.podId === state.pod.podId
+        && ['checking', 'pending', 'approved', 'finalizing'].includes(state.studio.stop.phase);
       return {
         ...state,
         pod: state.pod.phase === 'stopping' && state.pod.stopTargetPodId !== null && action.pod.podId === state.pod.stopTargetPodId
@@ -645,7 +682,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...(
           action.pod.phase === 'offline' &&
           state.batch &&
-          ['running', 'paused', 'validating'].includes(state.batch.phase)
+          ['running', 'paused', 'validating', 'locked'].includes(state.batch.phase)
             ? {
                 batch: {
                   ...state.batch,
@@ -655,12 +692,37 @@ export function appReducer(state: AppState, action: AppAction): AppState {
                       ? { ...prompt, status: 'pending' as const, failureReason: undefined }
                       : prompt,
                   ),
-                  statusMessage: 'Generation interrupted · restart a GPU to resume or cancel',
+                  statusMessage: state.batch.phase === 'locked'
+                    ? `${state.batch.owner}’s batch is offline · only its owner can resume or cancel`
+                    : 'Generation interrupted · restart a GPU to resume or cancel',
+                  ...(state.batch.phase === 'locked'
+                    ? {
+                        canManage: false,
+                        remoteState: 'interrupted' as const,
+                        lockMessage: 'The shared GPU stopped while this remote batch was active.',
+                      }
+                    : {}),
                 },
               }
             : {}
         ),
+        ...(settledStop
+          ? {
+              studio: {
+                ...state.studio,
+                stop: {
+                  ...state.studio.stop,
+                  phase: 'stopped' as const,
+                  finalizationExpiresAt: null,
+                  finalizationId: null,
+                  message: 'The exact coordinated GPU is now offline. No further stop action is pending.',
+                  retryable: false,
+                },
+              },
+            }
+          : {}),
       };
+    }
     case 'SYNC_CREATE_RECOVERY':
       return {
         ...state,
@@ -724,8 +786,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         refreshedAt: action.checkedAt,
-        pod: { ...state.pod, lastCheckedAt: action.checkedAt },
-        ...toast(state, 'info', 'Status refreshed', 'GPU and download status are up to date.'),
+        ...toast(state, 'info', 'Checking shared status', 'ImageForge is reading the current GPU and batch state.'),
       };
     case 'START_BATCH': {
       if (!canStartBatch(state)) {
@@ -802,20 +863,30 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           : state.pod,
         activeView: state.batch?.phase === 'validating' ? 'progress' : state.activeView,
         batch: action.batch,
+        studio: state.studio.stop.reason === 'worker_finalization_guard'
+          ? { ...state.studio, stop: emptyStudio().stop }
+          : state.studio,
         library,
         usage,
+        localSyncIssue: state.localSyncIssue?.batchId === action.batch.id ? null : state.localSyncIssue,
       };
     }
     case 'SYNC_RUNTIME_LIBRARY':
       return {
         ...state,
         library: mergeLibraryAssets(state.library, action.assets),
+        localSyncIssue: action.assets.some((asset) => asset.batchId === state.localSyncIssue?.batchId)
+          ? null
+          : state.localSyncIssue,
       };
     case 'SYNC_RUNTIME_BUSY':
       return {
         ...state,
         activeView: 'progress',
         batch: action.batch,
+        studio: state.studio.stop.reason === 'worker_finalization_guard'
+          ? { ...state.studio, stop: emptyStudio().stop }
+          : state.studio,
         ...toast(
           state,
           'warning',
@@ -823,26 +894,190 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           'This batch is blocked immediately and was not queued.',
         ),
       };
-    case 'RUNTIME_BATCH_IDLE':
-      return state.batch?.phase === 'locked'
+    case 'RUNTIME_BATCH_IDLE': {
+      const idleState = state.studio.stop.phase === 'finalizing'
+        && state.studio.stop.reason === 'worker_finalization_guard'
+        ? { ...state, studio: { ...state.studio, stop: emptyStudio().stop } }
+        : state;
+      return idleState.batch?.phase === 'locked'
         ? {
-            ...state,
-            pod: state.pod.phase === 'reconnecting'
-              ? { ...state.pod, phase: 'ready', health: 'healthy', phaseProgress: 100, errorMessage: null, statusDetail: 'Model warm · accepting one batch' }
-              : state.pod,
+            ...idleState,
+            pod: idleState.pod.phase === 'reconnecting'
+              ? { ...idleState.pod, phase: 'ready', health: 'healthy', phaseProgress: 100, errorMessage: null, statusDetail: 'Model warm · accepting one batch' }
+              : idleState.pod,
             activeView: 'create',
             batch: null,
-            ...toast(state, 'success', 'ImageForge is available', 'The other batch released the shared worker lock.'),
+            ...toast(idleState, 'success', 'ImageForge is available', 'The other batch released the shared worker lock.'),
           }
-        : state.pod.phase === 'reconnecting'
-          ? { ...state, pod: { ...state.pod, phase: 'ready', health: 'healthy', phaseProgress: 100, errorMessage: null, statusDetail: 'Model warm · accepting one batch' } }
-          : state;
+        : idleState.pod.phase === 'reconnecting'
+          ? { ...idleState, pod: { ...idleState.pod, phase: 'ready', health: 'healthy', phaseProgress: 100, errorMessage: null, statusDetail: 'Model warm · accepting one batch' } }
+          : idleState;
+    }
+    case 'RUNTIME_STOP_GUARD_ACTIVE':
+      return {
+        ...state,
+        studio: {
+          ...state.studio,
+          stop: {
+            ...emptyStudio().stop,
+            phase: 'finalizing',
+            podId: action.podId,
+            reason: 'worker_finalization_guard',
+            message: action.message,
+          },
+        },
+      };
+    case 'RUNTIME_LOCAL_ERROR':
+      return {
+        ...state,
+        localSyncIssue: {
+          batchId: action.batchId,
+          code: action.code,
+          message: action.message,
+          retryable: action.retryable === true,
+        },
+        ...toast(
+          state,
+          'warning',
+          'Local files need attention',
+          action.message,
+          { label: 'Open settings', view: 'settings' },
+        ),
+      };
+    case 'BEGIN_STUDIO_STOP':
+      return {
+        ...state,
+        dialog: null,
+        studio: {
+          ...state.studio,
+          stop: {
+            ...emptyStudio().stop,
+            phase: 'checking',
+            podId: action.podId,
+            gpuDisplayName: action.gpuDisplayName,
+            isRequester: true,
+            message: 'Checking the active batch and other foreground editors.',
+          },
+        },
+      };
+    case 'SYNC_STUDIO_STATE': {
+      // Worker presence is subordinate to authoritative RunPod lifecycle.
+      // A response from the prior pinned worker session may settle after the
+      // exact Pod is proven Offline; it cannot revive a stopped request.
+      if (state.pod.phase === 'offline') return state;
+      const previous = state.studio.stop;
+      const next = action.studio.stop;
+      const becameDenied = next.phase === 'denied' && previous.phase !== 'denied';
+      const becameExpired = next.phase === 'expired' && previous.phase !== 'expired';
+      const becameCancelledByGeneration = next.phase === 'cancelled'
+        && next.reason === 'generation_started'
+        && previous.phase !== 'cancelled';
+      return {
+        ...state,
+        studio: action.studio,
+        ...(becameDenied
+          ? toast(
+              state,
+              'warning',
+              'GPU stays online',
+              `${next.deniedBy.map((peer) => peer.displayName).join(', ') || 'Another editor'} chose to keep the GPU running.`,
+            )
+          : becameExpired
+            ? toast(state, 'warning', 'Stop request expired', 'Not every active editor approved before the response window closed. The GPU is still running.')
+            : becameCancelledByGeneration
+              ? toast(state, 'info', 'Stop request cancelled', 'Generation started before final authorization, so the GPU stays online.')
+              : {}),
+      };
+    }
+    case 'STUDIO_STOP_BLOCKED':
+      return {
+        ...state,
+        dialog: null,
+        studio: {
+          ...state.studio,
+          stop: {
+            ...emptyStudio().stop,
+            phase: 'blocked',
+            isRequester: true,
+            message: action.message,
+            blockedByBatch: {
+              owner: action.owner,
+              completed: action.completed,
+              total: action.total,
+            },
+          },
+        },
+        ...toast(
+          state,
+          'warning',
+          'GPU is protecting an active batch',
+          `${action.owner} is at ${action.completed} of ${action.total}. Stop is unavailable until the durable batch lease is released.`,
+        ),
+      };
+    case 'STUDIO_STOP_FAILED':
+      return {
+        ...state,
+        dialog: null,
+        studio: {
+          ...state.studio,
+          stop: {
+            ...state.studio.stop,
+            phase: 'failed',
+            message: action.message,
+            retryable: action.retryable === true,
+          },
+        },
+        ...toast(state, 'error', 'GPU stop was not authorized', action.message),
+      };
+    case 'STUDIO_STOPPED':
+      return {
+        ...state,
+        studio: {
+          ...state.studio,
+          stop: {
+            ...state.studio.stop,
+            phase: 'stopped',
+            message: action.alreadyStopped
+              ? 'The exact confirmed GPU was already absent; no second termination was sent.'
+              : 'The exact confirmed GPU was terminated after every required approval.',
+            retryable: false,
+          },
+        },
+        ...toast(
+          state,
+          action.alreadyStopped ? 'info' : 'success',
+          action.alreadyStopped ? 'GPU already stopped' : 'GPU stopped',
+          action.alreadyStopped
+            ? 'Shared status is synchronized and no second termination was sent.'
+            : 'Compute was terminated explicitly after coordinated approval. Local files are unchanged.',
+        ),
+      };
+    case 'CLEAR_STUDIO_STOP':
+      return {
+        ...state,
+        studio: { ...state.studio, stop: emptyStudio().stop },
+      };
+    case 'RESPOND_STUDIO_STOP':
+    case 'CANCEL_STUDIO_STOP':
+      return state;
     case 'RUNTIME_ERROR':
       {
       const credentialAction = action.scope === 'batch' && action.code === 'authentication_required'
         ? { label: 'Replace worker credential', view: 'settings' as const }
         : undefined;
-      return action.scope === 'batch' && action.retryable
+      return action.scope === 'batch' && action.code === 'gpu_stop_pending'
+        ? {
+            ...state,
+            activeView: state.batch?.phase === 'validating' ? 'create' : state.activeView,
+            batch: state.batch?.phase === 'validating' ? null : state.batch,
+            ...toast(
+              state,
+              'warning',
+              'GPU stop is finalizing',
+              'A single-use deletion guard won the race. No batch was queued; wait for shared GPU status to settle.',
+            ),
+          }
+        : action.scope === 'batch' && action.retryable
         ? {
             ...state,
             pod: {

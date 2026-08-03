@@ -1,4 +1,4 @@
-use super::session::WorkerSessionPin;
+use super::session::{validate_pod_id, WorkerSessionPin};
 use super::{CredentialKind, CredentialVault, NativeError, NativeResult, WorkerSession};
 use futures_util::StreamExt;
 use image::{guess_format, load_from_memory_with_format, ImageFormat};
@@ -17,6 +17,15 @@ const MAX_BATCH_REFERENCES: usize = 8;
 const MAX_REFERENCE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REFERENCE_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 const MAX_REFERENCE_PIXELS: u64 = 64_000_000;
+const MAX_STUDIO_RESPONSE_BYTES: usize = 256 * 1024;
+const MAX_STUDIO_SESSIONS: usize = 16;
+const MAX_STUDIO_PARTICIPANTS: usize = 16;
+const MAX_STUDIO_DISPLAY_NAME_CHARS: usize = 80;
+const MAX_STUDIO_TIMESTAMP_BYTES: usize = 32;
+const MAX_STUDIO_TTL_SECONDS: u64 = 300;
+const MAX_JSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+const WORKER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const WORKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -39,6 +48,62 @@ pub struct ReferenceInput {
     pub name: String,
     pub mime_type: String,
     pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StudioAvailability {
+    Foreground,
+    Background,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StudioStopDecision {
+    Approve,
+    Deny,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StudioHeartbeatInput {
+    pub session_id: String,
+    pub availability: StudioAvailability,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StudioCreateStopRequestInput {
+    pub request_id: String,
+    pub session_id: String,
+    pub pod_id: String,
+    pub gpu_display_name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StudioStopResponseInput {
+    pub request_id: String,
+    pub session_id: String,
+    pub decision: StudioStopDecision,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StudioFinalizeStopInput {
+    pub request_id: String,
+    pub session_id: String,
+    pub pod_id: String,
+    pub finalization_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StudioCancelStopInput {
+    pub request_id: String,
+    pub session_id: String,
+    pub pod_id: String,
+    pub finalization_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -64,12 +129,109 @@ pub struct WorkerApi {
     session: WorkerSession,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkerOperation {
     Health,
     Status,
     Manifest,
     Receipt,
+    StudioHeartbeat,
+    StudioStatus,
+    StudioCreateStopRequest,
+    StudioStopResponse,
+    StudioFinalizeStop,
+    StudioCancelStop,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StudioStopRoute {
+    Responses,
+    Finalize,
+    Cancel,
+}
+
+#[derive(Debug, Clone)]
+enum StudioResponseBinding {
+    Heartbeat {
+        session_id: Uuid,
+        availability: StudioAvailability,
+    },
+    Status {
+        session_id: Uuid,
+    },
+    CreateStop {
+        request_id: Uuid,
+        session_id: Uuid,
+        pod_id: String,
+        gpu_display_name: String,
+    },
+    RespondToStop {
+        request_id: Uuid,
+        session_id: Uuid,
+    },
+    FinalizeStop {
+        request_id: Uuid,
+        session_id: Uuid,
+        pod_id: String,
+        finalization_id: Uuid,
+    },
+    CancelStop {
+        request_id: Uuid,
+        session_id: Uuid,
+        pod_id: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct StudioRequestPlan {
+    method: Method,
+    path: String,
+    body: Option<Value>,
+    authenticated: bool,
+    operation: WorkerOperation,
+    binding: StudioResponseBinding,
+    expected_pod_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerTransportFailure {
+    Timeout,
+    Request,
+    Response,
+}
+
+impl WorkerOperation {
+    fn response_limit(self) -> usize {
+        if matches!(
+            self,
+            Self::StudioHeartbeat
+                | Self::StudioStatus
+                | Self::StudioCreateStopRequest
+                | Self::StudioStopResponse
+                | Self::StudioFinalizeStop
+                | Self::StudioCancelStop
+        ) {
+            MAX_STUDIO_RESPONSE_BYTES
+        } else {
+            MAX_JSON_RESPONSE_BYTES
+        }
+    }
+
+    fn studio_success_status(self) -> Option<StatusCode> {
+        match self {
+            Self::StudioCreateStopRequest => Some(StatusCode::CREATED),
+            Self::StudioHeartbeat
+            | Self::StudioStatus
+            | Self::StudioStopResponse
+            | Self::StudioFinalizeStop
+            | Self::StudioCancelStop => Some(StatusCode::OK),
+            _ => None,
+        }
+    }
+
+    fn is_studio(self) -> bool {
+        self.studio_success_status().is_some()
+    }
 }
 
 impl WorkerApi {
@@ -77,8 +239,8 @@ impl WorkerApi {
         let client = Client::builder()
             .https_only(true)
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(45))
+            .connect_timeout(WORKER_CONNECT_TIMEOUT)
+            .timeout(WORKER_REQUEST_TIMEOUT)
             .user_agent("ImageForge/0.1 desktop")
             .build()
             .map_err(|_| {
@@ -113,6 +275,95 @@ impl WorkerApi {
             true,
             WorkerOperation::Status,
         )
+        .await
+    }
+
+    pub async fn studio_heartbeat(
+        &self,
+        input: StudioHeartbeatInput,
+    ) -> NativeResult<WorkerHttpResponse> {
+        let session_id = parse_studio_uuid(&input.session_id, "studio_session_id_invalid")?;
+        self.execute_studio_request(studio_heartbeat_plan(session_id, input.availability))
+            .await
+    }
+
+    pub async fn studio_status(&self, session_id: &str) -> NativeResult<WorkerHttpResponse> {
+        let session_id = parse_studio_uuid(session_id, "studio_session_id_invalid")?;
+        self.execute_studio_request(studio_status_plan(session_id))
+            .await
+    }
+
+    pub async fn studio_create_stop_request(
+        &self,
+        input: StudioCreateStopRequestInput,
+    ) -> NativeResult<WorkerHttpResponse> {
+        let request_id = parse_studio_uuid(&input.request_id, "stop_request_id_invalid")?;
+        let session_id = parse_studio_uuid(&input.session_id, "studio_session_id_invalid")?;
+        validate_pod_id(&input.pod_id)?;
+        validate_gpu_display_name(&input.gpu_display_name)?;
+        let pod_id = input.pod_id;
+        let gpu_display_name = input.gpu_display_name;
+        self.execute_studio_request(studio_create_stop_plan(
+            request_id,
+            session_id,
+            pod_id,
+            gpu_display_name,
+        ))
+        .await
+    }
+
+    pub async fn studio_respond_to_stop_request(
+        &self,
+        input: StudioStopResponseInput,
+    ) -> NativeResult<WorkerHttpResponse> {
+        let request_id = parse_studio_uuid(&input.request_id, "stop_request_id_invalid")?;
+        let session_id = parse_studio_uuid(&input.session_id, "studio_session_id_invalid")?;
+        self.execute_studio_request(studio_stop_response_plan(
+            request_id,
+            session_id,
+            input.decision,
+        ))
+        .await
+    }
+
+    pub async fn studio_finalize_stop_request(
+        &self,
+        input: StudioFinalizeStopInput,
+    ) -> NativeResult<WorkerHttpResponse> {
+        let request_id = parse_studio_uuid(&input.request_id, "stop_request_id_invalid")?;
+        let session_id = parse_studio_uuid(&input.session_id, "studio_session_id_invalid")?;
+        validate_pod_id(&input.pod_id)?;
+        let pod_id = input.pod_id;
+        let finalization_id =
+            parse_studio_uuid(&input.finalization_id, "stop_finalization_id_invalid")?;
+        self.execute_studio_request(studio_finalize_stop_plan(
+            request_id,
+            session_id,
+            pod_id,
+            finalization_id,
+        ))
+        .await
+    }
+
+    pub async fn studio_cancel_stop_request(
+        &self,
+        input: StudioCancelStopInput,
+    ) -> NativeResult<WorkerHttpResponse> {
+        let request_id = parse_studio_uuid(&input.request_id, "stop_request_id_invalid")?;
+        let session_id = parse_studio_uuid(&input.session_id, "studio_session_id_invalid")?;
+        validate_pod_id(&input.pod_id)?;
+        let pod_id = input.pod_id;
+        let finalization_id = input
+            .finalization_id
+            .as_deref()
+            .map(|value| parse_studio_uuid(value, "stop_finalization_id_invalid"))
+            .transpose()?;
+        self.execute_studio_request(studio_cancel_stop_plan(
+            request_id,
+            session_id,
+            pod_id,
+            finalization_id,
+        ))
         .await
     }
 
@@ -357,6 +608,38 @@ impl WorkerApi {
             .await
     }
 
+    async fn execute_studio_request(
+        &self,
+        plan: StudioRequestPlan,
+    ) -> NativeResult<WorkerHttpResponse> {
+        let response = if let Some(expected_pod_id) = plan.expected_pod_id.as_deref() {
+            // Hold the session gate from target comparison until the response
+            // is fully read and projected. A concurrent refresh cannot rebind
+            // finalize/cancel to a replacement Pod midway through the guard.
+            let pin = self.session.pin().await?;
+            ensure_pin_matches_pod(&pin, expected_pod_id)?;
+            self.request_json_with_pin(
+                &pin,
+                plan.method,
+                &plan.path,
+                plan.body,
+                plan.authenticated,
+                plan.operation,
+            )
+            .await?
+        } else {
+            self.request_json(
+                plan.method,
+                &plan.path,
+                plan.body,
+                plan.authenticated,
+                plan.operation,
+            )
+            .await?
+        };
+        bind_studio_response(response, plan.binding)
+    }
+
     async fn request_json_with_pin(
         &self,
         pin: &WorkerSessionPin,
@@ -378,14 +661,9 @@ impl WorkerApi {
         if let Some(body) = body {
             builder = builder.header(CONTENT_TYPE, "application/json").json(&body);
         }
-        let response = builder.send().await.map_err(|_| {
-            NativeError::retryable(
-                "worker_network_error",
-                "The ImageForge worker could not be reached.",
-            )
-        })?;
+        let response = builder.send().await.map_err(map_worker_request_error)?;
         let status = response.status();
-        let bytes = read_bounded(response, MAX_JSON_RESPONSE_BYTES).await?;
+        let bytes = read_bounded(response, operation.response_limit()).await?;
         let body = if bytes.is_empty() {
             Value::Null
         } else {
@@ -406,8 +684,15 @@ impl WorkerApi {
             runpod_key.as_deref(),
         )?;
         validate_worker_envelope(status, &body)?;
+        if let Some(expected) = operation.studio_success_status() {
+            if status.is_success() && status != expected {
+                return Err(worker_response_invalid());
+            }
+        }
         let body = if status.is_success() {
             project_worker_success(operation, &body)?
+        } else if operation.is_studio() {
+            project_studio_error(status, &body)?
         } else {
             project_worker_error(&body)?
         };
@@ -416,6 +701,802 @@ impl WorkerApi {
             body,
         })
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct StudioStateProjection {
+    schema_version: u64,
+    server_instance_id: String,
+    coordination_revision: u64,
+    server_time: String,
+    presence_ttl_seconds: u64,
+    response_ttl_seconds: u64,
+    finalization_ttl_seconds: u64,
+    current_session: StudioSessionProjection,
+    sessions: Vec<StudioSessionProjection>,
+    active_batch: Option<StudioActiveBatchProjection>,
+    stop_request: Option<StudioStopRequestProjection>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct StudioSessionProjection {
+    session_id: String,
+    display_name: String,
+    availability: StudioAvailability,
+    expires_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct StudioParticipantProjection {
+    session_id: String,
+    display_name: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum StudioActiveBatchState {
+    Running,
+    Paused,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct StudioBatchOwnerProjection {
+    user_id: String,
+    display_name: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct StudioBatchProgressProjection {
+    total: u64,
+    completed: u64,
+    downloaded: u64,
+    failed: u64,
+    cancelled: u64,
+    processed: u64,
+    current_index: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct StudioActiveBatchProjection {
+    batch_id: String,
+    owner: StudioBatchOwnerProjection,
+    state: StudioActiveBatchState,
+    progress: StudioBatchProgressProjection,
+    pause_requested: bool,
+    cancel_requested: bool,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum StudioStopRequestState {
+    Pending,
+    Approved,
+    Denied,
+    Expired,
+    Cancelled,
+    Finalizing,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum StudioStopReason {
+    PeerDenied,
+    ResponseTimeout,
+    RequesterCancelled,
+    RequesterExpired,
+    GenerationStarted,
+    FinalizationExpired,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct StudioStopRequestProjection {
+    request_id: String,
+    pod_id: String,
+    gpu_display_name: String,
+    requester: StudioParticipantProjection,
+    state: StudioStopRequestState,
+    reason: Option<StudioStopReason>,
+    requested_at: String,
+    response_deadline: String,
+    finalization_expires_at: Option<String>,
+    waiting_for: Vec<StudioParticipantProjection>,
+    approved_by: Vec<StudioParticipantProjection>,
+    denied_by: Vec<StudioParticipantProjection>,
+    finalization_id: Option<String>,
+}
+
+fn parse_studio_uuid(value: &str, code: &'static str) -> NativeResult<Uuid> {
+    let parsed = Uuid::parse_str(value)
+        .map_err(|_| NativeError::new(code, "The studio coordination identifier is invalid."))?;
+    if parsed.get_version() != Some(uuid::Version::Random) || parsed.to_string() != value {
+        return Err(NativeError::new(
+            code,
+            "The studio coordination identifier is invalid.",
+        ));
+    }
+    Ok(parsed)
+}
+
+fn studio_session_path(session_id: Uuid) -> String {
+    format!("/v1/studio/sessions/{session_id}")
+}
+
+fn studio_stop_action_path(request_id: Uuid, route: StudioStopRoute) -> String {
+    let action = match route {
+        StudioStopRoute::Responses => "responses",
+        StudioStopRoute::Finalize => "finalize",
+        StudioStopRoute::Cancel => "cancel",
+    };
+    format!("/v1/studio/stop-requests/{request_id}/{action}")
+}
+
+fn studio_heartbeat_plan(session_id: Uuid, availability: StudioAvailability) -> StudioRequestPlan {
+    StudioRequestPlan {
+        method: Method::PUT,
+        path: studio_session_path(session_id),
+        body: Some(json!({"availability": availability})),
+        authenticated: true,
+        operation: WorkerOperation::StudioHeartbeat,
+        binding: StudioResponseBinding::Heartbeat {
+            session_id,
+            availability,
+        },
+        expected_pod_id: None,
+    }
+}
+
+fn studio_status_plan(session_id: Uuid) -> StudioRequestPlan {
+    StudioRequestPlan {
+        method: Method::GET,
+        path: studio_session_path(session_id),
+        body: None,
+        authenticated: true,
+        operation: WorkerOperation::StudioStatus,
+        binding: StudioResponseBinding::Status { session_id },
+        expected_pod_id: None,
+    }
+}
+
+fn studio_create_stop_plan(
+    request_id: Uuid,
+    session_id: Uuid,
+    pod_id: String,
+    gpu_display_name: String,
+) -> StudioRequestPlan {
+    StudioRequestPlan {
+        method: Method::POST,
+        path: "/v1/studio/stop-requests".to_owned(),
+        body: Some(json!({
+            "request_id": request_id,
+            "session_id": session_id,
+            "pod_id": pod_id,
+            "gpu_display_name": gpu_display_name,
+        })),
+        authenticated: true,
+        operation: WorkerOperation::StudioCreateStopRequest,
+        binding: StudioResponseBinding::CreateStop {
+            request_id,
+            session_id,
+            pod_id: pod_id.clone(),
+            gpu_display_name,
+        },
+        expected_pod_id: Some(pod_id),
+    }
+}
+
+fn studio_stop_response_plan(
+    request_id: Uuid,
+    session_id: Uuid,
+    decision: StudioStopDecision,
+) -> StudioRequestPlan {
+    StudioRequestPlan {
+        method: Method::POST,
+        path: studio_stop_action_path(request_id, StudioStopRoute::Responses),
+        body: Some(json!({
+            "session_id": session_id,
+            "decision": decision,
+        })),
+        authenticated: true,
+        operation: WorkerOperation::StudioStopResponse,
+        binding: StudioResponseBinding::RespondToStop {
+            request_id,
+            session_id,
+        },
+        expected_pod_id: None,
+    }
+}
+
+fn studio_finalize_stop_plan(
+    request_id: Uuid,
+    session_id: Uuid,
+    pod_id: String,
+    finalization_id: Uuid,
+) -> StudioRequestPlan {
+    StudioRequestPlan {
+        method: Method::POST,
+        path: studio_stop_action_path(request_id, StudioStopRoute::Finalize),
+        // pod_id is a native-only target assertion. The strict worker body
+        // remains the documented session/finalization pair.
+        body: Some(json!({
+            "session_id": session_id,
+            "finalization_id": finalization_id,
+        })),
+        authenticated: true,
+        operation: WorkerOperation::StudioFinalizeStop,
+        binding: StudioResponseBinding::FinalizeStop {
+            request_id,
+            session_id,
+            pod_id: pod_id.clone(),
+            finalization_id,
+        },
+        expected_pod_id: Some(pod_id),
+    }
+}
+
+fn studio_cancel_stop_plan(
+    request_id: Uuid,
+    session_id: Uuid,
+    pod_id: String,
+    finalization_id: Option<Uuid>,
+) -> StudioRequestPlan {
+    StudioRequestPlan {
+        method: Method::POST,
+        path: studio_stop_action_path(request_id, StudioStopRoute::Cancel),
+        // pod_id pins the native transport and response but is deliberately
+        // excluded from the worker's deny-unknown-fields request model.
+        body: Some(json!({
+            "session_id": session_id,
+            "finalization_id": finalization_id,
+        })),
+        authenticated: true,
+        operation: WorkerOperation::StudioCancelStop,
+        binding: StudioResponseBinding::CancelStop {
+            request_id,
+            session_id,
+            pod_id: pod_id.clone(),
+        },
+        expected_pod_id: Some(pod_id),
+    }
+}
+
+fn validate_gpu_display_name(value: &str) -> NativeResult<()> {
+    if value.is_empty()
+        || value.len() > 80
+        || value.trim() != value
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b' ' | b'.' | b'_' | b'(' | b')' | b'+' | b'-')
+        })
+    {
+        return Err(NativeError::new(
+            "gpu_display_name_invalid",
+            "The GPU display name is invalid.",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_pin_matches_pod(pin: &WorkerSessionPin, pod_id: &str) -> NativeResult<()> {
+    let endpoint = pin.endpoint("/v1/health")?;
+    let expected_host = format!("{pod_id}-8000.proxy.runpod.net");
+    if endpoint.host_str() != Some(expected_host.as_str()) {
+        return Err(NativeError::new(
+            "worker_session_changed",
+            "The verified ImageForge Pod changed before the exact-Pod coordination request could be sent.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_studio_timestamp(value: &str) -> NativeResult<()> {
+    let bytes = value.as_bytes();
+    let digits = |range: std::ops::Range<usize>| {
+        bytes
+            .get(range)
+            .is_some_and(|slice| slice.iter().all(u8::is_ascii_digit))
+    };
+    let valid_shape = bytes.len() <= MAX_STUDIO_TIMESTAMP_BYTES
+        && bytes.len() == 24
+        && digits(0..4)
+        && bytes.get(4) == Some(&b'-')
+        && digits(5..7)
+        && bytes.get(7) == Some(&b'-')
+        && digits(8..10)
+        && bytes.get(10) == Some(&b'T')
+        && digits(11..13)
+        && bytes.get(13) == Some(&b':')
+        && digits(14..16)
+        && bytes.get(16) == Some(&b':')
+        && digits(17..19)
+        && bytes.get(19) == Some(&b'.')
+        && digits(20..23)
+        && bytes.get(23) == Some(&b'Z');
+    let component = |range: std::ops::Range<usize>| -> Option<u32> {
+        std::str::from_utf8(bytes.get(range)?)
+            .ok()?
+            .parse::<u32>()
+            .ok()
+    };
+    if !valid_shape {
+        return Err(worker_response_invalid());
+    }
+    let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
+        component(0..4),
+        component(5..7),
+        component(8..10),
+        component(11..13),
+        component(14..16),
+        component(17..19),
+    ) else {
+        return Err(worker_response_invalid());
+    };
+    let maximum_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_gregorian_leap_year(year) => 29,
+        2 => 28,
+        _ => return Err(worker_response_invalid()),
+    };
+    if year == 0 || !(1..=maximum_day).contains(&day) || hour > 23 || minute > 59 || second > 59 {
+        return Err(worker_response_invalid());
+    }
+    Ok(())
+}
+
+fn is_gregorian_leap_year(year: u32) -> bool {
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+}
+
+fn validate_studio_display_name(value: &str) -> NativeResult<()> {
+    if value.trim() != value
+        || value.is_empty()
+        || value.chars().count() > MAX_STUDIO_DISPLAY_NAME_CHARS
+        || value.chars().any(char::is_control)
+    {
+        return Err(worker_response_invalid());
+    }
+    Ok(())
+}
+
+fn validate_safe_identity(value: &str) -> NativeResult<()> {
+    if value.trim() != value
+        || value.is_empty()
+        || value.len() > 200
+        || value.chars().any(char::is_control)
+    {
+        return Err(worker_response_invalid());
+    }
+    Ok(())
+}
+
+fn require_exact_keys(value: &Value, keys: &[&str]) -> NativeResult<()> {
+    let object = value.as_object().ok_or_else(worker_response_invalid)?;
+    if object.len() != keys.len() || keys.iter().any(|key| !object.contains_key(*key)) {
+        return Err(worker_response_invalid());
+    }
+    Ok(())
+}
+
+fn validate_studio_state_shape(body: &Value) -> NativeResult<()> {
+    require_exact_keys(
+        body,
+        &[
+            "schema_version",
+            "server_instance_id",
+            "coordination_revision",
+            "server_time",
+            "presence_ttl_seconds",
+            "response_ttl_seconds",
+            "finalization_ttl_seconds",
+            "current_session",
+            "sessions",
+            "active_batch",
+            "stop_request",
+        ],
+    )?;
+    require_exact_keys(
+        body.get("current_session")
+            .ok_or_else(worker_response_invalid)?,
+        &["session_id", "display_name", "availability", "expires_at"],
+    )?;
+    for session in body
+        .get("sessions")
+        .and_then(Value::as_array)
+        .ok_or_else(worker_response_invalid)?
+    {
+        require_exact_keys(
+            session,
+            &["session_id", "display_name", "availability", "expires_at"],
+        )?;
+    }
+    if let Some(active) = body.get("active_batch").filter(|value| !value.is_null()) {
+        require_exact_keys(
+            active,
+            &[
+                "batch_id",
+                "owner",
+                "state",
+                "progress",
+                "pause_requested",
+                "cancel_requested",
+            ],
+        )?;
+        require_exact_keys(
+            active.get("owner").ok_or_else(worker_response_invalid)?,
+            &["user_id", "display_name"],
+        )?;
+        require_exact_keys(
+            active.get("progress").ok_or_else(worker_response_invalid)?,
+            &[
+                "total",
+                "completed",
+                "downloaded",
+                "failed",
+                "cancelled",
+                "processed",
+                "current_index",
+            ],
+        )?;
+    }
+    if let Some(stop) = body.get("stop_request").filter(|value| !value.is_null()) {
+        require_exact_keys(
+            stop,
+            &[
+                "request_id",
+                "pod_id",
+                "gpu_display_name",
+                "requester",
+                "state",
+                "reason",
+                "requested_at",
+                "response_deadline",
+                "finalization_expires_at",
+                "waiting_for",
+                "approved_by",
+                "denied_by",
+                "finalization_id",
+            ],
+        )?;
+        require_exact_keys(
+            stop.get("requester").ok_or_else(worker_response_invalid)?,
+            &["session_id", "display_name"],
+        )?;
+        for key in ["waiting_for", "approved_by", "denied_by"] {
+            for participant in stop
+                .get(key)
+                .and_then(Value::as_array)
+                .ok_or_else(worker_response_invalid)?
+            {
+                require_exact_keys(participant, &["session_id", "display_name"])?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_studio_session(session: &StudioSessionProjection) -> NativeResult<()> {
+    parse_studio_uuid(&session.session_id, "worker_response_invalid")?;
+    validate_studio_display_name(&session.display_name)?;
+    validate_studio_timestamp(&session.expires_at)
+}
+
+fn validate_studio_participant(participant: &StudioParticipantProjection) -> NativeResult<()> {
+    parse_studio_uuid(&participant.session_id, "worker_response_invalid")?;
+    validate_studio_display_name(&participant.display_name)
+}
+
+fn validate_studio_participants(participants: &[StudioParticipantProjection]) -> NativeResult<()> {
+    if participants.len() > MAX_STUDIO_PARTICIPANTS {
+        return Err(worker_response_invalid());
+    }
+    let mut ids = std::collections::HashSet::with_capacity(participants.len());
+    for participant in participants {
+        validate_studio_participant(participant)?;
+        if !ids.insert(participant.session_id.as_str()) {
+            return Err(worker_response_invalid());
+        }
+    }
+    Ok(())
+}
+
+fn validate_studio_active_batch(batch: &StudioActiveBatchProjection) -> NativeResult<()> {
+    parse_studio_uuid(&batch.batch_id, "worker_response_invalid")?;
+    validate_safe_identity(&batch.owner.user_id)?;
+    validate_studio_display_name(&batch.owner.display_name)?;
+    let progress = &batch.progress;
+    if progress.total == 0
+        || [
+            progress.total,
+            progress.completed,
+            progress.downloaded,
+            progress.failed,
+            progress.cancelled,
+            progress.processed,
+        ]
+        .into_iter()
+        .any(|value| value > MAX_JSON_SAFE_INTEGER)
+        || progress.completed > progress.total
+        || progress.downloaded > progress.completed
+        || progress.failed > progress.total
+        || progress.cancelled > progress.total
+        || progress.processed > progress.total
+        || progress.completed + progress.failed + progress.cancelled != progress.processed
+        || progress
+            .current_index
+            .is_some_and(|index| index == 0 || index > progress.total)
+    {
+        return Err(worker_response_invalid());
+    }
+    Ok(())
+}
+
+fn validate_studio_stop_request(
+    stop: &mut StudioStopRequestProjection,
+    current_session_id: &str,
+) -> NativeResult<()> {
+    parse_studio_uuid(&stop.request_id, "worker_response_invalid")?;
+    validate_pod_id(&stop.pod_id).map_err(|_| worker_response_invalid())?;
+    validate_gpu_display_name(&stop.gpu_display_name).map_err(|_| worker_response_invalid())?;
+    validate_studio_participant(&stop.requester)?;
+    validate_studio_timestamp(&stop.requested_at)?;
+    validate_studio_timestamp(&stop.response_deadline)?;
+    if let Some(timestamp) = stop.finalization_expires_at.as_deref() {
+        validate_studio_timestamp(timestamp)?;
+    }
+    validate_studio_participants(&stop.waiting_for)?;
+    validate_studio_participants(&stop.approved_by)?;
+    validate_studio_participants(&stop.denied_by)?;
+    if let Some(finalization_id) = stop.finalization_id.as_deref() {
+        parse_studio_uuid(finalization_id, "worker_response_invalid")?;
+    }
+
+    let requester_is_current = stop.requester.session_id == current_session_id;
+    let field_state_valid = match stop.state {
+        StudioStopRequestState::Pending => {
+            stop.reason.is_none()
+                && stop.finalization_expires_at.is_none()
+                && stop.finalization_id.is_none()
+                && stop.denied_by.is_empty()
+        }
+        StudioStopRequestState::Approved => {
+            stop.reason.is_none()
+                && stop.finalization_expires_at.is_none()
+                && stop.finalization_id.is_none()
+                && stop.waiting_for.is_empty()
+                && stop.denied_by.is_empty()
+        }
+        StudioStopRequestState::Denied => {
+            stop.reason == Some(StudioStopReason::PeerDenied)
+                && stop.finalization_expires_at.is_none()
+                && stop.finalization_id.is_none()
+                && !stop.denied_by.is_empty()
+        }
+        StudioStopRequestState::Expired => {
+            matches!(
+                stop.reason,
+                Some(StudioStopReason::ResponseTimeout | StudioStopReason::FinalizationExpired)
+            ) && stop.finalization_expires_at.is_none()
+                && stop.finalization_id.is_none()
+        }
+        StudioStopRequestState::Cancelled => {
+            matches!(
+                stop.reason,
+                Some(
+                    StudioStopReason::RequesterCancelled
+                        | StudioStopReason::RequesterExpired
+                        | StudioStopReason::GenerationStarted
+                )
+            ) && stop.finalization_expires_at.is_none()
+                && stop.finalization_id.is_none()
+        }
+        StudioStopRequestState::Finalizing => {
+            stop.reason.is_none()
+                && stop.finalization_expires_at.is_some()
+                && stop.waiting_for.is_empty()
+                && stop.denied_by.is_empty()
+                && (!requester_is_current || stop.finalization_id.is_some())
+        }
+    };
+    if !field_state_valid {
+        return Err(worker_response_invalid());
+    }
+
+    let requester_id = stop.requester.session_id.as_str();
+    let mut participant_ids = std::collections::HashSet::new();
+    for participant in stop
+        .waiting_for
+        .iter()
+        .chain(&stop.approved_by)
+        .chain(&stop.denied_by)
+    {
+        if participant.session_id == requester_id
+            || !participant_ids.insert(participant.session_id.as_str())
+        {
+            return Err(worker_response_invalid());
+        }
+    }
+
+    if stop.state == StudioStopRequestState::Finalizing && !requester_is_current {
+        // finalization_id is an exact-session deletion grant. Even if a
+        // compromised or stale worker reflects a well-formed value to a peer,
+        // the native boundary never lets it cross into that renderer.
+        stop.finalization_id = None;
+    }
+    Ok(())
+}
+
+fn project_studio_state(body: &Value) -> NativeResult<Value> {
+    validate_studio_state_shape(body)?;
+    let mut projection: StudioStateProjection =
+        serde_json::from_value(body.clone()).map_err(|_| worker_response_invalid())?;
+    if projection.schema_version != 1
+        || projection.coordination_revision > MAX_JSON_SAFE_INTEGER
+        || ![
+            projection.presence_ttl_seconds,
+            projection.response_ttl_seconds,
+            projection.finalization_ttl_seconds,
+        ]
+        .into_iter()
+        .all(|ttl| (1..=MAX_STUDIO_TTL_SECONDS).contains(&ttl))
+    {
+        return Err(worker_response_invalid());
+    }
+    parse_studio_uuid(&projection.server_instance_id, "worker_response_invalid")?;
+    validate_studio_timestamp(&projection.server_time)?;
+    validate_studio_session(&projection.current_session)?;
+    if projection.sessions.is_empty() || projection.sessions.len() > MAX_STUDIO_SESSIONS {
+        return Err(worker_response_invalid());
+    }
+    let mut session_ids = std::collections::HashSet::with_capacity(projection.sessions.len());
+    for session in &projection.sessions {
+        validate_studio_session(session)?;
+        if !session_ids.insert(session.session_id.as_str()) {
+            return Err(worker_response_invalid());
+        }
+    }
+    if !projection
+        .sessions
+        .iter()
+        .any(|session| session == &projection.current_session)
+    {
+        return Err(worker_response_invalid());
+    }
+    if let Some(batch) = projection.active_batch.as_ref() {
+        validate_studio_active_batch(batch)?;
+    }
+    let current_session_id = projection.current_session.session_id.clone();
+    if let Some(stop) = projection.stop_request.as_mut() {
+        validate_studio_stop_request(stop, &current_session_id)?;
+    }
+    serde_json::to_value(projection).map_err(|_| worker_response_invalid())
+}
+
+fn bind_studio_response(
+    response: WorkerHttpResponse,
+    binding: StudioResponseBinding,
+) -> NativeResult<WorkerHttpResponse> {
+    if !(200..300).contains(&response.status) {
+        return Ok(response);
+    }
+    let state: StudioStateProjection =
+        serde_json::from_value(response.body.clone()).map_err(|_| worker_response_invalid())?;
+    validate_studio_response_binding(&state, &binding)?;
+    Ok(response)
+}
+
+fn validate_studio_response_binding(
+    state: &StudioStateProjection,
+    binding: &StudioResponseBinding,
+) -> NativeResult<()> {
+    let expected_session_id = match binding {
+        StudioResponseBinding::Heartbeat { session_id, .. }
+        | StudioResponseBinding::Status { session_id }
+        | StudioResponseBinding::CreateStop { session_id, .. }
+        | StudioResponseBinding::RespondToStop { session_id, .. }
+        | StudioResponseBinding::FinalizeStop { session_id, .. }
+        | StudioResponseBinding::CancelStop { session_id, .. } => session_id.to_string(),
+    };
+    if state.current_session.session_id != expected_session_id {
+        return Err(studio_response_mismatch());
+    }
+
+    match binding {
+        StudioResponseBinding::Heartbeat { availability, .. } => {
+            if state.current_session.availability != *availability {
+                return Err(studio_response_mismatch());
+            }
+        }
+        StudioResponseBinding::Status { .. } => {}
+        StudioResponseBinding::CreateStop {
+            request_id,
+            pod_id,
+            gpu_display_name,
+            ..
+        } => {
+            let stop = state
+                .stop_request
+                .as_ref()
+                .ok_or_else(studio_response_mismatch)?;
+            if stop.request_id != request_id.to_string()
+                || stop.requester.session_id != expected_session_id
+                || stop.requester.display_name != state.current_session.display_name
+                || stop.pod_id != *pod_id
+                || stop.gpu_display_name != *gpu_display_name
+            {
+                return Err(studio_response_mismatch());
+            }
+        }
+        StudioResponseBinding::RespondToStop { request_id, .. } => {
+            let stop = state
+                .stop_request
+                .as_ref()
+                .ok_or_else(studio_response_mismatch)?;
+            if stop.request_id != request_id.to_string() {
+                return Err(studio_response_mismatch());
+            }
+        }
+        StudioResponseBinding::FinalizeStop {
+            request_id,
+            pod_id,
+            finalization_id,
+            ..
+        } => {
+            let stop = state
+                .stop_request
+                .as_ref()
+                .ok_or_else(studio_response_mismatch)?;
+            let expected_finalization_id = finalization_id.to_string();
+            if stop.request_id != request_id.to_string()
+                || stop.requester.session_id != expected_session_id
+                || stop.requester.display_name != state.current_session.display_name
+                || stop.pod_id != *pod_id
+                || stop.state != StudioStopRequestState::Finalizing
+                || stop.finalization_id.as_deref() != Some(expected_finalization_id.as_str())
+                || stop.finalization_expires_at.is_none()
+            {
+                return Err(studio_response_mismatch());
+            }
+        }
+        StudioResponseBinding::CancelStop {
+            request_id, pod_id, ..
+        } => {
+            let stop = state
+                .stop_request
+                .as_ref()
+                .ok_or_else(studio_response_mismatch)?;
+            if stop.request_id != request_id.to_string()
+                || stop.requester.session_id != expected_session_id
+                || stop.requester.display_name != state.current_session.display_name
+                || stop.pod_id != *pod_id
+                || !matches!(
+                    stop.state,
+                    StudioStopRequestState::Denied
+                        | StudioStopRequestState::Expired
+                        | StudioStopRequestState::Cancelled
+                )
+                || stop.finalization_id.is_some()
+                || stop.finalization_expires_at.is_some()
+            {
+                return Err(studio_response_mismatch());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn studio_response_mismatch() -> NativeError {
+    NativeError::new(
+        "worker_response_mismatch",
+        "The worker coordination response did not match the submitted request.",
+    )
 }
 
 fn validate_create_batch(input: &CreateBatchInput) -> NativeResult<()> {
@@ -571,6 +1652,12 @@ fn project_worker_success(operation: WorkerOperation, body: &Value) -> NativeRes
         WorkerOperation::Status => project_status(body),
         WorkerOperation::Manifest => project_manifest(body),
         WorkerOperation::Receipt => Ok(json!({"schema_version": 1})),
+        WorkerOperation::StudioHeartbeat
+        | WorkerOperation::StudioStatus
+        | WorkerOperation::StudioCreateStopRequest
+        | WorkerOperation::StudioStopResponse
+        | WorkerOperation::StudioFinalizeStop
+        | WorkerOperation::StudioCancelStop => project_studio_state(body),
     }
 }
 
@@ -754,6 +1841,167 @@ fn project_worker_error(body: &Value) -> NativeResult<Value> {
     Ok(json!({"error": {"code": code, "message": message, "details": null}}))
 }
 
+fn project_studio_error(status: StatusCode, body: &Value) -> NativeResult<Value> {
+    require_exact_keys(body, &["schema_version", "error"])?;
+    if body.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        return Err(worker_response_invalid());
+    }
+    let error_value = body.get("error").ok_or_else(worker_response_invalid)?;
+    let error = error_value
+        .as_object()
+        .ok_or_else(worker_response_invalid)?;
+    if error.len() < 2
+        || error.len() > 3
+        || !error.contains_key("code")
+        || !error.contains_key("message")
+        || error
+            .keys()
+            .any(|key| !matches!(key.as_str(), "code" | "message" | "details"))
+    {
+        return Err(worker_response_invalid());
+    }
+    let code = error
+        .get("code")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 100
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        })
+        .ok_or_else(worker_response_invalid)?;
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            !value.is_empty() && value.len() <= 500 && !value.chars().any(char::is_control)
+        })
+        .ok_or_else(worker_response_invalid)?;
+    let expected_status = match code {
+        "authentication_required" => Some(StatusCode::UNAUTHORIZED),
+        "studio_session_not_found" | "stop_request_not_found" => Some(StatusCode::NOT_FOUND),
+        "stop_request_in_progress"
+        | "stop_request_identity_mismatch"
+        | "stop_response_conflict"
+        | "stop_response_not_allowed"
+        | "stop_request_not_approved"
+        | "stop_approval_pending"
+        | "finalization_mismatch" => Some(StatusCode::CONFLICT),
+        "stop_blocked_by_active_batch" | "gpu_stop_pending" => Some(StatusCode::LOCKED),
+        "validation_error" | "request_validation_failed" => Some(StatusCode::UNPROCESSABLE_ENTITY),
+        "studio_session_limit" => Some(StatusCode::TOO_MANY_REQUESTS),
+        _ => None,
+    };
+    if expected_status.is_some_and(|expected| expected != status) {
+        return Err(worker_response_invalid());
+    }
+    let details = match code {
+        "stop_blocked_by_active_batch" => {
+            let details = error.get("details").ok_or_else(worker_response_invalid)?;
+            require_exact_keys(details, &["owner", "completed", "total"])?;
+            let owner = details
+                .get("owner")
+                .and_then(Value::as_str)
+                .ok_or_else(worker_response_invalid)?;
+            validate_studio_display_name(owner)?;
+            let completed = details
+                .get("completed")
+                .and_then(Value::as_u64)
+                .filter(|value| *value <= MAX_JSON_SAFE_INTEGER)
+                .ok_or_else(worker_response_invalid)?;
+            let total = details
+                .get("total")
+                .and_then(Value::as_u64)
+                .filter(|value| (1..=MAX_JSON_SAFE_INTEGER).contains(value))
+                .ok_or_else(worker_response_invalid)?;
+            if completed > total {
+                return Err(worker_response_invalid());
+            }
+            json!({"owner": owner, "completed": completed, "total": total})
+        }
+        "gpu_stop_pending" => {
+            let details = error.get("details").ok_or_else(worker_response_invalid)?;
+            require_exact_keys(details, &["request_id", "requester", "expires_at"])?;
+            let request_id = details
+                .get("request_id")
+                .and_then(Value::as_str)
+                .ok_or_else(worker_response_invalid)?;
+            parse_studio_uuid(request_id, "worker_response_invalid")?;
+            let requester = details
+                .get("requester")
+                .and_then(Value::as_str)
+                .ok_or_else(worker_response_invalid)?;
+            validate_studio_display_name(requester)?;
+            let expires_at = details
+                .get("expires_at")
+                .and_then(Value::as_str)
+                .ok_or_else(worker_response_invalid)?;
+            validate_studio_timestamp(expires_at)?;
+            json!({
+                "request_id": request_id,
+                "requester": requester,
+                "expires_at": expires_at,
+            })
+        }
+        "stop_request_in_progress" => {
+            let details = error.get("details").ok_or_else(worker_response_invalid)?;
+            require_exact_keys(details, &["request_id", "requester", "state"])?;
+            let request_id = details
+                .get("request_id")
+                .and_then(Value::as_str)
+                .ok_or_else(worker_response_invalid)?;
+            parse_studio_uuid(request_id, "worker_response_invalid")?;
+            let requester = details
+                .get("requester")
+                .and_then(Value::as_str)
+                .ok_or_else(worker_response_invalid)?;
+            validate_studio_display_name(requester)?;
+            let state = details
+                .get("state")
+                .and_then(Value::as_str)
+                .filter(|state| matches!(*state, "pending" | "approved" | "finalizing"))
+                .ok_or_else(worker_response_invalid)?;
+            json!({"request_id": request_id, "requester": requester, "state": state})
+        }
+        "stop_approval_pending" => {
+            let details = error.get("details").ok_or_else(worker_response_invalid)?;
+            require_exact_keys(details, &["waiting_for"])?;
+            let waiting_for = details
+                .get("waiting_for")
+                .and_then(Value::as_array)
+                .filter(|items| items.len() <= MAX_STUDIO_PARTICIPANTS)
+                .ok_or_else(worker_response_invalid)?;
+            let mut projected = Vec::with_capacity(waiting_for.len());
+            for item in waiting_for {
+                let display_name = item.as_str().ok_or_else(worker_response_invalid)?;
+                validate_studio_display_name(display_name)?;
+                projected.push(display_name);
+            }
+            json!({"waiting_for": projected})
+        }
+        "stop_request_not_approved" => {
+            let details = error.get("details").ok_or_else(worker_response_invalid)?;
+            require_exact_keys(details, &["state"])?;
+            let state = details
+                .get("state")
+                .and_then(Value::as_str)
+                .filter(|state| {
+                    matches!(
+                        *state,
+                        "pending" | "approved" | "denied" | "expired" | "cancelled" | "finalizing"
+                    )
+                })
+                .ok_or_else(worker_response_invalid)?;
+            json!({"state": state})
+        }
+        _ => Value::Null,
+    };
+    Ok(json!({
+        "error": {"code": code, "message": message, "details": details},
+    }))
+}
+
 fn project_object(value: &Value, keys: &[&str]) -> NativeResult<serde_json::Map<String, Value>> {
     let source = value.as_object().ok_or_else(worker_response_invalid)?;
     keys.iter()
@@ -823,31 +2071,54 @@ fn worker_response_invalid() -> NativeError {
     )
 }
 
-async fn read_bounded(response: reqwest::Response, limit: usize) -> NativeResult<Vec<u8>> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > limit as u64)
+fn worker_transport_error(failure: WorkerTransportFailure) -> NativeError {
+    match failure {
+        WorkerTransportFailure::Timeout => {
+            NativeError::retryable("worker_timeout", "The ImageForge worker request timed out.")
+        }
+        WorkerTransportFailure::Request => NativeError::retryable(
+            "worker_network_error",
+            "The ImageForge worker could not be reached.",
+        ),
+        WorkerTransportFailure::Response => NativeError::retryable(
+            "worker_network_error",
+            "The worker response was interrupted.",
+        ),
+    }
+}
+
+fn map_worker_request_error(error: reqwest::Error) -> NativeError {
+    if error.is_timeout() {
+        worker_transport_error(WorkerTransportFailure::Timeout)
+    } else {
+        worker_transport_error(WorkerTransportFailure::Request)
+    }
+}
+
+fn ensure_response_size(
+    content_length: Option<u64>,
+    bytes_read: usize,
+    next_chunk: usize,
+    limit: usize,
+) -> NativeResult<()> {
+    if content_length.is_some_and(|length| length > limit as u64)
+        || bytes_read.saturating_add(next_chunk) > limit
     {
         return Err(NativeError::new(
             "worker_response_too_large",
             "The worker returned an unexpectedly large response.",
         ));
     }
+    Ok(())
+}
+
+async fn read_bounded(response: reqwest::Response, limit: usize) -> NativeResult<Vec<u8>> {
+    ensure_response_size(response.content_length(), 0, 0, limit)?;
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| {
-            NativeError::retryable(
-                "worker_network_error",
-                "The worker response was interrupted.",
-            )
-        })?;
-        if bytes.len().saturating_add(chunk.len()) > limit {
-            return Err(NativeError::new(
-                "worker_response_too_large",
-                "The worker returned an unexpectedly large response.",
-            ));
-        }
+        let chunk = chunk.map_err(|_| worker_transport_error(WorkerTransportFailure::Response))?;
+        ensure_response_size(None, bytes.len(), chunk.len(), limit)?;
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
@@ -856,6 +2127,99 @@ async fn read_bounded(response: reqwest::Response, limit: usize) -> NativeResult
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn studio_state_fixture() -> Value {
+        json!({
+            "schema_version": 1,
+            "server_instance_id": "11111111-1111-4111-8111-111111111111",
+            "coordination_revision": 7,
+            "server_time": "2026-08-03T10:20:30.123Z",
+            "presence_ttl_seconds": 15,
+            "response_ttl_seconds": 30,
+            "finalization_ttl_seconds": 15,
+            "current_session": {
+                "session_id": "22222222-2222-4222-8222-222222222222",
+                "display_name": "Lakshman",
+                "availability": "foreground",
+                "expires_at": "2026-08-03T10:20:45.123Z"
+            },
+            "sessions": [
+                {
+                    "session_id": "22222222-2222-4222-8222-222222222222",
+                    "display_name": "Lakshman",
+                    "availability": "foreground",
+                    "expires_at": "2026-08-03T10:20:45.123Z"
+                },
+                {
+                    "session_id": "33333333-3333-4333-8333-333333333333",
+                    "display_name": "Sujal",
+                    "availability": "foreground",
+                    "expires_at": "2026-08-03T10:20:45.123Z"
+                }
+            ],
+            "active_batch": null,
+            "stop_request": {
+                "request_id": "55555555-5555-4555-8555-555555555555",
+                "pod_id": "shared-pod-1",
+                "gpu_display_name": "RTX 4090",
+                "requester": {
+                    "session_id": "22222222-2222-4222-8222-222222222222",
+                    "display_name": "Lakshman"
+                },
+                "state": "pending",
+                "reason": null,
+                "requested_at": "2026-08-03T10:20:30.123Z",
+                "response_deadline": "2026-08-03T10:21:00.123Z",
+                "finalization_expires_at": null,
+                "waiting_for": [{
+                    "session_id": "33333333-3333-4333-8333-333333333333",
+                    "display_name": "Sujal"
+                }],
+                "approved_by": [],
+                "denied_by": [],
+                "finalization_id": null
+            }
+        })
+    }
+
+    fn uuid4(value: &str) -> Uuid {
+        parse_studio_uuid(value, "test_uuid_invalid").unwrap()
+    }
+
+    fn bind_fixture(
+        fixture: Value,
+        binding: StudioResponseBinding,
+    ) -> NativeResult<WorkerHttpResponse> {
+        let body = project_studio_state(&fixture)?;
+        bind_studio_response(WorkerHttpResponse { status: 200, body }, binding)
+    }
+
+    fn assert_binding_mismatch(fixture: Value, binding: StudioResponseBinding) {
+        assert_eq!(
+            bind_fixture(fixture, binding).unwrap_err().code,
+            "worker_response_mismatch"
+        );
+    }
+
+    fn assert_studio_plan(
+        plan: &StudioRequestPlan,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        operation: WorkerOperation,
+        expected_pod_id: Option<&str>,
+    ) {
+        assert_eq!(plan.method, method);
+        assert_eq!(plan.path, path);
+        assert_eq!(plan.body, body);
+        assert!(plan.authenticated);
+        assert_eq!(plan.operation, operation);
+        assert_eq!(plan.expected_pod_id.as_deref(), expected_pod_id);
+        assert!(plan.path.starts_with("/v1/studio/"));
+        assert!(!plan.path.contains("://"));
+        assert!(!plan.path.contains('?'));
+        assert!(!plan.path.contains('#'));
+    }
 
     #[test]
     fn batch_validation_rejects_only_malformed_prompt_input_without_logging_content() {
@@ -1052,6 +2416,621 @@ mod tests {
             .unwrap_err()
             .code,
             "worker_secret_reflection"
+        );
+    }
+
+    #[test]
+    fn studio_identifiers_routes_and_gpu_names_are_narrow() {
+        let session_id = parse_studio_uuid(
+            "22222222-2222-4222-8222-222222222222",
+            "studio_session_id_invalid",
+        )
+        .unwrap();
+        let request_id = parse_studio_uuid(
+            "55555555-5555-4555-8555-555555555555",
+            "stop_request_id_invalid",
+        )
+        .unwrap();
+        assert_eq!(
+            studio_session_path(session_id),
+            "/v1/studio/sessions/22222222-2222-4222-8222-222222222222"
+        );
+        assert_eq!(
+            studio_stop_action_path(request_id, StudioStopRoute::Responses),
+            "/v1/studio/stop-requests/55555555-5555-4555-8555-555555555555/responses"
+        );
+        assert_eq!(
+            studio_stop_action_path(request_id, StudioStopRoute::Finalize),
+            "/v1/studio/stop-requests/55555555-5555-4555-8555-555555555555/finalize"
+        );
+        assert_eq!(
+            studio_stop_action_path(request_id, StudioStopRoute::Cancel),
+            "/v1/studio/stop-requests/55555555-5555-4555-8555-555555555555/cancel"
+        );
+        for invalid in [
+            "22222222-2222-4222-8222-22222222222A",
+            "22222222222242228222222222222222",
+            "22222222-2222-1222-8222-222222222222",
+            "../sessions/peer",
+        ] {
+            assert!(parse_studio_uuid(invalid, "studio_session_id_invalid").is_err());
+        }
+        for accepted in ["RTX 4090", "RTX 2000 Ada", "NVIDIA_RTX-4090 (24GB)"] {
+            assert!(validate_gpu_display_name(accepted).is_ok());
+        }
+        for rejected in ["", " RTX 4090", "RTX/4090", "RTX\n4090", "🔥"] {
+            assert!(validate_gpu_display_name(rejected).is_err());
+        }
+        assert_eq!(
+            WorkerOperation::StudioHeartbeat.studio_success_status(),
+            Some(StatusCode::OK)
+        );
+        assert_eq!(
+            WorkerOperation::StudioCreateStopRequest.studio_success_status(),
+            Some(StatusCode::CREATED)
+        );
+        assert_eq!(
+            WorkerOperation::StudioStatus.response_limit(),
+            MAX_STUDIO_RESPONSE_BYTES
+        );
+    }
+
+    #[test]
+    fn all_six_studio_transport_plans_have_exact_method_path_auth_and_body() {
+        let session_id = uuid4("22222222-2222-4222-8222-222222222222");
+        let request_id = uuid4("55555555-5555-4555-8555-555555555555");
+        let finalization_id = uuid4("66666666-6666-4666-8666-666666666666");
+
+        let heartbeat = studio_heartbeat_plan(session_id, StudioAvailability::Foreground);
+        assert_studio_plan(
+            &heartbeat,
+            Method::PUT,
+            "/v1/studio/sessions/22222222-2222-4222-8222-222222222222",
+            Some(json!({"availability": "foreground"})),
+            WorkerOperation::StudioHeartbeat,
+            None,
+        );
+
+        let status = studio_status_plan(session_id);
+        assert_studio_plan(
+            &status,
+            Method::GET,
+            "/v1/studio/sessions/22222222-2222-4222-8222-222222222222",
+            None,
+            WorkerOperation::StudioStatus,
+            None,
+        );
+
+        let create = studio_create_stop_plan(
+            request_id,
+            session_id,
+            "shared-pod-1".into(),
+            "RTX 4090".into(),
+        );
+        assert_studio_plan(
+            &create,
+            Method::POST,
+            "/v1/studio/stop-requests",
+            Some(json!({
+                "request_id": request_id,
+                "session_id": session_id,
+                "pod_id": "shared-pod-1",
+                "gpu_display_name": "RTX 4090",
+            })),
+            WorkerOperation::StudioCreateStopRequest,
+            Some("shared-pod-1"),
+        );
+
+        let respond =
+            studio_stop_response_plan(request_id, session_id, StudioStopDecision::Approve);
+        assert_studio_plan(
+            &respond,
+            Method::POST,
+            "/v1/studio/stop-requests/55555555-5555-4555-8555-555555555555/responses",
+            Some(json!({"session_id": session_id, "decision": "approve"})),
+            WorkerOperation::StudioStopResponse,
+            None,
+        );
+
+        let finalize = studio_finalize_stop_plan(
+            request_id,
+            session_id,
+            "shared-pod-1".into(),
+            finalization_id,
+        );
+        assert_studio_plan(
+            &finalize,
+            Method::POST,
+            "/v1/studio/stop-requests/55555555-5555-4555-8555-555555555555/finalize",
+            Some(json!({
+                "session_id": session_id,
+                "finalization_id": finalization_id,
+            })),
+            WorkerOperation::StudioFinalizeStop,
+            Some("shared-pod-1"),
+        );
+        assert!(finalize
+            .body
+            .as_ref()
+            .is_some_and(|body| body.get("pod_id").is_none()));
+
+        let cancel = studio_cancel_stop_plan(
+            request_id,
+            session_id,
+            "shared-pod-1".into(),
+            Some(finalization_id),
+        );
+        assert_studio_plan(
+            &cancel,
+            Method::POST,
+            "/v1/studio/stop-requests/55555555-5555-4555-8555-555555555555/cancel",
+            Some(json!({
+                "session_id": session_id,
+                "finalization_id": finalization_id,
+            })),
+            WorkerOperation::StudioCancelStop,
+            Some("shared-pod-1"),
+        );
+        assert!(cancel
+            .body
+            .as_ref()
+            .is_some_and(|body| body.get("pod_id").is_none()));
+    }
+
+    #[test]
+    fn studio_transport_limits_and_failures_map_to_small_typed_errors() {
+        assert_eq!(WORKER_CONNECT_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(WORKER_REQUEST_TIMEOUT, Duration::from_secs(45));
+        assert_eq!(
+            ensure_response_size(
+                Some((MAX_STUDIO_RESPONSE_BYTES + 1) as u64),
+                0,
+                0,
+                MAX_STUDIO_RESPONSE_BYTES
+            )
+            .unwrap_err()
+            .code,
+            "worker_response_too_large"
+        );
+        assert_eq!(
+            ensure_response_size(
+                None,
+                MAX_STUDIO_RESPONSE_BYTES,
+                1,
+                MAX_STUDIO_RESPONSE_BYTES
+            )
+            .unwrap_err()
+            .code,
+            "worker_response_too_large"
+        );
+        assert!(ensure_response_size(
+            Some(MAX_STUDIO_RESPONSE_BYTES as u64),
+            MAX_STUDIO_RESPONSE_BYTES - 1,
+            1,
+            MAX_STUDIO_RESPONSE_BYTES,
+        )
+        .is_ok());
+
+        for (failure, code) in [
+            (WorkerTransportFailure::Timeout, "worker_timeout"),
+            (WorkerTransportFailure::Request, "worker_network_error"),
+            (WorkerTransportFailure::Response, "worker_network_error"),
+        ] {
+            let error = worker_transport_error(failure);
+            assert_eq!(error.code, code);
+            assert!(error.retryable);
+            assert!(!error.message.contains("http"));
+            assert!(!error.message.contains("Bearer"));
+        }
+    }
+
+    #[test]
+    fn stop_request_pod_must_match_the_pinned_worker_session() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let session = WorkerSession::default();
+        runtime
+            .block_on(session.bind_verified("shared-pod-1"))
+            .unwrap();
+        let pin = runtime.block_on(session.pin()).unwrap();
+        assert!(ensure_pin_matches_pod(&pin, "shared-pod-1").is_ok());
+        assert_eq!(
+            ensure_pin_matches_pod(&pin, "replacement-pod")
+                .unwrap_err()
+                .code,
+            "worker_session_changed"
+        );
+    }
+
+    #[test]
+    fn exact_pod_pin_blocks_rebind_until_the_coordination_request_finishes() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let session = WorkerSession::default();
+            session.bind_verified("shared-pod-1").await.unwrap();
+            let pin = session.pin().await.unwrap();
+
+            let replacement_session = session.clone();
+            let replacement = tokio::spawn(async move {
+                replacement_session
+                    .bind_verified("replacement-pod")
+                    .await
+                    .unwrap();
+            });
+            tokio::task::yield_now().await;
+            assert!(!replacement.is_finished());
+            assert!(ensure_pin_matches_pod(&pin, "shared-pod-1").is_ok());
+            assert_eq!(
+                ensure_pin_matches_pod(&pin, "replacement-pod")
+                    .unwrap_err()
+                    .code,
+                "worker_session_changed"
+            );
+
+            drop(pin);
+            replacement.await.unwrap();
+            let replacement_pin = session.pin().await.unwrap();
+            assert!(ensure_pin_matches_pod(&replacement_pin, "replacement-pod").is_ok());
+            assert_eq!(
+                ensure_pin_matches_pod(&replacement_pin, "shared-pod-1")
+                    .unwrap_err()
+                    .code,
+                "worker_session_changed"
+            );
+        });
+    }
+
+    #[test]
+    fn studio_state_projection_is_exact_bounded_and_typed() {
+        let fixture = studio_state_fixture();
+        let projected = project_worker_success(WorkerOperation::StudioStatus, &fixture).unwrap();
+        assert_eq!(projected, fixture);
+
+        let mut extra = fixture.clone();
+        extra["current_session"]["credential"] = json!("must-not-cross");
+        assert_eq!(
+            project_studio_state(&extra).unwrap_err().code,
+            "worker_response_invalid"
+        );
+
+        let mut stale_uuid = fixture.clone();
+        stale_uuid["server_instance_id"] = json!("11111111-1111-1111-8111-111111111111");
+        assert_eq!(
+            project_studio_state(&stale_uuid).unwrap_err().code,
+            "worker_response_invalid"
+        );
+
+        let mut excessive_ttl = fixture;
+        excessive_ttl["presence_ttl_seconds"] = json!(301);
+        assert_eq!(
+            project_studio_state(&excessive_ttl).unwrap_err().code,
+            "worker_response_invalid"
+        );
+    }
+
+    #[test]
+    fn finalization_grant_is_exact_requester_only_and_state_fields_are_coherent() {
+        let mut finalizing = studio_state_fixture();
+        finalizing["stop_request"]["state"] = json!("finalizing");
+        finalizing["stop_request"]["waiting_for"] = json!([]);
+        finalizing["stop_request"]["approved_by"] = json!([{
+            "session_id": "33333333-3333-4333-8333-333333333333",
+            "display_name": "Sujal"
+        }]);
+        finalizing["stop_request"]["finalization_expires_at"] = json!("2026-08-03T10:20:45.123Z");
+        finalizing["stop_request"]["finalization_id"] =
+            json!("66666666-6666-4666-8666-666666666666");
+
+        let requester_view = project_studio_state(&finalizing).unwrap();
+        assert_eq!(
+            requester_view["stop_request"]["finalization_id"],
+            "66666666-6666-4666-8666-666666666666"
+        );
+
+        let mut leaked_peer_view = finalizing.clone();
+        leaked_peer_view["current_session"] = leaked_peer_view["sessions"][1].clone();
+        let redacted = project_studio_state(&leaked_peer_view).unwrap();
+        assert!(redacted["stop_request"]["finalization_id"].is_null());
+
+        let mut malformed_leak = leaked_peer_view;
+        malformed_leak["stop_request"]["finalization_id"] = json!("not-a-grant");
+        assert_eq!(
+            project_studio_state(&malformed_leak).unwrap_err().code,
+            "worker_response_invalid"
+        );
+
+        let mut requester_missing_grant = finalizing.clone();
+        requester_missing_grant["stop_request"]["finalization_id"] = Value::Null;
+        assert_eq!(
+            project_studio_state(&requester_missing_grant)
+                .unwrap_err()
+                .code,
+            "worker_response_invalid"
+        );
+
+        let mut requester_missing_expiry = finalizing;
+        requester_missing_expiry["stop_request"]["finalization_expires_at"] = Value::Null;
+        assert_eq!(
+            project_studio_state(&requester_missing_expiry)
+                .unwrap_err()
+                .code,
+            "worker_response_invalid"
+        );
+
+        for (state, reason, finalization_expires_at, finalization_id) in [
+            ("pending", json!("peer_denied"), Value::Null, Value::Null),
+            (
+                "approved",
+                Value::Null,
+                json!("2026-08-03T10:20:45.123Z"),
+                Value::Null,
+            ),
+            (
+                "cancelled",
+                json!("response_timeout"),
+                Value::Null,
+                Value::Null,
+            ),
+            (
+                "expired",
+                json!("requester_cancelled"),
+                Value::Null,
+                Value::Null,
+            ),
+            (
+                "pending",
+                Value::Null,
+                Value::Null,
+                json!("66666666-6666-4666-8666-666666666666"),
+            ),
+        ] {
+            let mut invalid = studio_state_fixture();
+            invalid["stop_request"]["state"] = json!(state);
+            invalid["stop_request"]["reason"] = reason;
+            invalid["stop_request"]["finalization_expires_at"] = finalization_expires_at;
+            invalid["stop_request"]["finalization_id"] = finalization_id;
+            assert_eq!(
+                project_studio_state(&invalid).unwrap_err().code,
+                "worker_response_invalid",
+                "state {state} must reject incoherent finalization/reason fields"
+            );
+        }
+    }
+
+    #[test]
+    fn studio_timestamps_require_real_utc_millisecond_calendar_values() {
+        for valid in [
+            "2000-02-29T00:00:00.000Z",
+            "2024-02-29T23:59:59.999Z",
+            "2026-04-30T12:30:45.123Z",
+            "9999-12-31T23:59:59.999Z",
+        ] {
+            assert!(validate_studio_timestamp(valid).is_ok(), "{valid}");
+        }
+        for invalid in [
+            "0000-01-01T00:00:00.000Z",
+            "1900-02-29T00:00:00.000Z",
+            "2026-00-01T00:00:00.000Z",
+            "2026-13-01T00:00:00.000Z",
+            "2026-01-00T00:00:00.000Z",
+            "2026-02-29T00:00:00.000Z",
+            "2026-02-31T00:00:00.000Z",
+            "2026-04-31T00:00:00.000Z",
+            "2026-12-01T24:00:00.000Z",
+            "2026-12-01T23:60:00.000Z",
+            "2026-12-01T23:59:60.000Z",
+            "2026-12-01T23:59:59Z",
+            "2026-12-01T23:59:59.000+00:00",
+        ] {
+            assert!(validate_studio_timestamp(invalid).is_err(), "{invalid}");
+        }
+
+        let mut invalid_state = studio_state_fixture();
+        invalid_state["server_time"] = json!("2026-02-31T10:20:30.123Z");
+        assert_eq!(
+            project_studio_state(&invalid_state).unwrap_err().code,
+            "worker_response_invalid"
+        );
+    }
+
+    #[test]
+    fn every_studio_operation_rejects_a_valid_envelope_for_another_session() {
+        let expected_session = uuid4("22222222-2222-4222-8222-222222222222");
+        let request_id = uuid4("55555555-5555-4555-8555-555555555555");
+        let finalization_id = uuid4("66666666-6666-4666-8666-666666666666");
+        let bindings = [
+            StudioResponseBinding::Heartbeat {
+                session_id: expected_session,
+                availability: StudioAvailability::Foreground,
+            },
+            StudioResponseBinding::Status {
+                session_id: expected_session,
+            },
+            StudioResponseBinding::CreateStop {
+                request_id,
+                session_id: expected_session,
+                pod_id: "shared-pod-1".into(),
+                gpu_display_name: "RTX 4090".into(),
+            },
+            StudioResponseBinding::RespondToStop {
+                request_id,
+                session_id: expected_session,
+            },
+            StudioResponseBinding::FinalizeStop {
+                request_id,
+                session_id: expected_session,
+                pod_id: "shared-pod-1".into(),
+                finalization_id,
+            },
+            StudioResponseBinding::CancelStop {
+                request_id,
+                session_id: expected_session,
+                pod_id: "shared-pod-1".into(),
+            },
+        ];
+        for binding in bindings {
+            let mut misrouted = studio_state_fixture();
+            misrouted["current_session"] = misrouted["sessions"][1].clone();
+            assert_binding_mismatch(misrouted, binding);
+        }
+
+        assert_binding_mismatch(
+            studio_state_fixture(),
+            StudioResponseBinding::Heartbeat {
+                session_id: expected_session,
+                availability: StudioAvailability::Background,
+            },
+        );
+    }
+
+    #[test]
+    fn stop_operation_responses_are_bound_to_the_submitted_request() {
+        let session_id = uuid4("22222222-2222-4222-8222-222222222222");
+        let request_id = uuid4("55555555-5555-4555-8555-555555555555");
+        let finalization_id = uuid4("66666666-6666-4666-8666-666666666666");
+
+        let create = StudioResponseBinding::CreateStop {
+            request_id,
+            session_id,
+            pod_id: "shared-pod-1".into(),
+            gpu_display_name: "RTX 4090".into(),
+        };
+        assert!(bind_fixture(studio_state_fixture(), create.clone()).is_ok());
+        for (field, value) in [
+            ("request_id", json!("77777777-7777-4777-8777-777777777777")),
+            ("pod_id", json!("replacement-pod")),
+            ("gpu_display_name", json!("RTX 5090")),
+        ] {
+            let mut mismatch = studio_state_fixture();
+            mismatch["stop_request"][field] = value;
+            assert_binding_mismatch(mismatch, create.clone());
+        }
+        let mut wrong_requester = studio_state_fixture();
+        wrong_requester["stop_request"]["requester"] = json!({
+            "session_id": "44444444-4444-4444-8444-444444444444",
+            "display_name": "Another requester"
+        });
+        assert_binding_mismatch(wrong_requester, create);
+
+        let respond = StudioResponseBinding::RespondToStop {
+            request_id,
+            session_id,
+        };
+        assert!(bind_fixture(studio_state_fixture(), respond.clone()).is_ok());
+        let mut wrong_response_request = studio_state_fixture();
+        wrong_response_request["stop_request"]["request_id"] =
+            json!("77777777-7777-4777-8777-777777777777");
+        assert_binding_mismatch(wrong_response_request, respond);
+
+        let mut finalizing = studio_state_fixture();
+        finalizing["stop_request"]["state"] = json!("finalizing");
+        finalizing["stop_request"]["waiting_for"] = json!([]);
+        finalizing["stop_request"]["approved_by"] = json!([{
+            "session_id": "33333333-3333-4333-8333-333333333333",
+            "display_name": "Sujal"
+        }]);
+        finalizing["stop_request"]["finalization_expires_at"] = json!("2026-08-03T10:20:45.123Z");
+        finalizing["stop_request"]["finalization_id"] =
+            json!("66666666-6666-4666-8666-666666666666");
+        let finalize = StudioResponseBinding::FinalizeStop {
+            request_id,
+            session_id,
+            pod_id: "shared-pod-1".into(),
+            finalization_id,
+        };
+        assert!(bind_fixture(finalizing.clone(), finalize.clone()).is_ok());
+        assert_binding_mismatch(studio_state_fixture(), finalize.clone());
+        let mut wrong_finalize_pod = finalizing.clone();
+        wrong_finalize_pod["stop_request"]["pod_id"] = json!("replacement-pod");
+        assert_binding_mismatch(wrong_finalize_pod, finalize.clone());
+        finalizing["stop_request"]["finalization_id"] =
+            json!("77777777-7777-4777-8777-777777777777");
+        assert_binding_mismatch(finalizing, finalize);
+
+        let mut cancelled = studio_state_fixture();
+        cancelled["stop_request"]["state"] = json!("cancelled");
+        cancelled["stop_request"]["reason"] = json!("requester_cancelled");
+        let cancel = StudioResponseBinding::CancelStop {
+            request_id,
+            session_id,
+            pod_id: "shared-pod-1".into(),
+        };
+        assert_binding_mismatch(studio_state_fixture(), cancel.clone());
+        assert!(bind_fixture(cancelled.clone(), cancel.clone()).is_ok());
+        let mut wrong_cancel_pod = cancelled.clone();
+        wrong_cancel_pod["stop_request"]["pod_id"] = json!("replacement-pod");
+        assert_binding_mismatch(wrong_cancel_pod, cancel.clone());
+        cancelled["stop_request"]["request_id"] = json!("77777777-7777-4777-8777-777777777777");
+        assert_binding_mismatch(cancelled, cancel);
+    }
+
+    #[test]
+    fn studio_error_projection_preserves_only_safe_coordination_details() {
+        let blocked = json!({
+            "schema_version": 1,
+            "error": {
+                "code": "stop_blocked_by_active_batch",
+                "message": "Finish or cancel the active batch before stopping the GPU.",
+                "details": {"owner": "Sujal", "completed": 120, "total": 450}
+            }
+        });
+        assert_eq!(
+            project_studio_error(StatusCode::LOCKED, &blocked).unwrap(),
+            json!({"error": blocked["error"]})
+        );
+        assert_eq!(
+            project_studio_error(StatusCode::CONFLICT, &blocked)
+                .unwrap_err()
+                .code,
+            "worker_response_invalid"
+        );
+
+        let general = json!({
+            "schema_version": 1,
+            "error": {
+                "code": "internal_error",
+                "message": "The worker could not complete the request.",
+                "details": {"error_id": "safe-diagnostic", "path": "/workspace/private"}
+            }
+        });
+        assert_eq!(
+            project_studio_error(StatusCode::INTERNAL_SERVER_ERROR, &general).unwrap(),
+            json!({
+                "error": {
+                    "code": "internal_error",
+                    "message": "The worker could not complete the request.",
+                    "details": null
+                }
+            })
+        );
+
+        let pending = json!({
+            "schema_version": 1,
+            "error": {
+                "code": "gpu_stop_pending",
+                "message": "A finalized GPU stop is pending.",
+                "details": {
+                    "request_id": "55555555-5555-4555-8555-555555555555",
+                    "requester": "Lakshman",
+                    "expires_at": "2026-08-03T10:20:45.123Z"
+                }
+            }
+        });
+        assert_eq!(
+            project_studio_error(StatusCode::LOCKED, &pending).unwrap(),
+            json!({"error": pending["error"]})
+        );
+
+        let approval_pending = json!({
+            "schema_version": 1,
+            "error": {
+                "code": "stop_approval_pending",
+                "message": "Every foreground editor must approve.",
+                "details": {"waiting_for": ["Sujal"]}
+            }
+        });
+        assert_eq!(
+            project_studio_error(StatusCode::CONFLICT, &approval_pending).unwrap(),
+            json!({"error": approval_pending["error"]})
         );
     }
 }

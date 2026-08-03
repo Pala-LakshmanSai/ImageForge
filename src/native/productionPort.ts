@@ -30,6 +30,12 @@ import {
   nativeWorkerResumeBatch,
   nativeWorkerRetryFailed,
   nativeWorkerStatus,
+  nativeWorkerStudioCancelStopRequest,
+  nativeWorkerStudioCreateStopRequest,
+  nativeWorkerStudioFinalizeStopRequest,
+  nativeWorkerStudioHeartbeat,
+  nativeWorkerStudioRespondToStopRequest,
+  nativeWorkerStudioStatus,
   asNativeError,
 } from './tauriBridge';
 
@@ -81,6 +87,12 @@ export function createNativeProductionPort(): ProductionDesktopPort {
     replaceCredential: (kind: CredentialKind, value: string): Promise<CredentialMetadata> =>
       nativeReplaceCredential(kind, value),
     status: nativeWorkerStatus,
+    studioHeartbeat: nativeWorkerStudioHeartbeat,
+    studioStatus: nativeWorkerStudioStatus,
+    studioCreateStopRequest: nativeWorkerStudioCreateStopRequest,
+    studioRespondToStopRequest: nativeWorkerStudioRespondToStopRequest,
+    studioFinalizeStopRequest: nativeWorkerStudioFinalizeStopRequest,
+    studioCancelStopRequest: nativeWorkerStudioCancelStopRequest,
     createBatch: nativeWorkerCreateBatch,
     getBatch: nativeWorkerGetBatch,
     pauseBatch: nativeWorkerPauseBatch,

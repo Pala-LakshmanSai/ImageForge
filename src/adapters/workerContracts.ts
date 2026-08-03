@@ -13,6 +13,7 @@ const BATCH_STATES = [
   'failed',
   'interrupted',
 ] as const;
+const ACTIVE_BATCH_STATES = ['running', 'paused', 'interrupted'] as const;
 
 const IMAGE_STATES = [
   'pending',
@@ -25,6 +26,7 @@ const IMAGE_STATES = [
 ] as const;
 
 export type WorkerBatchState = (typeof BATCH_STATES)[number];
+export type WorkerActiveBatchState = (typeof ACTIVE_BATCH_STATES)[number];
 export type WorkerImageState = (typeof IMAGE_STATES)[number];
 
 export interface WorkerOwner {
@@ -45,7 +47,7 @@ export interface WorkerProgress {
 export interface WorkerBatchSummary {
   batchId: string;
   owner: WorkerOwner;
-  state: WorkerBatchState;
+  state: WorkerActiveBatchState;
   progress: WorkerProgress;
   pauseRequested: boolean;
   cancelRequested: boolean;
@@ -233,11 +235,17 @@ function summary(value: unknown): WorkerBatchSummary {
   return {
     batchId: uuid(item.batch_id, 'active_batch.batch_id'),
     owner: owner(item.owner),
-    state: enumeration(item.state, BATCH_STATES, 'active_batch.state'),
+    state: enumeration(item.state, ACTIVE_BATCH_STATES, 'active_batch.state'),
     progress: progress(item.progress),
     pauseRequested: boolean(item.pause_requested, 'active_batch.pause_requested'),
     cancelRequested: boolean(item.cancel_requested, 'active_batch.cancel_requested'),
   };
+}
+
+/** Reuses the same strict projection for collaboration snapshots, whose
+ * active_batch field is the worker status summary verbatim. */
+export function parseWorkerBatchSummary(value: unknown): WorkerBatchSummary {
+  return summary(value);
 }
 
 function safeError(value: unknown): WorkerImageRecord['error'] {
@@ -376,8 +384,8 @@ export function parseWorkerStatus(value: unknown): WorkerStatus {
       isOwner: boolean(permissions.is_owner, 'permissions.is_owner'),
     },
   };
-  if ((activeBatch === null) !== parsed.permissions.canCreate) {
-    throw new Error('worker status permissions are inconsistent with its active batch.');
+  if (activeBatch !== null && parsed.permissions.canCreate) {
+    throw new Error('worker status cannot allow creation while an active batch owns the lease.');
   }
   if (parsed.permissions.isOwner && activeBatch === null) {
     throw new Error('worker status cannot name an owner without an active batch.');

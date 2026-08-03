@@ -265,6 +265,32 @@ describe('WorkerBatchCoordinator', () => {
     expect(port.downloadArtifact).not.toHaveBeenCalled();
   });
 
+  it('keeps the short GPU finalization veto typed instead of inventing batch busy', async () => {
+    const port = fakePort({
+      createBatch: vi.fn(async (): Promise<WorkerHttpResult> => ({
+        status: 423,
+        body: {
+          error: {
+            code: 'gpu_stop_pending',
+            message: 'GPU termination is being finalized.',
+            details: {
+              request_id: '44444444-4444-4444-8444-444444444444',
+              requester: 'Lakshman',
+              expires_at: '2026-08-03T10:00:10.000Z',
+            },
+          },
+        },
+      })),
+    });
+
+    await expect(new WorkerBatchCoordinator(port).create(['Another brief'], 900)).rejects.toMatchObject({
+      code: 'gpu_stop_pending',
+      status: 423,
+    });
+    expect(port.status).not.toHaveBeenCalled();
+    expect(port.getBatch).not.toHaveBeenCalled();
+  });
+
   it('reconciles a matching local receipt without downloading again', async () => {
     const port = fakePort({
       createBatch: vi.fn(async () => ({ status: 201, body: manifest('downloaded') })),
@@ -349,6 +375,31 @@ describe('WorkerBatchCoordinator', () => {
     resolve({ status: 200, body: status(false) });
     await expect(first).resolves.toMatchObject({ type: 'busy' });
     expect(port.status).toHaveBeenCalledOnce();
+  });
+
+  it('projects an adopted finalization guard as stop-pending without a false busy batch or error', async () => {
+    const port = fakePort({
+      status: vi.fn(async () => ({
+        status: 200,
+        body: {
+          schema_version: 1,
+          ready: true,
+          active_batch: null,
+          permissions: { can_create: false, can_manage_active: false, is_owner: false },
+        },
+      })),
+    });
+    const coordinator = new WorkerBatchCoordinator(port);
+    const events: WorkerBatchEvent[] = [];
+    coordinator.subscribe((event) => events.push(event));
+
+    await expect(coordinator.poll()).resolves.toEqual({
+      type: 'stop-pending',
+      message: 'GPU Stop is finalizing; new generation is temporarily blocked.',
+    });
+    expect(events).toEqual([expect.objectContaining({ type: 'stop-pending' })]);
+    expect(events.some((event) => event.type === 'busy' || event.type === 'error')).toBe(false);
+    expect(port.getBatch).not.toHaveBeenCalled();
   });
 
   it('starts a fresh authoritative poll after forgetting an in-flight poll', async () => {
@@ -467,7 +518,9 @@ describe('WorkerBatchCoordinator', () => {
     synchronizing.forgetBatch();
     receiptResult.reject(new Error('stale receipt failure'));
     await expect(sync).resolves.toEqual({ type: 'idle' });
-    expect(events).toEqual([]);
+    expect(events).toEqual([
+      expect.objectContaining({ type: 'manifest', receipts: [] }),
+    ]);
   });
 
   it('sends pause before a stalled polling download is released', async () => {
@@ -640,11 +693,11 @@ describe('WorkerBatchCoordinator', () => {
     expect(downloadArtifact.mock.calls.map(([input]) => input.index)).toEqual([22, 23, 24]);
     expect(downloadArtifact.mock.calls.every(([input]) => input.batchName === 'Atlas of Quiet Work')).toBe(true);
     expect(getBatch).toHaveBeenCalledTimes(3);
-    expect(events).toHaveLength(6);
+    expect(events).toHaveLength(7);
     expect(events.map((candidate) => (
       (candidate as Extract<WorkerBatchEvent, { type: 'manifest' }>).receipts.length
-    ))).toEqual([21, 22, 22, 23, 24, 24]);
-    expect(events[2]).toMatchObject({
+    ))).toEqual([0, 21, 22, 22, 23, 24, 24]);
+    expect(events[3]).toMatchObject({
       type: 'manifest',
       manifest: { images: expect.arrayContaining([expect.objectContaining({ index: 23, status: 'ready' })]) },
       receipts: expect.arrayContaining([expect.objectContaining({ index: 22 })]),
@@ -788,7 +841,7 @@ describe('WorkerBatchCoordinator', () => {
       expect.objectContaining({ type: 'manifest', receipts: [] }),
       expect.objectContaining({ type: 'manifest', receipts: [expect.objectContaining({ index: 1 })] }),
       expect.objectContaining({
-        type: 'error',
+        type: 'local-error',
         code: 'terminal_reconciliation_pending',
         retryable: true,
       }),
@@ -852,6 +905,30 @@ describe('WorkerBatchCoordinator', () => {
     active = false;
     await expect(observer.poll()).resolves.toMatchObject({ type: 'idle' });
     expect(port.getBatch).not.toHaveBeenCalled();
+  });
+
+  it('restores the retained local terminal batch after a later remote lease releases', async () => {
+    let phase: 'local' | 'remote' | 'released' = 'local';
+    const port = fakePort({
+      status: vi.fn(async () => ({
+        status: 200,
+        body: phase === 'remote'
+          ? status(false)
+          : releasedStatus(),
+      })),
+      getBatch: vi.fn(async () => ({ status: 200, body: manifest('downloaded') })),
+      readReceipts: vi.fn(async () => [receipt()]),
+    });
+    const coordinator = new WorkerBatchCoordinator(port, batchId);
+
+    await expect(coordinator.poll()).resolves.toMatchObject({ type: 'manifest' });
+    phase = 'remote';
+    await expect(coordinator.poll()).resolves.toMatchObject({ type: 'busy' });
+    phase = 'released';
+    await expect(coordinator.poll()).resolves.toMatchObject({
+      type: 'manifest',
+      manifest: { batchId, state: 'completed' },
+    });
   });
 
   it('preserves retryable native transport errors for reconnect polling', async () => {

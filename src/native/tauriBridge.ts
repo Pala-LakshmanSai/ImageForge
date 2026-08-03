@@ -29,6 +29,91 @@ export interface NativeHttpResponse<T = unknown> {
   body: T;
 }
 
+export type NativeStudioAvailability = 'foreground' | 'background';
+export type NativeStudioStopDecision = 'approve' | 'deny';
+
+export interface NativeStudioSession {
+  session_id: string;
+  display_name: string;
+  availability: NativeStudioAvailability;
+  expires_at: string;
+}
+
+export interface NativeStudioParticipant {
+  session_id: string;
+  display_name: string;
+}
+
+export interface NativeStudioActiveBatch {
+  batch_id: string;
+  owner: { user_id: string; display_name: string };
+  state: 'running' | 'paused' | 'interrupted';
+  progress: {
+    total: number;
+    completed: number;
+    downloaded: number;
+    failed: number;
+    cancelled: number;
+    processed: number;
+    current_index: number | null;
+  };
+  pause_requested: boolean;
+  cancel_requested: boolean;
+}
+
+export interface NativeStudioStopRequest {
+  request_id: string;
+  pod_id: string;
+  gpu_display_name: string;
+  requester: NativeStudioParticipant;
+  state: 'pending' | 'approved' | 'denied' | 'expired' | 'cancelled' | 'finalizing';
+  reason:
+    | 'peer_denied'
+    | 'response_timeout'
+    | 'requester_cancelled'
+    | 'requester_expired'
+    | 'generation_started'
+    | 'finalization_expired'
+    | null;
+  requested_at: string;
+  response_deadline: string;
+  finalization_expires_at: string | null;
+  waiting_for: NativeStudioParticipant[];
+  approved_by: NativeStudioParticipant[];
+  denied_by: NativeStudioParticipant[];
+  finalization_id: string | null;
+}
+
+export interface NativeStudioState {
+  schema_version: 1;
+  server_instance_id: string;
+  coordination_revision: number;
+  server_time: string;
+  presence_ttl_seconds: number;
+  response_ttl_seconds: number;
+  finalization_ttl_seconds: number;
+  current_session: NativeStudioSession;
+  sessions: NativeStudioSession[];
+  active_batch: NativeStudioActiveBatch | null;
+  stop_request: NativeStudioStopRequest | null;
+}
+
+export interface NativeStudioErrorEnvelope {
+  error: {
+    code: string;
+    message: string;
+    details:
+      | { owner: string; completed: number; total: number }
+      | { request_id: string; requester: string; expires_at: string }
+      | { request_id: string; requester: string; state: 'pending' | 'approved' | 'finalizing' }
+      | { waiting_for: string[] }
+      | { state: 'pending' | 'approved' | 'denied' | 'expired' | 'cancelled' | 'finalizing' }
+      | null;
+  };
+}
+
+export type NativeStudioHttpResponse = NativeHttpResponse<NativeStudioState | NativeStudioErrorEnvelope>;
+
 interface NativeRunPodHttpResponse {
   status: number;
   body: string;
@@ -96,6 +181,7 @@ declare global {
   interface Window {
     __TAURI_INTERNALS__?: unknown;
     __IMAGEFORGE_NATIVE_SMOKE__?: boolean;
+    __IMAGEFORGE_NATIVE_SMOKE_ROLE__?: 'A' | 'B';
   }
 }
 
@@ -212,6 +298,60 @@ export function nativeWorkerHealth(): Promise<NativeHttpResponse> {
 
 export function nativeWorkerStatus(): Promise<NativeHttpResponse> {
   return invoke('worker_status');
+}
+
+export function nativeWorkerStudioHeartbeat(
+  sessionId: string,
+  availability: NativeStudioAvailability,
+): Promise<NativeStudioHttpResponse> {
+  return invoke('worker_studio_heartbeat', { input: { sessionId, availability } });
+}
+
+export function nativeWorkerStudioStatus(sessionId: string): Promise<NativeStudioHttpResponse> {
+  return invoke('worker_studio_status', { sessionId });
+}
+
+export function nativeWorkerStudioCreateStopRequest(
+  requestId: string,
+  sessionId: string,
+  podId: string,
+  gpuDisplayName: string,
+): Promise<NativeStudioHttpResponse> {
+  return invoke('worker_studio_create_stop_request', {
+    input: { requestId, sessionId, podId, gpuDisplayName },
+  });
+}
+
+export function nativeWorkerStudioRespondToStopRequest(
+  requestId: string,
+  sessionId: string,
+  decision: NativeStudioStopDecision,
+): Promise<NativeStudioHttpResponse> {
+  return invoke('worker_studio_respond_to_stop_request', {
+    input: { requestId, sessionId, decision },
+  });
+}
+
+export function nativeWorkerStudioFinalizeStopRequest(
+  requestId: string,
+  sessionId: string,
+  podId: string,
+  finalizationId: string,
+): Promise<NativeStudioHttpResponse> {
+  return invoke('worker_studio_finalize_stop_request', {
+    input: { requestId, sessionId, podId, finalizationId },
+  });
+}
+
+export function nativeWorkerStudioCancelStopRequest(
+  requestId: string,
+  sessionId: string,
+  podId: string,
+  finalizationId: string | null,
+): Promise<NativeStudioHttpResponse> {
+  return invoke('worker_studio_cancel_stop_request', {
+    input: { requestId, sessionId, podId, finalizationId },
+  });
 }
 
 export interface NativeWorkerReference {

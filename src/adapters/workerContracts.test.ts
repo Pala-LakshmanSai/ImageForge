@@ -64,6 +64,32 @@ describe('strict worker renderer contracts', () => {
     ).toBe('Lakshman');
   });
 
+  it('accepts an idle worker temporarily protected by a finalization guard', () => {
+    expect(parseWorkerStatus({
+      schema_version: 1,
+      ready: true,
+      active_batch: null,
+      permissions: { can_create: false, can_manage_active: false, is_owner: false },
+    })).toMatchObject({
+      activeBatch: null,
+      permissions: { canCreate: false, canManageActive: false, isOwner: false },
+    });
+
+    expect(() => parseWorkerStatus({
+      schema_version: 1,
+      ready: true,
+      active_batch: {
+        batch_id: '11111111-1111-4111-8111-111111111111',
+        owner,
+        state: 'running',
+        progress: { ...progress, completed: 0, processed: 0, current_index: 1 },
+        pause_requested: false,
+        cancel_requested: false,
+      },
+      permissions: { can_create: true, can_manage_active: false, is_owner: false },
+    })).toThrow('cannot allow creation');
+  });
+
   it('parses an ordered manifest and rejects response expansion', () => {
     expect(parseWorkerManifest(manifest()).images[0].sha256).toBe('a'.repeat(64));
     expect(() => parseWorkerManifest({ ...manifest(), token: 'must-not-cross-ipc' })).toThrow(

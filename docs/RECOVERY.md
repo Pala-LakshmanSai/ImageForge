@@ -34,6 +34,10 @@ never committed to this repository. Re-enter the RunPod API key and worker
 token on a replacement computer, then use the fixed studio profile shown in
 the app's setup screen.
 
-The worker image is published as an immutable GHCR digest by the `publish-
-worker` workflow. The RunPod network volume contains model weights and is a
-separate service-side copy; it is not stored on the removable disk.
+The worker source is mirrored into the dedicated publisher repository
+`https://github.com/Pala-LakshmanSai/imageforge-worker`. Its `publish-worker`
+workflow validates the Python 3.11 source, builds `linux/amd64`, publishes
+provenance/SBOM plus an immutable GHCR digest, and is the only production-image
+publisher. The similarly named ImageForge-repository workflow is validation
+only. The RunPod network volume contains model weights and is a separate
+service-side copy; it is not stored on the removable disk.

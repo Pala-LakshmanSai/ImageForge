@@ -85,9 +85,35 @@ The live catalog remains authoritative because stock changes.
 ## Stop GPU
 
 ImageForge uses a network volume, so RunPod cannot pause the Pod while retaining
-that attachment. The **Stop GPU** action sends RunPod's Pod DELETE operation
-after a foreground confirmation. The dialog must say that compute and ephemeral
-container data will be terminated while the ImageForge network volume remains.
+that attachment. **Stop GPU** is a coordinated, fail-closed foreground action:
+
+1. Refresh the exact selected Pod and reject a missing, replaced, or
+   profile-mismatched termination target.
+2. Ask the authenticated worker for a stop request bound to that exact Pod and
+   requester session.
+3. If a running, paused, or resumable interrupted batch owns the shared lease,
+   veto Stop unconditionally. The operator must first let it finish or use the
+   explicit batch cancel/interruption flow.
+4. If the worker is idle, require one approval from every other live foreground
+   principal. Exclude the requester's own windows and count another principal
+   once even when they have several windows. A peer may approve or deny from
+   any of their foreground sessions.
+5. A denial, response deadline, worker restart, network uncertainty, malformed
+   response, or lost requester session leaves the GPU running. Only an expired
+   presence heartbeat removes an absent peer from consideration.
+6. Once approval is unanimous, atomically acquire the worker's bounded
+   finalization guard. While held, Create/Resume/Retry returns the typed
+   `gpu_stop_pending` response instead of racing the delete.
+7. Revalidate the exact Pod again, then publish `stopping` and send RunPod's Pod
+   DELETE. A failure or timeout cancels/releases the exact guard idempotently
+   and does not project a false `offline` state.
+
+The confirmation explains that compute and ephemeral container data are
+terminated while the ImageForge network volume remains. The peer UI names the
+requester, shows the bounded response deadline, and offers explicit **Keep GPU
+running** and **Approve stop** actions. Generating before finalization cancels a
+still-pending approval request; once finalization holds the lease, generation
+fails with `gpu_stop_pending` until Stop succeeds, fails, or expires safely.
 
 No job completion, idle state, application exit, timer, background process, or
 connectivity failure may invoke termination.
@@ -97,7 +123,21 @@ connectivity failure may invoke termination.
 Pod names are not unique. Before creating, each client lists matching Pods. A
 simultaneous race can still create duplicates, so clients must surface every
 matching Pod and warn about duplicate hourly spend. Do not automatically delete
-the newer/older Pod. The shared worker batch lease is expected to prevent two
+the newer/older Pod.
+
+All open clients observe RunPod and authenticated worker studio status on a
+bounded coalesced interval. Status polling is read-only. The Pod snapshot is
+authoritative for compute state and the shared-volume active lease is
+authoritative for batch ownership; local receipts and window presence never
+become a generation lock. When RunPod reports `offline`, clients clear stale
+worker state and ignore late heartbeats from the previous observation epoch.
+
+The worker returns typed busy metadata (owner and progress) for any second
+Create/Resume/Retry attempt. There is no second-batch queue. Studio presence is
+ephemeral, authenticated, TTL-bounded, and restricted to safe client identity;
+it is used only for idle-peer Stop consent.
+
+The shared worker batch lease is expected to prevent two
 Pods from generating simultaneously, but RunPod cross-Pod filesystem behavior
 is deployment-specific; it is not trusted until the opt-in two-Pod EU-RO-1
 volume gate in `worker/scripts/run_volume_gate.py` passes with isolated paths.

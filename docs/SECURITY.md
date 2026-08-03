@@ -23,6 +23,14 @@
 - Generate all server paths and filenames; reject path components from clients.
 - Return safe error messages and opaque internal error IDs.
 - Keep prompt logging disabled by default.
+- Studio presence contains only a random UUID session, foreground/background
+  availability, and the safe display name derived from the authenticated
+  principal. It expires quickly and contains no prompt, path, receipt, token,
+  provider key, proxy URL, or deletion grant for another principal.
+- Heartbeat, status, stop request, peer response, finalization, and cancellation
+  use separate versioned routes. The native host pins them to the currently
+  verified worker session and exact Pod, validates strict bounded envelopes,
+  and rejects reflected secrets or a changed host/Pod identity.
 
 ## Files
 
@@ -46,3 +54,7 @@
   filesystem roots, or a generic request proxy to the webview.
 - Use a restrictive content security policy compatible with local assets and
   the configured RunPod HTTPS endpoint.
+- The deterministic release fixture is available only in an explicit packaged
+  smoke process. Its native command accepts a closed operation enum, reads a
+  random key/role and `127.0.0.1` origin from process environment, and cannot
+  forward renderer-provided URLs, headers, or credentials.

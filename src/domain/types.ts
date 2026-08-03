@@ -141,6 +141,9 @@ export interface BatchState {
   /** Authoritative worker permission. Production controls never infer this
    * from the editable display name. */
   canManage?: boolean;
+  /** Exact underlying worker state for a foreign lease. The local phase stays
+   * `locked` because this client cannot mutate it. */
+  remoteState?: 'running' | 'paused' | 'interrupted';
   phase: BatchPhase;
   prompts: BatchPrompt[];
   destination: string;
@@ -227,6 +230,69 @@ export interface ToastState {
   };
 }
 
+export interface LocalSyncIssue {
+  batchId: string;
+  code: string;
+  message: string;
+  retryable: boolean;
+}
+
+export interface StudioParticipant {
+  sessionId: string;
+  displayName: string;
+}
+
+export interface StudioSession extends StudioParticipant {
+  availability: 'foreground' | 'background';
+  expiresAt: string;
+}
+
+export type StudioStopPhase =
+  | 'idle'
+  | 'checking'
+  | 'blocked'
+  | 'pending'
+  | 'approved'
+  | 'denied'
+  | 'expired'
+  | 'cancelled'
+  | 'finalizing'
+  | 'stopped'
+  | 'failed';
+
+export interface StudioStopState {
+  phase: StudioStopPhase;
+  requestId: string | null;
+  podId: string | null;
+  gpuDisplayName: string | null;
+  requester: StudioParticipant | null;
+  isRequester: boolean;
+  canRespond: boolean;
+  waitingFor: StudioParticipant[];
+  approvedBy: StudioParticipant[];
+  deniedBy: StudioParticipant[];
+  responseDeadline: string | null;
+  finalizationExpiresAt: string | null;
+  finalizationId: string | null;
+  reason: string | null;
+  message: string | null;
+  retryable: boolean;
+  blockedByBatch: {
+    owner: string;
+    completed: number;
+    total: number;
+  } | null;
+}
+
+export interface StudioSyncState {
+  connected: boolean;
+  serverInstanceId: string | null;
+  coordinationRevision: number;
+  currentSession: StudioSession | null;
+  sessions: StudioSession[];
+  stop: StudioStopState;
+}
+
 export interface AppState {
   activeView: ViewId;
   pod: PodState;
@@ -240,6 +306,8 @@ export interface AppState {
   toast: ToastState | null;
   toastSequence: number;
   refreshedAt: string | null;
+  localSyncIssue: LocalSyncIssue | null;
+  studio: StudioSyncState;
 }
 
 export type AppAction =
@@ -269,6 +337,16 @@ export type AppAction =
   | { type: 'SYNC_RUNTIME_LIBRARY'; assets: LibraryAsset[] }
   | { type: 'SYNC_RUNTIME_BUSY'; batch: BatchState }
   | { type: 'RUNTIME_BATCH_IDLE' }
+  | { type: 'RUNTIME_STOP_GUARD_ACTIVE'; podId: string | null; message: string }
+  | { type: 'RUNTIME_LOCAL_ERROR'; batchId: string; code: string; message: string; retryable?: boolean }
+  | { type: 'BEGIN_STUDIO_STOP'; podId: string; gpuDisplayName: string }
+  | { type: 'SYNC_STUDIO_STATE'; studio: StudioSyncState }
+  | { type: 'STUDIO_STOP_BLOCKED'; owner: string; completed: number; total: number; message: string }
+  | { type: 'STUDIO_STOP_FAILED'; message: string; retryable?: boolean }
+  | { type: 'STUDIO_STOPPED'; alreadyStopped: boolean }
+  | { type: 'CLEAR_STUDIO_STOP' }
+  | { type: 'RESPOND_STUDIO_STOP'; requestId: string; decision: 'approve' | 'deny' }
+  | { type: 'CANCEL_STUDIO_STOP'; requestId: string }
   | { type: 'RUNTIME_ERROR'; scope: 'pod' | 'batch'; code?: string; message: string; retryable?: boolean }
   | { type: 'TOGGLE_BATCH_PAUSE' }
   | { type: 'REQUEST_CANCEL_BATCH' }

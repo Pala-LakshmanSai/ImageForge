@@ -60,8 +60,11 @@ function productionAdapter() {
     restoreLocalLibrary: vi.fn(async () => undefined),
     refresh: vi.fn(async () => undefined),
     observe: vi.fn(async () => undefined),
+    heartbeat: vi.fn(async () => undefined),
     startGpu: vi.fn(async () => undefined),
-    stopGpu: vi.fn(async () => undefined),
+    requestGpuStop: vi.fn(async () => undefined),
+    respondToGpuStop: vi.fn(async () => undefined),
+    cancelGpuStop: vi.fn(async () => undefined),
     startBatch: vi.fn(async () => undefined),
     pollBatch: vi.fn(async () => undefined),
     beginNewBatch: vi.fn(),
@@ -115,17 +118,38 @@ describe('ImageForge shell', () => {
 
     await act(async () => { await Promise.resolve(); });
     expect(production.runtime.refresh).toHaveBeenCalledTimes(1);
+    expect(production.runtime.heartbeat).toHaveBeenCalledWith(expect.any(Object), 'foreground');
+    expect(production.runtime.heartbeat).toHaveBeenCalledTimes(1);
     await act(async () => {
-      vi.advanceTimersByTime(29_999);
+      vi.advanceTimersByTime(3_999);
       await Promise.resolve();
     });
     expect(production.runtime.observe).not.toHaveBeenCalled();
+    expect(production.runtime.heartbeat).toHaveBeenCalledTimes(1);
     await act(async () => {
       vi.advanceTimersByTime(1);
       await Promise.resolve();
     });
     expect(production.runtime.observe).toHaveBeenCalledTimes(1);
+    expect(production.runtime.heartbeat).toHaveBeenCalledTimes(2);
     expect(production.runtime.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits for the strict startup refresh before publishing the first studio heartbeat', async () => {
+    let releaseRefresh!: () => void;
+    const production = productionAdapter();
+    vi.mocked(production.runtime.refresh).mockImplementation(() => new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    }));
+    render(<App initialState={createConfiguredInitialState()} adapter={production.adapter} />);
+
+    await waitFor(() => expect(production.runtime.refresh).toHaveBeenCalledOnce());
+    expect(production.runtime.heartbeat).not.toHaveBeenCalled();
+
+    releaseRefresh();
+    await waitFor(() => expect(production.runtime.heartbeat).toHaveBeenCalledOnce());
+    expect(vi.mocked(production.runtime.refresh).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(production.runtime.heartbeat).mock.invocationCallOrder[0]);
   });
 
   it('shows a direct synchronized notice when the confirmed GPU was already stopped elsewhere', async () => {
@@ -300,6 +324,33 @@ describe('ImageForge shell', () => {
     expect(screen.getByRole('heading', { name: 'Finish these items' })).toBeVisible();
   });
 
+  it('keeps polling while a local terminal batch is visible so a remote lease can replace it', async () => {
+    const production = productionAdapter();
+    const state = createDemoState();
+    state.batch = { ...state.batch!, phase: 'complete', statusMessage: '1 image verified in order' };
+    render(<App initialState={state} adapter={production.adapter} />);
+
+    await waitFor(() => expect(production.runtime.pollBatch).toHaveBeenCalled());
+  });
+
+  it('disables Generate and shows finalizing truth for an adopted worker guard', async () => {
+    const production = productionAdapter();
+    let state = createConfiguredInitialState();
+    state = appReducer(state, { type: 'SET_POD_PHASE', phase: 'ready', progress: 100, detail: 'Ready', podId: 'pod-guarded' });
+    state = appReducer(state, { type: 'SET_PROMPT_TEXT', text: 'A sufficiently detailed editorial documentary frame at dawn' });
+    state = appReducer(state, { type: 'SET_DESTINATION', path: '/tmp/imageforge-output' });
+    render(<App initialState={state} adapter={production.adapter} />);
+
+    act(() => production.emit({
+      type: 'stop-guard-active',
+      podId: 'pod-guarded',
+      message: 'GPU Stop is finalizing; new generation is temporarily blocked.',
+    }));
+
+    expect(screen.getByText('Exact GPU termination is being finalized')).toBeVisible();
+    expect(screen.getByRole('button', { name: /Generate 1 images/i })).toBeDisabled();
+  });
+
   it('distinguishes an owned active batch from a remote batch lock', () => {
     const owned = createDemoState();
     owned.activeView = 'create';
@@ -319,6 +370,45 @@ describe('ImageForge shell', () => {
     expect(screen.getAllByText('Another batch is already running')).toHaveLength(1);
     expect(screen.getByText('Sujal · locked')).toBeVisible();
     expect(screen.queryByText('Your batch is active')).not.toBeInTheDocument();
+  });
+
+  it('renders the exact paused state for a foreign locked batch', () => {
+    const remote = appReducer(createConfiguredInitialState(), { type: 'PREVIEW_SCENARIO', scenario: 'locked' });
+    remote.activeView = 'progress';
+    remote.batch = {
+      ...remote.batch!,
+      remoteState: 'paused',
+      statusMessage: 'Sujal paused after 73 of 450',
+      lockMessage: 'Paused after 73 of 450 images were processed.',
+    };
+    render(<App initialState={remote} adapter={immediateAdapter()} />);
+
+    expect(screen.getByText('Sujal paused this batch')).toBeVisible();
+    expect(screen.getAllByText('Another user paused this batch')).toHaveLength(2);
+    expect(screen.queryByText('Sujal is running this batch')).not.toBeInTheDocument();
+  });
+
+  it('renders a remote paused batch as interrupted after authoritative Offline truth', () => {
+    let remote = appReducer(createConfiguredInitialState(), { type: 'PREVIEW_SCENARIO', scenario: 'locked' });
+    remote.batch = { ...remote.batch!, remoteState: 'paused' };
+    remote = appReducer(remote, {
+      type: 'SYNC_RUNTIME_POD',
+      pod: {
+        ...remote.pod,
+        phase: 'offline',
+        phaseProgress: 0,
+        statusDetail: 'GPU is safely offline',
+        health: 'offline',
+        podId: null,
+        matchingPodIds: [],
+      },
+    });
+    remote.activeView = 'progress';
+    render(<App initialState={remote} adapter={immediateAdapter()} />);
+
+    expect(document.querySelector('.progress-heading .phase-badge')).toHaveTextContent('interrupted');
+    expect(screen.queryByText('Another user paused this batch')).not.toBeInTheDocument();
+    expect(screen.getByText(/Sujal must resume or cancel this batch/)).toBeVisible();
   });
 
   it('blocks duplicate starts and exposes explicit ambiguous-create recovery', async () => {
@@ -629,6 +719,23 @@ describe('ImageForge shell', () => {
     await user.keyboard('{Escape}');
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
     expect(trigger).toHaveFocus();
+  });
+
+  it('routes production Stop through shared coordination before any stopping phase', async () => {
+    const user = userEvent.setup();
+    const production = productionAdapter();
+    let state = createConfiguredInitialState();
+    state = appReducer(state, { type: 'SET_POD_PHASE', phase: 'ready', progress: 100, detail: 'Ready', podId: 'pod-exact-1', gpu: 'RTX 4090' });
+    render(<App initialState={state} adapter={production.adapter} />);
+
+    await user.click(screen.getByRole('button', { name: 'Stop GPU' }));
+    await user.click(screen.getByRole('button', { name: 'Request coordinated stop' }));
+
+    expect(production.runtime.requestGpuStop).toHaveBeenCalledWith(
+      expect.objectContaining({ pod: expect.objectContaining({ podId: 'pod-exact-1', phase: 'ready' }) }),
+    );
+    expect(screen.getByText('Checking the shared studio before stopping')).toBeVisible();
+    expect(screen.queryByText('Terminating the confirmed ImageForge Pod')).not.toBeInTheDocument();
   });
 
   it('exposes owner resume and cancel controls for a restarted interrupted batch', async () => {

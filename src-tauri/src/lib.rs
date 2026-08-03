@@ -3,9 +3,9 @@ mod native;
 use native::{
     CredentialKind, CredentialMetadata, CredentialVault, DestinationMetadata, DestinationSelection,
     DestinationStore, DownloadReceipt, DownloadRequest, Downloader, ExportArtifactRequest,
-    KeyringVault, LocalArtifactResponse, NativeError, NativeResult, ReceiptLedger,
-    RunPodCreateMarkerMetadata, RunPodHttpRequest, RunPodHttpResponse, RunPodTransport, WorkerApi,
-    WorkerHttpResponse, WorkerPreviewResponse, WorkerSession,
+    KeyringVault, LocalArtifactResponse, NativeError, NativeResult, NativeTwoClientSmokeInput,
+    ReceiptLedger, RunPodCreateMarkerMetadata, RunPodHttpRequest, RunPodHttpResponse,
+    RunPodTransport, WorkerApi, WorkerHttpResponse, WorkerPreviewResponse, WorkerSession,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -13,6 +13,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::webview::{NewWindowResponse, WebviewWindowBuilder};
+use tauri::Manager;
 use tauri::State;
 use tauri::WebviewUrl;
 use uuid::Uuid;
@@ -356,6 +357,54 @@ async fn worker_status(state: State<'_, NativeState>) -> NativeResult<WorkerHttp
 }
 
 #[tauri::command]
+async fn worker_studio_heartbeat(
+    state: State<'_, NativeState>,
+    input: native::worker::StudioHeartbeatInput,
+) -> NativeResult<WorkerHttpResponse> {
+    state.worker.studio_heartbeat(input).await
+}
+
+#[tauri::command]
+async fn worker_studio_status(
+    state: State<'_, NativeState>,
+    session_id: String,
+) -> NativeResult<WorkerHttpResponse> {
+    state.worker.studio_status(&session_id).await
+}
+
+#[tauri::command]
+async fn worker_studio_create_stop_request(
+    state: State<'_, NativeState>,
+    input: native::worker::StudioCreateStopRequestInput,
+) -> NativeResult<WorkerHttpResponse> {
+    state.worker.studio_create_stop_request(input).await
+}
+
+#[tauri::command]
+async fn worker_studio_respond_to_stop_request(
+    state: State<'_, NativeState>,
+    input: native::worker::StudioStopResponseInput,
+) -> NativeResult<WorkerHttpResponse> {
+    state.worker.studio_respond_to_stop_request(input).await
+}
+
+#[tauri::command]
+async fn worker_studio_finalize_stop_request(
+    state: State<'_, NativeState>,
+    input: native::worker::StudioFinalizeStopInput,
+) -> NativeResult<WorkerHttpResponse> {
+    state.worker.studio_finalize_stop_request(input).await
+}
+
+#[tauri::command]
+async fn worker_studio_cancel_stop_request(
+    state: State<'_, NativeState>,
+    input: native::worker::StudioCancelStopInput,
+) -> NativeResult<WorkerHttpResponse> {
+    state.worker.studio_cancel_stop_request(input).await
+}
+
+#[tauri::command]
 async fn worker_create_batch(
     state: State<'_, NativeState>,
     input: native::worker::CreateBatchInput,
@@ -520,8 +569,11 @@ async fn reconcile_receipts(
 }
 
 #[tauri::command]
-fn native_smoke_result(passed: bool, detail: String) -> NativeResult<()> {
-    if std::env::var("IMAGEFORGE_NATIVE_SMOKE").ok().as_deref() != Some("1") {
+fn native_smoke_result(app: tauri::AppHandle, passed: bool, detail: String) -> NativeResult<()> {
+    if !matches!(
+        std::env::var("IMAGEFORGE_NATIVE_SMOKE").ok().as_deref(),
+        Some("1" | "two-client")
+    ) {
         return Err(NativeError::new(
             "native_smoke_disabled",
             "Native smoke reporting is only available in an explicit test process.",
@@ -539,13 +591,29 @@ fn native_smoke_result(passed: bool, detail: String) -> NativeResult<()> {
             "Native smoke result path is not configured.",
         )
     })?;
+    if app.get_webview_window("main").is_none() {
+        return Err(NativeError::new(
+            "native_smoke_window_missing",
+            "The native smoke result requires a live main application window.",
+        ));
+    }
     let result = if passed { "PASS" } else { "FAIL" };
-    fs::write(path, format!("{result}\n{detail}\n")).map_err(|_| {
+    let process_id = std::process::id();
+    fs::write(
+        path,
+        format!("{result}\npid={process_id}; window=main; {detail}\n"),
+    )
+    .map_err(|_| {
         NativeError::new(
             "native_smoke_write_failed",
             "The native smoke result could not be written.",
         )
     })
+}
+
+#[tauri::command]
+async fn native_two_client_smoke_exchange(input: NativeTwoClientSmokeInput) -> NativeResult<Value> {
+    native::smoke::exchange(input).await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -554,12 +622,57 @@ pub fn run() {
     tauri::Builder::default()
         .manage(state)
         .setup(|app| {
-            let smoke_mode = std::env::var("IMAGEFORGE_NATIVE_SMOKE").ok().as_deref() == Some("1");
+            let smoke_setting = std::env::var("IMAGEFORGE_NATIVE_SMOKE").ok();
+            let smoke_mode = matches!(smoke_setting.as_deref(), Some("1" | "two-client"));
+            let two_client_role = if smoke_setting.as_deref() == Some("two-client") {
+                match std::env::var("IMAGEFORGE_NATIVE_SMOKE_ROLE").ok().as_deref() {
+                    Some("A") => Some("A"),
+                    Some("B") => Some("B"),
+                    _ => None,
+                }
+            } else {
+                None
+            };
             let mut builder =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()));
             if smoke_mode {
-                builder =
-                    builder.initialization_script("window.__IMAGEFORGE_NATIVE_SMOKE__ = true;");
+                let initialization = match two_client_role {
+                    Some(role) => format!(
+                        "window.__IMAGEFORGE_NATIVE_SMOKE__ = true; window.__IMAGEFORGE_NATIVE_SMOKE_ROLE__ = '{role}';"
+                    ),
+                    None => "window.__IMAGEFORGE_NATIVE_SMOKE__ = true;".to_string(),
+                };
+                builder = builder.initialization_script(&initialization);
+            }
+            #[cfg(target_os = "macos")]
+            if let Some(role) = two_client_role {
+                // WKWebView has no data-directory override. Give each smoke
+                // role a stable, isolated store so two installed processes
+                // cannot accidentally share localStorage or browser state.
+                let identifier = match role {
+                    "A" => [
+                        0x49, 0x46, 0x53, 0x41, 0x20, 0x26, 0x4a, 0x11, 0x91, 0x01, 0xa1,
+                        0x01, 0x00, 0x00, 0x00, 0x01,
+                    ],
+                    _ => [
+                        0x49, 0x46, 0x53, 0x42, 0x20, 0x26, 0x4a, 0x11, 0x91, 0x01, 0xb2,
+                        0x02, 0x00, 0x00, 0x00, 0x02,
+                    ],
+                };
+                builder = builder.data_store_identifier(identifier);
+            }
+            #[cfg(target_os = "windows")]
+            if two_client_role.is_some() {
+                let profile = std::env::var_os("IMAGEFORGE_NATIVE_SMOKE_PROFILE")
+                    .map(PathBuf::from)
+                    .filter(|path| path.is_absolute())
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "The two-client native smoke profile is not configured.",
+                        )
+                    })?;
+                builder = builder.data_directory(profile);
             }
             builder
                 .title("ImageForge")
@@ -597,6 +710,12 @@ pub fn run() {
             runpod_terminate_pod_http,
             worker_health,
             worker_status,
+            worker_studio_heartbeat,
+            worker_studio_status,
+            worker_studio_create_stop_request,
+            worker_studio_respond_to_stop_request,
+            worker_studio_finalize_stop_request,
+            worker_studio_cancel_stop_request,
             worker_create_batch,
             worker_get_batch,
             worker_pause_batch,
@@ -610,6 +729,7 @@ pub fn run() {
             read_receipt_ledger,
             reconcile_receipts,
             native_smoke_result,
+            native_two_client_smoke_exchange,
         ])
         .run(tauri::generate_context!())
         .expect("ImageForge native host failed to start");

@@ -86,7 +86,37 @@ describe('GpuLifecycleCoordinator', () => {
     expect(port.clearWorkerSession).toHaveBeenCalled();
   });
 
-  it('reconciles a Pod stopped by another client without a second DELETE', async () => {
+  it('forwards the collaboration guard into the exact pre-delete lifecycle boundary', async () => {
+    const port = nativePort();
+    let provider: FakeRunPodProvider | null = null;
+    const guard = vi.fn(async () => ({
+      allow: false as const,
+      code: 'stop_consent_denied' as const,
+      message: 'Sujal kept the GPU running.',
+    }));
+    const coordinator = new GpuLifecycleCoordinator(
+      port,
+      (config, stopGuard) => {
+        const pod = managedPod(config, 'guardedpod1');
+        provider = new FakeRunPodProvider({ pods: [pod] });
+        const health = new FakeWorkerHealthProbe();
+        health.setHealth(pod.proxyUrl, { schemaVersion: 1, phase: 'ready', phaseProgress: 1 });
+        return new RunPodLifecycleController({ provider, config, workerHealthProbe: health, stopGuard });
+      },
+      guard,
+    );
+    const ready = await coordinator.start(DEFAULT_STUDIO_PROFILE, 12, false);
+
+    await expect(coordinator.stop(ready.selectedPodId!)).rejects.toMatchObject({
+      code: 'stop_consent_denied',
+    });
+
+    expect(guard).toHaveBeenCalledWith(expect.objectContaining({ podId: ready.selectedPodId }));
+    expect(provider!.calls.get).toContainEqual(expect.objectContaining({ podId: ready.selectedPodId! }));
+    expect(provider!.calls.terminate).toEqual([]);
+  });
+
+  it('refreshes a Pod removed before preflight without claiming a completed Stop', async () => {
     const port = nativePort();
     let provider: FakeRunPodProvider | null = null;
     const coordinator = new GpuLifecycleCoordinator(port, (config) => {
@@ -100,12 +130,82 @@ describe('GpuLifecycleCoordinator', () => {
     provider!.setPods([]);
     vi.mocked(port.clearWorkerSession).mockClear();
 
-    const reconciled = await coordinator.stop(ready.selectedPodId!);
+    await expect(coordinator.stop(ready.selectedPodId!)).rejects.toMatchObject({
+      code: 'termination_target_mismatch',
+      mayHaveSucceeded: false,
+    });
 
-    expect(reconciled.alreadyStopped).toBe(true);
-    expect(reconciled.phase).toBe('offline');
+    expect(coordinator.getSnapshot()?.phase).toBe('offline');
     expect(provider!.calls.terminate).toEqual([]);
-    expect(port.clearWorkerSession).toHaveBeenCalledOnce();
+    expect(port.clearWorkerSession).not.toHaveBeenCalled();
+  });
+
+  it('never reports success or clears the worker session when the confirmed Pod was replaced', async () => {
+    const port = nativePort();
+    let provider: FakeRunPodProvider | null = null;
+    let health: FakeWorkerHealthProbe | null = null;
+    let config: RunPodClientConfigInput | null = null;
+    const coordinator = new GpuLifecycleCoordinator(port, (nextConfig) => {
+      config = nextConfig;
+      const pod = managedPod(nextConfig, 'replacedbeforestop1');
+      provider = new FakeRunPodProvider({ inventory: [], pods: [pod] });
+      health = new FakeWorkerHealthProbe();
+      health.setHealth(pod.proxyUrl, { schemaVersion: 1, phase: 'ready', phaseProgress: 1 });
+      return new RunPodLifecycleController({
+        provider,
+        config: nextConfig,
+        workerHealthProbe: health,
+      });
+    });
+    const ready = await coordinator.start(DEFAULT_STUDIO_PROFILE, 12, false);
+    const replacement = managedPod(config!, 'replacementpod1');
+    provider!.setPods([replacement]);
+    health!.setHealth(replacement.proxyUrl, {
+      schemaVersion: 1,
+      phase: 'ready',
+      phaseProgress: 1,
+    });
+    vi.mocked(port.clearWorkerSession).mockClear();
+
+    await expect(coordinator.stop(ready.selectedPodId!)).rejects.toMatchObject({
+      code: 'termination_target_mismatch',
+      mayHaveSucceeded: false,
+    });
+
+    expect(provider!.calls.terminate).toEqual([]);
+    expect(port.clearWorkerSession).not.toHaveBeenCalled();
+    expect(coordinator.getSnapshot()).toMatchObject({
+      phase: 'ready',
+      selectedPodId: replacement.id,
+    });
+  });
+
+  it('never reports success when the confirmed Pod keeps its ID but drifts outside the profile', async () => {
+    const port = nativePort();
+    let provider: FakeRunPodProvider | null = null;
+    const coordinator = new GpuLifecycleCoordinator(port, (config) => {
+      const pod = managedPod(config, 'profiledriftstop1');
+      provider = new FakeRunPodProvider({ inventory: [], pods: [pod] });
+      const health = new FakeWorkerHealthProbe();
+      health.setHealth(pod.proxyUrl, { schemaVersion: 1, phase: 'ready', phaseProgress: 1 });
+      return new RunPodLifecycleController({ provider, config, workerHealthProbe: health });
+    });
+    const ready = await coordinator.start(DEFAULT_STUDIO_PROFILE, 12, false);
+    provider!.setPods([
+      {
+        ...managedPod(productionRunPodConfig(DEFAULT_STUDIO_PROFILE, false), ready.selectedPodId!),
+        networkVolumeId: 'different-volume',
+      },
+    ]);
+    vi.mocked(port.clearWorkerSession).mockClear();
+
+    await expect(coordinator.stop(ready.selectedPodId!)).rejects.toMatchObject({
+      code: 'termination_target_mismatch',
+      mayHaveSucceeded: false,
+    });
+
+    expect(provider!.calls.terminate).toEqual([]);
+    expect(port.clearWorkerSession).not.toHaveBeenCalled();
   });
 
   it('reconciles a Pod that vanishes during DELETE after Stop preflight', async () => {

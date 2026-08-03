@@ -9,6 +9,7 @@ import {
 import { BottomNav, TopBar } from './components/AppChrome';
 import { DialogPortal } from './components/DialogPortal';
 import { SetupAssistant } from './components/SetupAssistant';
+import { StudioCoordination } from './components/StudioCoordination';
 import { Button, IconButton } from './components/primitives';
 import { canStartBatch, createInitialState, appReducer } from './domain/reducer';
 import type { AppAction, AppState } from './domain/types';
@@ -24,7 +25,7 @@ export interface AppProps {
   adapter?: ImageForgeAdapter;
 }
 
-const CROSS_CLIENT_HEARTBEAT_MS = 30_000;
+const CROSS_CLIENT_HEARTBEAT_MS = 4_000;
 
 export default function App({ initialState, adapter: injectedAdapter }: AppProps) {
   const [state, dispatch] = useReducer(appReducer, initialState, (provided) => provided ?? createInitialState());
@@ -73,6 +74,11 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
   }, [runtime]);
 
   useEffect(() => {
+    if (!runtime || !state.setup.completed) return;
+    void runtime.restoreLocalLibrary(stateRef.current).catch(() => undefined);
+  }, [runtime, state.setup.completed, state.settings.defaultDestination]);
+
+  useEffect(() => {
     if (!runtime) return;
     return runtime.subscribe((event) => {
       if (event.type === 'pod') dispatch({ type: 'SYNC_RUNTIME_POD', pod: event.pod });
@@ -80,16 +86,37 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
       else if (event.type === 'library') dispatch({ type: 'SYNC_RUNTIME_LIBRARY', assets: event.assets });
       else if (event.type === 'busy') dispatch({ type: 'SYNC_RUNTIME_BUSY', batch: event.batch });
       else if (event.type === 'idle') dispatch({ type: 'RUNTIME_BATCH_IDLE' });
+      else if (event.type === 'stop-guard-active') dispatch({
+        type: 'RUNTIME_STOP_GUARD_ACTIVE',
+        podId: event.podId,
+        message: event.message,
+      });
       else if (event.type === 'create-recovery') dispatch({ type: 'SYNC_CREATE_RECOVERY', marker: event.marker });
+      else if (event.type === 'studio') dispatch({ type: 'SYNC_STUDIO_STATE', studio: event.studio });
+      else if (event.type === 'stop-blocked') dispatch({
+        type: 'STUDIO_STOP_BLOCKED',
+        owner: event.owner,
+        completed: event.completed,
+        total: event.total,
+        message: event.message,
+      });
+      else if (event.type === 'stop-failed') dispatch({
+        type: 'STUDIO_STOP_FAILED',
+        message: event.message,
+        retryable: event.retryable,
+      });
+      else if (event.type === 'stop-complete') dispatch({ type: 'STUDIO_STOPPED', alreadyStopped: event.alreadyStopped });
+      else if (event.type === 'local-error') dispatch({
+        type: 'RUNTIME_LOCAL_ERROR',
+        batchId: event.batchId,
+        code: event.code,
+        message: event.message,
+        retryable: event.retryable,
+      });
       else if (event.type === 'notice') dispatch({ type: 'SHOW_TOAST', tone: event.tone, title: event.title, message: event.message });
       else dispatch({ type: 'RUNTIME_ERROR', scope: event.scope, code: event.code, message: event.message, retryable: event.retryable });
     });
   }, [runtime]);
-
-  useEffect(() => {
-    if (!runtime || !state.setup.completed) return;
-    void runtime.restoreLocalLibrary(stateRef.current).catch(() => undefined);
-  }, [runtime, state.setup.completed, state.settings.defaultDestination]);
 
   useEffect(() => {
     if (!runtime) return;
@@ -107,19 +134,44 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
     // its explicit Stop control when that separate credential needs repair.
     if (!runtime || !state.setup.completed || !state.setup.credentials.runpodApiKey.configured) return;
     let active = true;
-    const sync = () => {
-      if (active) void observeProductionStatus().catch(() => undefined);
+    const sync = async () => {
+      if (!active) return;
+      // The first strict refresh and every later observation bind/verify the
+      // current worker session before a heartbeat can use it.
+      try {
+        await observeProductionStatus();
+      } catch {
+        return;
+      }
+      if (!active) return;
+      await runtime.heartbeat(
+        stateRef.current,
+        document.visibilityState === 'visible' ? 'foreground' : 'background',
+      ).catch(() => undefined);
     };
     // Establish the first authoritative state immediately. Subsequent checks
     // are deliberately slower, receipt-free observations.
-    void refreshProductionStatus();
+    void refreshProductionStatus().then((refreshed) => {
+      if (!active || !refreshed) return;
+      return runtime.heartbeat(
+        stateRef.current,
+        document.visibilityState === 'visible' ? 'foreground' : 'background',
+      ).catch(() => undefined);
+    });
     // RunPod lifecycle polling is read-only. Keep every open macOS and
     // Windows client aligned when another editor starts or explicitly stops
     // the shared disposable Pod, even while no batch is running.
-    const timer = window.setInterval(sync, CROSS_CLIENT_HEARTBEAT_MS);
+    const triggerSync = () => { void sync(); };
+    const timer = window.setInterval(triggerSync, CROSS_CLIENT_HEARTBEAT_MS);
+    window.addEventListener('focus', triggerSync);
+    window.addEventListener('online', triggerSync);
+    document.addEventListener('visibilitychange', triggerSync);
     return () => {
       active = false;
       window.clearInterval(timer);
+      window.removeEventListener('focus', triggerSync);
+      window.removeEventListener('online', triggerSync);
+      document.removeEventListener('visibilitychange', triggerSync);
     };
   }, [observeProductionStatus, refreshProductionStatus, runtime, state.setup.completed, state.setup.credentials.runpodApiKey.configured]);
 
@@ -195,10 +247,7 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
 
   useEffect(() => {
     if (state.pod.phase !== 'stopping') return;
-    if (runtime) {
-      void runtime.stopGpu(stateRef.current).catch(() => undefined);
-      return;
-    }
+    if (runtime) return;
     return adapter.finishPodStop(() => dispatch({ type: 'POD_STOPPED' }));
   }, [adapter, runtime, state.pod.phase]);
 
@@ -220,7 +269,6 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
   useEffect(() => {
     if (!runtime || !['ready', 'reconnecting'].includes(state.pod.phase)) return;
     if (state.batch?.phase === 'validating') return;
-    if (state.batch && ['complete', 'partial_failure', 'cancelled'].includes(state.batch.phase)) return;
     const poll = () => void runtime.pollBatch(stateRef.current).catch(() => undefined);
     poll();
     const timer = window.setInterval(poll, 1_500);
@@ -262,6 +310,31 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
     if (action.type === 'CONFIRM_CANCEL_BATCH') {
       dispatch({ type: 'DISMISS_DIALOG' });
       void runtime.controlBatch('cancel', current).catch(() => undefined);
+      return;
+    }
+    if (action.type === 'CONFIRM_STOP_POD') {
+      if (
+        current.dialog?.type !== 'stop-pod'
+        || current.dialog.podId !== current.pod.podId
+        || current.pod.podId === null
+      ) {
+        dispatch(action);
+        return;
+      }
+      dispatch({
+        type: 'BEGIN_STUDIO_STOP',
+        podId: current.pod.podId,
+        gpuDisplayName: current.pod.gpu ?? 'ImageForge GPU',
+      });
+      void runtime.requestGpuStop(current).catch(() => undefined);
+      return;
+    }
+    if (action.type === 'RESPOND_STUDIO_STOP') {
+      void runtime.respondToGpuStop(action.requestId, action.decision).catch(() => undefined);
+      return;
+    }
+    if (action.type === 'CANCEL_STUDIO_STOP') {
+      void runtime.cancelGpuStop(action.requestId).catch(() => undefined);
       return;
     }
     if (action.type === 'START_BATCH') {
@@ -332,6 +405,8 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
       <div className="ambient ambient--cobalt" aria-hidden="true" />
       <TopBar state={state} dispatch={uiDispatch} />
 
+      <StudioCoordination stop={state.studio.stop} dispatch={uiDispatch} />
+
       {state.pod.matchingPodIds.length > 1 ? (
         <aside className="duplicate-warning" role="alert">
           <AlertTriangle size={18} />
@@ -351,6 +426,17 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
             <span>No additional GPU can start. ImageForge is looking for {state.pod.createRecovery.podName ?? 'the exact attempted Pod'} without guessing.</span>
           </div>
           <Button compact tone="secondary" onClick={() => uiDispatch({ type: 'REQUEST_RESOLVE_CREATE' })}>Resolve start</Button>
+        </aside>
+      ) : null}
+
+      {state.localSyncIssue ? (
+        <aside className="local-sync-warning" role="alert" aria-live="polite">
+          <AlertTriangle size={18} />
+          <div>
+            <strong>Local files need attention</strong>
+            <span>{state.localSyncIssue.message} Shared GPU and batch status will keep updating.</span>
+          </div>
+          <Button compact tone="secondary" onClick={() => dispatch({ type: 'NAVIGATE', view: 'settings' })}>Open settings</Button>
         </aside>
       ) : null}
 
@@ -377,19 +463,22 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
             {state.dialog.type === 'stop-pod' ? (
               <>
                 <p className="eyebrow">Explicit termination</p>
-                <h2 id="modal-title">Terminate this GPU?</h2>
+                <h2 id="modal-title">Request a coordinated GPU stop?</h2>
                 <p>
-                  This sends RunPod’s Pod DELETE operation. Compute and ephemeral container data will end; the ImageForge network volume, manifests, and downloaded images remain.
+                  ImageForge first checks the durable batch lease and asks every other foreground editor. RunPod termination is sent only after the exact GPU is revalidated and all required editors approve.
                 </p>
                 <div className="modal__notice">
                   <strong>Confirmed target:</strong> {state.dialog.podId} · {state.pod.gpu ?? 'GPU unknown'} · {state.pod.hourlyRate === null ? 'rate unavailable' : `$${state.pod.hourlyRate.toFixed(2)}/hr`}
                 </div>
                 <div className="modal__notice">
-                  ImageForge has no idle timer and never stops compute on completion, app exit, or connection loss.
+                  Any active batch blocks this request unconditionally. A pending approval never blocks generation; starting work keeps the GPU online.
+                </div>
+                <div className="modal__notice">
+                  ImageForge has no idle timer and never stops compute on completion, app exit, or connection loss. Network volume data and downloaded images remain.
                 </div>
                 <div className="modal__actions">
                   <Button data-autofocus onClick={() => dispatch({ type: 'DISMISS_DIALOG' })}>Keep GPU running</Button>
-                  <Button tone="danger" onClick={() => dispatch({ type: 'CONFIRM_STOP_POD' })}>Terminate compute</Button>
+                  <Button tone="danger" onClick={() => uiDispatch({ type: 'CONFIRM_STOP_POD' })}>Request coordinated stop</Button>
                 </div>
               </>
             ) : state.dialog.type === 'resolve-create' ? (
