@@ -2463,10 +2463,24 @@ async fn gpu_switch_delete_replacement(
             "The replacement Pod does not match this GPU switch.",
         ));
     }
-    let provider_pod = state
+    let provider_pod = match state
         .runpod
         .native_switch_get_pod(&input.replacement_pod_id)
-        .await?;
+        .await
+    {
+        Ok(pod) => pod,
+        // Exact-Pod preflight is part of the destructive boundary.  A
+        // timeout/5xx/malformed response cannot be returned as a transient
+        // renderer error: persist actionable attention before any intent or
+        // DELETE can be attempted, and require explicit reconciliation.
+        Err(_) => {
+            return state.gpu_switch.park_with_attention(
+                &access.switch_id,
+                access.record_revision,
+                "gpu_switch_replacement_delete_uncertain",
+            )
+        }
+    };
     if provider_pod.as_ref().is_some_and(|pod| {
         pod.pod_id != input.replacement_pod_id || pod.gpu_id != access.current_target.gpu_id
     }) {
