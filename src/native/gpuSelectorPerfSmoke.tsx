@@ -428,7 +428,7 @@ export function GpuSelectorPerfSmoke() {
         armingRef.current = false;
       }
     })();
-  }, [action, config, cycle, open, maxSamples]);
+  }, [action, config, cycle, maxSamples, open, warmupsRemaining]);
 
   if (error !== null) {
     return <main data-gpu-selector-perf-qa="failed">{error}</main>;

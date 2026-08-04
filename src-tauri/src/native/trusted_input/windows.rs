@@ -334,6 +334,15 @@ pub(crate) fn install(
 }
 
 unsafe extern "system" fn mouse_hook_proc(code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
+    if code == HC_ACTION as i32 {
+        MOUSE_HOOK_CONTEXT.with(|context| {
+            if let Some(context) = context.borrow().as_ref() {
+                context
+                    .selector_perf
+                    .trace_qa(&format!("windows mouse hook received message={}", w_param,));
+            }
+        });
+    }
     if code == HC_ACTION as i32 && w_param == WM_LBUTTONUP as WPARAM && l_param != 0 {
         MOUSE_HOOK_CONTEXT.with(|context| {
             let context_guard = context.borrow();
