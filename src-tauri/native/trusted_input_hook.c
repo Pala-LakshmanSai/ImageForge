@@ -39,7 +39,7 @@ static int load_config(void) {
 
     wchar_t mapping_name[128];
     wsprintfW(mapping_name, L"Local\\ImageForgeTrustedInput-%lu", GetCurrentThreadId());
-    config_mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, mapping_name);
+    config_mapping = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, mapping_name);
     if (config_mapping == NULL) return 0;
     config_view = (ImageForgeTrustedInputConfig *)MapViewOfFile(
         config_mapping,
