@@ -524,9 +524,15 @@ export async function measureQueueReleaseUi(
 
 async function measureCanonicalViewports(
   setSize: (size: LogicalSize) => Promise<void>,
+  setFullscreen?: (fullscreen: boolean) => Promise<void>,
 ): Promise<QueueReleaseViewportObservation[]> {
   const observations: QueueReleaseViewportObservation[] = [];
   for (const [width, height] of [[1280, 720], [1440, 900], [1920, 1080]] as const) {
+    // A 1920×1080 logical client can exceed the non-fullscreen work area on
+    // CI Macs (the title/menu bars consume the remaining vertical pixels).
+    // Use fullscreen only for this canonical target; the CSS client-size gate
+    // below remains exact and still rejects any clamped viewport.
+    if (setFullscreen !== undefined) await setFullscreen(height === 1080);
     await setSize(new LogicalSize(width, height));
     const measureExact = () => waitFor(() => {
       const measuredWidth = window.innerWidth;
@@ -715,7 +721,10 @@ function nativeRuntime(): QueueReleaseSmokeRuntime {
       await delay(120);
       await appWindow.unmaximize();
       await delay(120);
-      return measureCanonicalViewports((size) => appWindow.setSize(size));
+      return measureCanonicalViewports(
+        (size) => appWindow.setSize(size),
+        (fullscreen) => appWindow.setFullscreen(fullscreen),
+      );
     },
     observeAlarmUi: (controller) => observeAlarmUiAndRing(controller, runtime),
     minimize: () => appWindow.minimize(),
