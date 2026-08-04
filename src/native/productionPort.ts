@@ -1,6 +1,19 @@
 import type { CredentialKind, CredentialMetadata, CredentialMetadataMap } from '../domain/types';
 import type { ProductionDesktopPort } from '../adapters/productionImageForgeAdapter';
 import {
+  listenNativeGpuInventory,
+  nativeGpuInventoryBeginRefresh,
+  nativeGpuInventoryLoad,
+} from './gpuInventoryBridge';
+import {
+  nativeGpuStartAuto,
+  nativeGpuStartConfirmActualPrice,
+  nativeGpuStartLoad,
+  nativeGpuStartSelected,
+} from './gpuStartBridge';
+import { nativeGpuSwitchPort } from './gpuSwitchBridge';
+import { nativeGpuPodPort } from './gpuPodBridge';
+import {
   bindNativeRunPodProfile,
   bindNativeWorkerSession,
   clearNativeWorkerSession,
@@ -18,10 +31,10 @@ import {
   nativeRestoreDestination,
   nativeResolveRunPodCreateMarker,
   nativeRunPodCreateMarkerMetadata,
-  nativeRunPodFetch,
   nativeValidateDestination,
   nativeWriteManifest,
   nativeWorkerCreateBatch,
+  nativeWorkerGetSubmission,
   nativeWorkerGetBatch,
   nativeWorkerFetchPreview,
   nativeWorkerHealthFetch,
@@ -32,11 +45,21 @@ import {
   nativeWorkerStatus,
   nativeWorkerStudioCancelStopRequest,
   nativeWorkerStudioCreateStopRequest,
-  nativeWorkerStudioFinalizeStopRequest,
   nativeWorkerStudioHeartbeat,
   nativeWorkerStudioRespondToStopRequest,
+  nativeWorkerStudioRespondToGpuSwitch,
   nativeWorkerStudioStatus,
   asNativeError,
+  nativeQueueAcquireRunner,
+  nativeQueueCommit,
+  nativeQueueLoad,
+  nativeQueueNotificationPermissionGranted,
+  nativeQueuePrepareDispatch,
+  nativeQueueReleaseRunner,
+  nativeQueueRequestNotificationPermission,
+  nativeQueueReset,
+  nativeQueueSetSleepPrevention,
+  nativeQueueSignalAlert,
 } from './tauriBridge';
 
 /** Narrow renderer-side composition of the native commands. No secret or
@@ -55,8 +78,20 @@ export function createNativeProductionPort(): ProductionDesktopPort {
   }
 
   return {
-    runPodFetch: nativeRunPodFetch,
     workerHealthFetch: nativeWorkerHealthFetch,
+    gpuInventory: {
+      load: nativeGpuInventoryLoad,
+      beginRefresh: nativeGpuInventoryBeginRefresh,
+      listen: listenNativeGpuInventory,
+    },
+    gpuStart: {
+      load: nativeGpuStartLoad,
+      startAuto: nativeGpuStartAuto,
+      startSelected: nativeGpuStartSelected,
+      confirmActualPrice: nativeGpuStartConfirmActualPrice,
+    },
+    gpuSwitch: nativeGpuSwitchPort,
+    gpuPod: nativeGpuPodPort,
     bindProfile: bindNativeRunPodProfile,
     authorizeStart: nativeAuthorizeRunPodStart,
     clearStartAuthorization: nativeClearRunPodStartAuthorization,
@@ -91,9 +126,10 @@ export function createNativeProductionPort(): ProductionDesktopPort {
     studioStatus: nativeWorkerStudioStatus,
     studioCreateStopRequest: nativeWorkerStudioCreateStopRequest,
     studioRespondToStopRequest: nativeWorkerStudioRespondToStopRequest,
-    studioFinalizeStopRequest: nativeWorkerStudioFinalizeStopRequest,
+    studioRespondToGpuSwitch: nativeWorkerStudioRespondToGpuSwitch,
     studioCancelStopRequest: nativeWorkerStudioCancelStopRequest,
     createBatch: nativeWorkerCreateBatch,
+    getSubmission: nativeWorkerGetSubmission,
     getBatch: nativeWorkerGetBatch,
     pauseBatch: nativeWorkerPauseBatch,
     resumeBatch: nativeWorkerResumeBatch,
@@ -104,5 +140,15 @@ export function createNativeProductionPort(): ProductionDesktopPort {
     ).receipts,
     reconcileReceipts: (batchId) => nativeReconcileReceipts(batchId),
     downloadArtifact: nativeDownloadArtifact,
+    load: nativeQueueLoad,
+    reset: nativeQueueReset,
+    commit: nativeQueueCommit,
+    prepareDispatch: nativeQueuePrepareDispatch,
+    acquireRunner: nativeQueueAcquireRunner,
+    releaseRunner: nativeQueueReleaseRunner,
+    setSleepPrevention: nativeQueueSetSleepPrevention,
+    signalAlert: nativeQueueSignalAlert,
+    isNotificationPermissionGranted: nativeQueueNotificationPermissionGranted,
+    requestNotificationPermission: nativeQueueRequestNotificationPermission,
   };
 }

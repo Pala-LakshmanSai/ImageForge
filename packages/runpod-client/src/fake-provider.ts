@@ -5,6 +5,8 @@ import {
   isDynamicGpuDisplayName,
 } from "./gpu-policy.js";
 import { deriveRunPodProxyUrl, validateRunPodPodId } from "./proxy.js";
+import { projectLiveGpuSelectorOffersV1 } from "./gpu-selector.js";
+import type { GpuAutoSelectionSourceV1 } from "./lifecycle.js";
 import type {
   ApprovedGpuId,
   CreatePodFromTemplateRequest,
@@ -43,7 +45,7 @@ type TerminateHook = (
   provider: FakeRunPodProvider,
 ) => Promise<void> | void;
 
-export class FakeRunPodProvider implements RunPodProvider {
+export class FakeRunPodProvider implements RunPodProvider, GpuAutoSelectionSourceV1 {
   readonly calls: FakeProviderCalls = {
     inventory: [],
     list: [],
@@ -150,6 +152,73 @@ export class FakeRunPodProvider implements RunPodProvider {
     return Object.freeze(offers);
   }
 
+  async refreshForAutoStart(input: {
+    readonly expectedImageCount: number;
+    readonly includeEmergencyTier: boolean;
+    readonly signal: AbortSignal;
+  }) {
+    const processEpochId = "11111111-1111-4111-8111-111111111111";
+    const observationId = "22222222-2222-4222-8222-222222222222";
+    const receiptId = "33333333-3333-4333-8333-333333333333";
+    const observedAt = "2026-08-04T00:00:00.000Z";
+    const offers = projectLiveGpuSelectorOffersV1({
+      observationId,
+      receiptId,
+      observedAt,
+      currentGpuId: null,
+      offers: this.#inventory.flatMap((offer) => {
+        const approved = approveCatalogGpu({
+          id: offer.gpuId,
+          name: offer.displayName,
+          manufacturer: offer.manufacturer,
+          memoryGb: offer.memoryGb,
+        }, input.includeEmergencyTier);
+        if (
+          approved === null || offer.cloud !== "secure" || offer.dataCenterId !== "EU-RO-1" ||
+          !offer.volumeCompatible || (approved.emergency && !input.includeEmergencyTier)
+        ) return [];
+        return [{
+          gpuId: approved.gpuId,
+          policyKey: approved.policyKey,
+          displayName: offer.displayName,
+          memoryGb: offer.memoryGb,
+          emergency: approved.emergency,
+          availability: offer.availability === "unknown" ? "none" as const : offer.availability,
+          hourlyPriceMicroUsd: offer.hourlyPriceMicroUsd,
+          benchmarkState: "unmeasured" as const,
+          benchmarkAgeMs: null,
+          benchmarkMedianDurationUs: null,
+          benchmarkP95DurationUs: null,
+          benchmarkMeasuredAt: null,
+          benchmarkEvidenceSha256: null,
+          bootDurationMs: null,
+          remainingImages: input.expectedImageCount,
+        }];
+      }),
+    });
+    return Object.freeze({
+      schemaVersion: 1 as const,
+      observationId,
+      processEpochId,
+      includeEmergencyTier: input.includeEmergencyTier,
+      state: offers.length === 0 ? "empty" as const : "ready" as const,
+      observedAt,
+      receipt: Object.freeze({
+        schemaVersion: 1 as const,
+        receiptId,
+        processEpochId,
+        receivedAt: observedAt,
+        validForMs: 60000 as const,
+        catalogSha256: "0".repeat(64),
+      }),
+      offers,
+      currentPod: null,
+      currentPodObservedAt: null,
+      currentPodStale: false,
+      issue: null,
+    });
+  }
+
   async listImageForgePods(
     criteria: PodDiscoveryCriteria,
     _signal?: AbortSignal,
@@ -206,7 +275,8 @@ export class FakeRunPodProvider implements RunPodProvider {
       networkVolumeId: request.networkVolumeId,
       networkVolumeMountPath: request.networkVolumeMountPath,
       interruptible: request.interruptible,
-      hourlyPriceUsd: null,
+      hourlyPriceMicroUsd:
+        this.#inventory.find((offer) => offer.gpuId === actualGpuId)?.hourlyPriceMicroUsd ?? null,
       createdAt: new Date(0).toISOString(),
       startRequestId: request.startRequestId,
       proxyUrl: deriveRunPodProxyUrl(podId, request.workerPort),

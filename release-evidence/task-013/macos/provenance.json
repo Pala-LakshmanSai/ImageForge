@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "platform": "macos",
+  "architecture": "aarch64",
+  "appVersion": "0.1.9",
+  "gitHead": "0f164ce34119b5b84468f85b46c5cfe46fda3175",
+  "workingTreeDirty": true,
+  "dmgPath": "/Volumes/ImageForgeBuild/cargo-target/release/bundle/dmg/ImageForge_0.1.9_aarch64.dmg",
+  "dmgSha256": "5ea1b97d7abe44ee6b0de57b6159fc4b3f9e091fd71c4e0e6b2e69d03e641a9f",
+  "appBinarySha256": "56c90620291a75d7fad81231533f564dabb2c2f802755f7450e09c74988e42f1",
+  "hdiutilVerify": "VALID",
+  "deepStrictCodesign": "PASS",
+  "queueRoot": "/Volumes/ImageForgeBuild/tmp/imageforge-queue-final-live-region-135356",
+  "queueWrapperExit": 0,
+  "queuePhases": {
+    "run": "PHASE1_PASS",
+    "resume": "PHASE2_PASS",
+    "relaunch": "PASS"
+  },
+  "queueEvidenceSha256": "7b74f18b2d37d63fc45e28adb3c052f51fdf51efae4cf59e1a2b501f88e44726",
+  "queueAttestationSha256": "512ea214d568ef5c677b09686131303e40d1e0a0e5a0231e878b0629903b575a",
+  "queueP95Ms": 18,
+  "twoClientRoot": "/Volumes/ImageForgeBuild/tmp/imageforge-two-client-final-artifact-135845",
+  "twoClientWrapperExit": 0,
+  "twoClientAuditPassed": true,
+  "twoClientCheckpoints": 25,
+  "twoClientDeleteCount": 2,
+  "launchRoot": "/Volumes/ImageForgeBuild/tmp/imageforge-launch-final-artifact-135914",
+  "launchWrapperExit": 0,
+  "launchPassed": true,
+  "notarization": "SKIPPED_NO_APPLE_CREDENTIALS"
+}

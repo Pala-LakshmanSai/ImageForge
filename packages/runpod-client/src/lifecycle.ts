@@ -9,6 +9,10 @@ import { approveCatalogGpu, isEmergencyGpuId, staticGpuPolicy } from "./gpu-poli
 import { buildManagedPodName } from "./real-provider.js";
 import { rankGpuOffers } from "./ranking.js";
 import {
+  projectAutoGpuSelectionV1,
+  type NativeGpuInventorySnapshotV1,
+} from "./gpu-selector.js";
+import {
   type Clock,
   type ConfirmedStopIntent,
   type CreatePodFromTemplateRequest,
@@ -50,6 +54,19 @@ export interface RunPodLifecycleControllerOptions {
    * revalidation and before RunPod DELETE. The guard must not mutate RunPod.
    */
   readonly stopGuard?: StopGuard;
+  /**
+   * Native-owned final inventory authority for ordinary Auto Start. When this
+   * is absent, the compatibility lifecycle stays read-only and cannot POST.
+   */
+  readonly gpuSelectionSource?: GpuAutoSelectionSourceV1;
+}
+
+export interface GpuAutoSelectionSourceV1 {
+  refreshForAutoStart(input: {
+    readonly expectedImageCount: number;
+    readonly includeEmergencyTier: boolean;
+    readonly signal: AbortSignal;
+  }): Promise<NativeGpuInventorySnapshotV1>;
 }
 
 type SnapshotListener = (snapshot: RunPodSnapshot) => void;
@@ -212,6 +229,11 @@ function isReusablePod(pod: ManagedPod): boolean {
   return REUSABLE_POD_STATUSES.has(pod.status);
 }
 
+function hasAuthoritativePodPrice(pod: ManagedPod): boolean {
+  return pod.hourlyPriceMicroUsd !== null &&
+    Number.isSafeInteger(pod.hourlyPriceMicroUsd) && pod.hourlyPriceMicroUsd >= 0;
+}
+
 function workerPhaseToLifecycle(health: WorkerHealth): LifecyclePhase {
   switch (health.phase) {
     case "process":
@@ -274,6 +296,7 @@ export class RunPodLifecycleController {
   readonly #sleep: Sleep;
   readonly #tokenFactory: TokenFactory;
   readonly #stopGuard: StopGuard | null;
+  readonly #gpuSelectionSource: GpuAutoSelectionSourceV1 | null;
   readonly #listeners = new Set<SnapshotListener>();
   readonly #confirmations = new Map<string, PendingConfirmation>();
   readonly #knownCreatedPods = new Map<string, ManagedPod>();
@@ -303,6 +326,7 @@ export class RunPodLifecycleController {
     this.#sleep = options.sleep ?? defaultSleep;
     this.#tokenFactory = options.tokenFactory ?? (() => crypto.randomUUID());
     this.#stopGuard = options.stopGuard ?? null;
+    this.#gpuSelectionSource = options.gpuSelectionSource ?? null;
     this.#snapshot = Object.freeze({
       revision: 0,
       phase: "offline",
@@ -393,6 +417,102 @@ export class RunPodLifecycleController {
       }
       throw timeoutError;
     }).finally(deadline.dispose);
+  }
+
+  /**
+   * Profile-scoped Pod observation for the desktop heartbeat. This deliberately
+   * reuses the last validated inventory snapshot and can never refresh catalog
+   * inventory; explicit selector/readiness operations continue to use refresh().
+   */
+  observePods(options: RefreshOptions = {}): Promise<RunPodSnapshot> {
+    const timeoutMs = this.#config.operationTimeoutMs * READ_ONLY_REFRESH_TIMEOUT_MULTIPLIER;
+    const deadline = createOperationDeadline(options.signal, timeoutMs);
+    const boundedOptions: RefreshOptions = {
+      ...(options.expectedImageCount === undefined
+        ? {}
+        : { expectedImageCount: options.expectedImageCount }),
+      ...(options.suppressTransientPhase === true
+        ? { suppressTransientPhase: true }
+        : {}),
+      signal: deadline.signal,
+    };
+    const queued = this.#enqueueMutation(() => this.#observePods(boundedOptions));
+    return awaitWithAbort(queued, deadline.signal, "list_pods").catch((error: unknown) => {
+      if (!deadline.timedOut()) throw error;
+      const timeoutError = new RunPodClientError({
+        code: "api_request_failed",
+        message: "RunPod Pod observation exceeded the operation timeout.",
+        operation: "list_pods",
+        retryable: true,
+        details: { timeoutMs },
+      });
+      if (options.suppressTransientPhase !== true) {
+        this.#publish({ ...this.#snapshot, phase: "error", error: safeErrorSummary(timeoutError) });
+      }
+      throw timeoutError;
+    }).finally(deadline.dispose);
+  }
+
+  async #observePods(options: RefreshOptions): Promise<RunPodSnapshot> {
+    if (isSignalAborted(options.signal)) throw operationAborted("list_pods");
+    const expectedImageCount = validateExpectedImageCount(
+      options.expectedImageCount ?? this.#snapshot.expectedImageCount,
+    );
+    const hasActiveSelection = this.#snapshot.selectedPodId !== null &&
+      this.#snapshot.pods.some((pod) => pod.id === this.#snapshot.selectedPodId && isActivePod(pod));
+    if (options.suppressTransientPhase !== true) {
+      this.#publish({
+        ...this.#snapshot,
+        phase: hasActiveSelection ? this.#snapshot.phase : "selecting",
+        expectedImageCount,
+        error: null,
+      });
+    }
+    try {
+      const discovered = await awaitWithAbort(
+        this.#provider.listImageForgePods(this.#discoveryCriteria(), options.signal),
+        options.signal,
+        "list_pods",
+      );
+      if (isSignalAborted(options.signal)) throw operationAborted("list_pods");
+      this.#observeUnresolvedCreate(discovered);
+      const warnings: SnapshotWarning[] = this.#snapshot.warnings.filter(
+        (warning) => warning.code === "inventory_fallback",
+      );
+      if (this.#unresolvedStartRequestId !== null) warnings.push(this.#unresolvedCreateWarning());
+      const retained = await this.#mergeKnownCreatedPods(discovered, options.signal);
+      warnings.push(...retained.warnings);
+      const enriched = await this.#enrichPods(retained.pods, options.signal);
+      warnings.push(...enriched.warnings);
+      const inventory = this.#snapshot.inventory;
+      const rankedCandidates = rankGpuOffers({
+        offers: inventory,
+        benchmarkProfiles: this.#config.benchmarkProfiles,
+        benchmarkContract: this.#config.benchmarkContract,
+        expectedImageCount,
+      });
+      this.#publish(this.#snapshotForViews(
+        inventory,
+        rankedCandidates,
+        enriched.views,
+        expectedImageCount,
+        warnings,
+        new Date(this.#clock.now()).toISOString(),
+      ));
+      return this.#snapshot;
+    } catch (error) {
+      const runPodError = asRunPodClientError(error, {
+        code: "pod_discovery_failed",
+        message: "Existing ImageForge Pods could not be observed.",
+        operation: "list_pods",
+        retryable: true,
+      });
+      if (runPodError.code === "operation_aborted") throw runPodError;
+      if (options.suppressTransientPhase !== true) {
+        this.#publish({ ...this.#snapshot, phase: "error", error: safeErrorSummary(runPodError) });
+      }
+      throw runPodError;
+    }
   }
 
   async #refresh(options: RefreshOptions = {}): Promise<RunPodSnapshot> {
@@ -616,7 +736,7 @@ export class RunPodLifecycleController {
     try {
       while (true) {
         const snapshot = await awaitWithAbort(
-          this.refresh({
+          this.observePods({
             ...(options.expectedImageCount === undefined
               ? {}
               : { expectedImageCount: options.expectedImageCount }),
@@ -968,7 +1088,7 @@ export class RunPodLifecycleController {
     const podName = buildManagedPodName(this.#config.podNamePrefix, startRequestId);
 
     try {
-      const refreshed = await this.#refresh({
+      const refreshed = await this.#observePods({
         expectedImageCount,
         signal,
       });
@@ -1016,6 +1136,17 @@ export class RunPodLifecycleController {
           snapshot: refreshed,
         });
       }
+      const activeWithUnknownPrice = refreshed.pods.find(
+        (pod) => isActivePod(pod) && !hasAuthoritativePodPrice(pod),
+      );
+      if (activeWithUnknownPrice !== undefined) {
+        throw new RunPodClientError({
+          code: "gpu_actual_price_unavailable",
+          message: "The active GPU price cannot be confirmed. Refresh or explicitly stop the Pod.",
+          operation: "create_pod",
+          retryable: false,
+        });
+      }
       const nonReusableActive = refreshed.pods.find(isActivePod);
       if (nonReusableActive !== undefined) {
         throw new RunPodClientError({
@@ -1027,18 +1158,36 @@ export class RunPodLifecycleController {
           details: { podId: nonReusableActive.id, status: nonReusableActive.status },
         });
       }
-      if (refreshed.rankedCandidates.length === 0) {
+      if (this.#gpuSelectionSource === null) {
         throw new RunPodClientError({
           code: "no_gpu_available",
-          message: "No approved one-GPU RunPod offer is currently available.",
+          message: "Fresh receipt-bearing GPU inventory is required before starting a Pod.",
           operation: "create_pod",
           retryable: true,
         });
       }
-
-      const gpuTypeIds = Array.from(
-        new Set(refreshed.rankedCandidates.map((candidate) => candidate.gpuId)),
+      const authoritativeSnapshot = await awaitWithAbort(
+        this.#gpuSelectionSource.refreshForAutoStart({
+          expectedImageCount,
+          includeEmergencyTier: this.#config.allowEmergencyGpuTier,
+          signal,
+        }),
+        signal,
+        "inventory",
       );
+      const autoSelection = projectAutoGpuSelectionV1(
+        authoritativeSnapshot,
+        authoritativeSnapshot.processEpochId,
+      );
+      if (autoSelection === null) {
+        throw new RunPodClientError({
+          code: "no_gpu_available",
+          message: "Fresh receipt-bearing GPU inventory is required before starting a Pod.",
+          operation: "create_pod",
+          retryable: true,
+        });
+      }
+      const gpuTypeIds = [...autoSelection.orderedGpuIds];
       const request: CreatePodFromTemplateRequest = Object.freeze({
         name: podName,
         startRequestId,
@@ -1067,12 +1216,22 @@ export class RunPodLifecycleController {
         );
         attempt.exactPodReceived = true;
         exactCreatedPod = created;
-        return await this.#finishSuccessfulCreate(
+        const finished = await this.#finishSuccessfulCreate(
           created,
           expectedImageCount,
           "created",
           signal,
         );
+        if (!hasAuthoritativePodPrice(created)) {
+          throw new RunPodClientError({
+            code: "gpu_actual_price_unavailable",
+            message: "The created GPU price cannot be confirmed. Refresh or explicitly stop the Pod.",
+            operation: "create_pod",
+            retryable: false,
+            mayHaveSucceeded: true,
+          });
+        }
+        return finished;
       } catch (error) {
         const createError = asRunPodClientError(error, {
           code: "api_request_failed",
@@ -1083,6 +1242,9 @@ export class RunPodLifecycleController {
         });
         if (createError.code === "operation_aborted") {
           if (exactCreatedPod === null) this.#unresolvedStartRequestId = startRequestId;
+          throw createError;
+        }
+        if (createError.code === "gpu_actual_price_unavailable") {
           throw createError;
         }
         if (createError.mayHaveSucceeded) {
@@ -1528,6 +1690,7 @@ export class RunPodLifecycleController {
         (pod) =>
           isReusablePod(pod) &&
           pod.lifecyclePhase !== "error" &&
+          hasAuthoritativePodPrice(pod) &&
           pod.gpuId !== null &&
           (this.#config.allowEmergencyGpuTier || !isEmergencyGpuId(pod.gpuId)),
       ),
@@ -1595,7 +1758,6 @@ export class RunPodLifecycleController {
   }
 
   #staticFallbackInventory(): readonly GpuOffer[] {
-    const observedAt = new Date(this.#clock.now()).toISOString();
     return Object.freeze(
       this.#config.cloudLanes.flatMap((cloud) =>
         staticGpuPolicy(this.#config.allowEmergencyGpuTier).map((policy) =>
@@ -1608,11 +1770,11 @@ export class RunPodLifecycleController {
             manufacturer: "NVIDIA",
             memoryGb: policy.expectedMemoryGb,
             cloud,
-            hourlyPriceUsd: null,
+            hourlyPriceMicroUsd: null,
             availability: "unknown" as const,
             dataCenterId: this.#config.networkVolumeDataCenterId,
             volumeCompatible: true,
-            observedAt,
+            observedAt: null,
           }),
         ),
       ),

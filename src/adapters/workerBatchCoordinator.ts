@@ -26,7 +26,15 @@ export interface LocalDownloadReceipt {
 
 export interface WorkerBatchPort {
   status(): Promise<WorkerHttpResult>;
-  createBatch(prompts: string[], baseSeed: number, references?: WorkerReferencePayload[], aspectRatio?: AspectRatio): Promise<WorkerHttpResult>;
+  createBatch(
+    prompts: string[],
+    baseSeed: number,
+    references?: WorkerReferencePayload[],
+    aspectRatio?: AspectRatio,
+    clientSubmissionId?: string,
+    admissionMode?: 'foreground' | 'queue',
+  ): Promise<WorkerHttpResult>;
+  getSubmission?(clientSubmissionId: string): Promise<WorkerHttpResult>;
   getBatch(batchId: string): Promise<WorkerHttpResult>;
   pauseBatch(batchId: string): Promise<WorkerHttpResult>;
   resumeBatch(batchId: string): Promise<WorkerHttpResult>;
@@ -145,7 +153,12 @@ function validateReceipt(receipt: LocalDownloadReceipt, batchId: string): LocalD
 function workerFailure(result: WorkerHttpResult): WorkerBatchError {
   try {
     const error = parseWorkerApiError(result.body);
-    return new WorkerBatchError(error.code, error.message, result.status);
+    return new WorkerBatchError(
+      error.code,
+      error.message,
+      result.status,
+      error.code === 'submission_store_corrupt' ? false : undefined,
+    );
   } catch (error) {
     if (error instanceof WorkerBatchError) return error;
     return new WorkerBatchError(
@@ -232,6 +245,8 @@ export class WorkerBatchCoordinator {
     references: readonly BatchReference[] = [],
     aspectRatio: AspectRatio = '16:9',
     batchName = DEFAULT_BATCH_NAME,
+    clientSubmissionId: string = crypto.randomUUID(),
+    admissionMode: 'foreground' | 'queue' = 'foreground',
   ): Promise<WorkerBatchEvent> {
     if (
       prompts.length < 1 ||
@@ -239,6 +254,8 @@ export class WorkerBatchCoordinator {
       !Number.isSafeInteger(baseSeed) ||
       baseSeed < 0 ||
       baseSeed + prompts.length - 1 > Number.MAX_SAFE_INTEGER
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(clientSubmissionId)
+      || !['foreground', 'queue'].includes(admissionMode)
     ) {
       throw new WorkerBatchError('batch_request_invalid', 'The batch request is invalid.', 0);
     }
@@ -272,6 +289,8 @@ export class WorkerBatchCoordinator {
           baseSeed,
           requestReferences,
           aspectRatio,
+          clientSubmissionId,
+          admissionMode,
         ),
       );
       if (result === null) return { type: 'idle' };
@@ -291,7 +310,31 @@ export class WorkerBatchCoordinator {
       this.#batchName = batchName;
       this.#observedBusyBatchId = null;
       return this.#synchronizeOwnedManifest(manifest, connectionGeneration, stateGeneration);
-    });
+    }, { type: 'idle' });
+  }
+
+  async lookupSubmission(clientSubmissionId: string): Promise<string | null> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(clientSubmissionId)) {
+      throw new WorkerBatchError('submission_id_invalid', 'The client submission ID is invalid.', 0, false);
+    }
+    const connectionGeneration = this.#connectionGeneration;
+    const stateGeneration = this.#stateGeneration;
+    return this.#runExclusive(connectionGeneration, stateGeneration, async () => {
+      if (this.#port.getSubmission === undefined) {
+        throw new WorkerBatchError('submission_lookup_unavailable', 'Exact submission recovery is unavailable.', 0, false);
+      }
+      const result = await this.#port.getSubmission(clientSubmissionId);
+      if (!this.#isCurrent(connectionGeneration, stateGeneration)) return null;
+      if (result.status === 404) return null;
+      const manifest = parseWorkerManifest(requireSuccess(result, [200]));
+      if (manifest.clientSubmissionId !== clientSubmissionId) {
+        throw new WorkerBatchError('worker_response_invalid', 'The submission lookup returned a different association.', 0, false);
+      }
+      this.#ownedBatchId = manifest.batchId;
+      this.#observedBusyBatchId = null;
+      await this.#synchronizeOwnedManifest(manifest, connectionGeneration, stateGeneration);
+      return manifest.batchId;
+    }, null);
   }
 
   poll(): Promise<WorkerBatchEvent> {
@@ -302,6 +345,7 @@ export class WorkerBatchCoordinator {
       connectionGeneration,
       stateGeneration,
       () => this.#pollOnce(connectionGeneration, stateGeneration),
+      { type: 'idle' },
     ).finally(() => {
       if (this.#pollPromise === operation) this.#pollPromise = null;
     });
@@ -357,12 +401,19 @@ export class WorkerBatchCoordinator {
       const status = parseWorkerStatus(requireSuccess(await this.#port.status(), [200]));
       if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
       if (status.activeBatch === null) {
-        const releasedEvent: WorkerBatchEvent = status.ready && !status.permissions.canCreate
+        const releasedEvent: WorkerBatchEvent = status.permissions.createBlockReason === 'submission_store_corrupt'
           ? {
+              type: 'error',
+              code: 'submission_store_corrupt',
+              message: 'Worker submission history is unavailable. Repair the shared volume before starting generation.',
+              retryable: false,
+            }
+          : status.permissions.createBlockReason === 'gpu_stop_pending'
+            ? {
               type: 'stop-pending',
               message: 'GPU Stop is finalizing; new generation is temporarily blocked.',
             }
-          : { type: 'idle' };
+            : { type: 'idle' };
         // The worker releases its shared lease as soon as generation reaches a
         // terminal state. Keep the known owner batch ID long enough to fetch
         // that terminal manifest and reconcile every ready artifact; otherwise
@@ -391,9 +442,38 @@ export class WorkerBatchCoordinator {
       }
       this.#ownedBatchId = status.activeBatch.batchId;
       this.#observedBusyBatchId = null;
-      const manifest = parseWorkerManifest(
-        requireSuccess(await this.#port.getBatch(status.activeBatch.batchId), [200]),
-      );
+      const activeBatchResult = await this.#port.getBatch(status.activeBatch.batchId);
+      if (activeBatchResult.status === 404) {
+        // Status and GET are separate worker reads. A terminal worker can
+        // release its lease between them, so an active snapshot may be
+        // followed by batch_not_found. Re-read status before surfacing an
+        // error; only treat the 404 as benign when the worker now confirms
+        // that no batch is active. This is the same fail-closed release path
+        // used when the initial status read is already idle.
+        const settledStatus = parseWorkerStatus(
+          requireSuccess(await this.#port.status(), [200]),
+        );
+        if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
+        if (settledStatus.activeBatch === null) {
+          const releasedEvent: WorkerBatchEvent = settledStatus.permissions.createBlockReason === 'submission_store_corrupt'
+            ? {
+                type: 'error',
+                code: 'submission_store_corrupt',
+                message: 'Worker submission history is unavailable. Repair the shared volume before starting generation.',
+                retryable: false,
+              }
+            : settledStatus.permissions.createBlockReason === 'gpu_stop_pending'
+              ? {
+                  type: 'stop-pending',
+                  message: 'GPU Stop is finalizing; new generation is temporarily blocked.',
+                }
+              : { type: 'idle' };
+          this.#ownedBatchId = null;
+          this.#observedBusyBatchId = null;
+          return this.#commit(releasedEvent, connectionGeneration, stateGeneration);
+        }
+      }
+      const manifest = parseWorkerManifest(requireSuccess(activeBatchResult, [200]));
       if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' };
       return await this.#synchronizeOwnedManifest(manifest, connectionGeneration, stateGeneration);
     } catch (error) {
@@ -724,20 +804,21 @@ export class WorkerBatchCoordinator {
     return this.#emit(event);
   }
 
-  #runExclusive(
+  #runExclusive<T>(
     connectionGeneration: number,
     stateGeneration: number,
-    operation: () => Promise<WorkerBatchEvent>,
-  ): Promise<WorkerBatchEvent> {
+    operation: () => Promise<T>,
+    staleResult: T,
+  ): Promise<T> {
     const predecessor = this.#operationTail;
     const result = predecessor.then(async () => {
-      if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' } as const;
+      if (!this.#isCurrent(connectionGeneration, stateGeneration)) return staleResult;
       try {
         return await operation();
       } catch (error) {
         // New brief is a hard epoch boundary: old requests, parsing failures,
         // and download errors must all become inert after it is crossed.
-        if (!this.#isCurrent(connectionGeneration, stateGeneration)) return { type: 'idle' } as const;
+        if (!this.#isCurrent(connectionGeneration, stateGeneration)) return staleResult;
         throw error;
       }
     });

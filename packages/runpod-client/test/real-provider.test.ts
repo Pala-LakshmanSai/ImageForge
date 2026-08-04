@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { inspect } from "node:util";
 import {
+  FakeRunPodProvider,
   FakeWorkerHealthProbe,
   RunPodClientError,
   RunPodLifecycleController,
@@ -247,6 +248,131 @@ describe("RunPodV2InventorySource", () => {
       ],
     );
   });
+
+  it("drops a fractional or unsafe Secure max-count row without poisoning valid siblings", async () => {
+    const fetchTransport: FetchTransport = (async (input) => {
+      if (String(input).endsWith("/catalog/datacenters")) {
+        return jsonResponse({
+          dataCenters: [{ id: "EU-RO-1", networkVolumeTypes: ["STANDARD"] }],
+        });
+      }
+      const row = (id: string, name: string, memory: number, max: number) => ({
+        id,
+        name,
+        manufacturer: "NVIDIA",
+        memory,
+        secure: true,
+        price: { secure: 0.5 },
+        maxCount: { secure: max },
+        dataCenters: [{ id: "EU-RO-1", availability: "HIGH" }],
+      });
+      return jsonResponse({
+        gpus: [
+          row("NVIDIA GeForce RTX 4090", "RTX 4090", 24, 1.5),
+          row("NVIDIA GeForce RTX 5090", "RTX 5090", 32, Number.MAX_SAFE_INTEGER + 1),
+          row("NVIDIA L4", "L4", 24, 1),
+        ],
+      });
+    }) as FetchTransport;
+    const source = new RunPodV2InventorySource({
+      apiKeyProvider: () => "test-key",
+      fetchTransport,
+    });
+
+    const offers = await source.listGpuInventory({
+      gpuIds: ["NVIDIA GeForce RTX 4090", "NVIDIA GeForce RTX 5090", "NVIDIA L4"],
+      includeEmergencyTier: false,
+      cloudLanes: ["secure"],
+      gpuCount: 1,
+      dataCenterId: "EU-RO-1",
+    });
+    assert.deepEqual(offers.map((offer) => offer.gpuId), ["NVIDIA L4"]);
+  });
+
+  it("isolates malformed allowlisted catalog rows across every row field and retains valid L4", async () => {
+    const fetchTransport: FetchTransport = (async (input) => {
+      if (String(input).endsWith("/catalog/datacenters")) {
+        return jsonResponse({
+          dataCenters: [{ id: "EU-RO-1", networkVolumeTypes: ["STANDARD"] }],
+        });
+      }
+      const valid = {
+        id: "NVIDIA GeForce RTX 4090",
+        name: "RTX 4090",
+        manufacturer: "NVIDIA",
+        memory: 24,
+        secure: true,
+        price: { secure: 0.5 },
+        maxCount: { secure: 1 },
+        dataCenters: [{ id: "EU-RO-1", availability: "HIGH" }],
+      };
+      const malformed = [
+        { ...valid, id: null },
+        { ...valid, name: [] },
+        { ...valid, manufacturer: 42 },
+        { ...valid, memory: "24" },
+        { ...valid, secure: "true" },
+        { ...valid, price: "0.5" },
+        { ...valid, price: { secure: "0.5" } },
+        { ...valid, maxCount: null },
+        { ...valid, maxCount: { secure: 1.5 } },
+        { ...valid, dataCenters: "EU-RO-1" },
+        { ...valid, dataCenters: [{ id: 7, availability: "HIGH" }] },
+        { ...valid, dataCenters: [{ id: "EU-RO-1", availability: "MAYBE" }] },
+        {
+          ...valid,
+          dataCenters: [
+            { id: "EU-RO-1", availability: "HIGH" },
+            { id: "EU-RO-1", availability: "LOW" },
+          ],
+        },
+      ];
+      return jsonResponse({
+        gpus: [
+          ...malformed,
+          {
+            ...valid,
+            id: "NVIDIA L4",
+            name: "L4",
+          },
+        ],
+      });
+    }) as FetchTransport;
+    const source = new RunPodV2InventorySource({
+      apiKeyProvider: () => "test-key",
+      fetchTransport,
+    });
+
+    const offers = await source.listGpuInventory({
+      gpuIds: ["NVIDIA GeForce RTX 4090", "NVIDIA L4"],
+      includeEmergencyTier: false,
+      cloudLanes: ["secure"],
+      gpuCount: 1,
+      dataCenterId: "EU-RO-1",
+    });
+    assert.deepEqual(offers.map((offer) => offer.gpuId), ["NVIDIA L4"]);
+  });
+
+  it("still fails the whole observation when the GPU lane envelope is malformed", async () => {
+    const fetchTransport: FetchTransport = (async (input) =>
+      String(input).endsWith("/catalog/datacenters")
+        ? jsonResponse({ dataCenters: [{ id: "EU-RO-1", networkVolumeTypes: ["STANDARD"] }] })
+        : jsonResponse({ gpus: {} })) as FetchTransport;
+    const source = new RunPodV2InventorySource({
+      apiKeyProvider: () => "test-key",
+      fetchTransport,
+    });
+    await assert.rejects(
+      () => source.listGpuInventory({
+        gpuIds: ["NVIDIA L4"],
+        includeEmergencyTier: false,
+        cloudLanes: ["secure"],
+        gpuCount: 1,
+        dataCenterId: "EU-RO-1",
+      }),
+      (error: unknown) => error instanceof RunPodClientError && error.code === "api_response_invalid",
+    );
+  });
 });
 
 describe("RunPodRestProvider", () => {
@@ -261,7 +387,7 @@ describe("RunPodRestProvider", () => {
       name: "imageforge-request1",
       startRequestId: "request1",
       templateId: "template1",
-      imageName: "ghcr.io/imageforge/worker@sha256:0123456789abcdef",
+      imageName: "ghcr.io/imageforge/worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
       networkVolumeId: "volume1",
       networkVolumeDataCenterId: "EU-RO-1",
       networkVolumeMountPath: "/workspace",
@@ -354,7 +480,7 @@ describe("RunPodRestProvider", () => {
     assert.equal(capturedAuthorization, "Bearer secure-test-key");
     assert.equal(capturedRedirect, "error");
     assert.equal(body?.templateId, "template1");
-    assert.equal(body?.imageName, "ghcr.io/imageforge/worker@sha256:0123456789abcdef");
+    assert.equal(body?.imageName, "ghcr.io/imageforge/worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
     assert.equal(body?.networkVolumeId, "volume1");
     assert.equal(body?.gpuCount, 1);
     assert.equal(body?.gpuTypePriority, "custom");
@@ -647,6 +773,7 @@ describe("RunPodRestProvider", () => {
       provider,
       config: makeConfig(),
       workerHealthProbe: new FakeWorkerHealthProbe(),
+      gpuSelectionSource: new FakeRunPodProvider({ inventory: [makeOffer()] }),
     });
 
     const result = await controller.startGpu({

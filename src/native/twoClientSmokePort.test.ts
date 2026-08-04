@@ -26,17 +26,15 @@ describe('two-client installed smoke port', () => {
       .rejects.toThrow('rejected the final audit');
   });
 
-  it('maps only exact RunPod paths and rejects an arbitrary renderer URL', async () => {
+  it('maps only the narrow native Pod observation and exposes no generic fetch', async () => {
     invoke.mockResolvedValue({ status: 200, body: [] });
     const { port } = createTwoClientSmokePort('A');
 
-    await expect(port.runPodFetch('https://api.runpod.io/graphql/pods')).resolves.toBeInstanceOf(Response);
+    await expect(port.gpuPod.observe()).resolves.toMatchObject({ state: 'offline', pods: [] });
     expect(invoke).toHaveBeenCalledWith('native_two_client_smoke_exchange', {
       input: { operation: 'runpod_list' },
     });
-    await expect(port.runPodFetch('https://example.com/secrets')).rejects.toThrow(
-      'rejected an unexpected RunPod path',
-    );
+    expect('runPodFetch' in port).toBe(false);
   });
 
   it('allows owner artifact acknowledgements but forbids remote artifact transfer', async () => {

@@ -5,6 +5,7 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -26,6 +27,8 @@ const IMAGEFORGE_TEMPLATE_ID: &str = "q8sfgixfy2";
 const IMAGEFORGE_NETWORK_VOLUME_ID: &str = "ukh207b26r";
 const IMAGEFORGE_WORKER_IMAGE: &str =
     "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:f862e1ea8ece9f35101e7c47be55a5042c17e0eb3cf8414dd709ed73a59e33ed";
+const IMAGEFORGE_VOLUME_MOUNT_PATH: &str = "/workspace";
+const IMAGEFORGE_WORKER_PORT: u16 = 8000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RunPodProfileBinding {
@@ -33,10 +36,37 @@ struct RunPodProfileBinding {
     network_volume_id: String,
 }
 
+/// Monotonic process-local profile binding epoch. A completed provider read
+/// may replace verified Pod authority only if the exact binding generation it
+/// started under is still current. This prevents a late response from an old
+/// credential/profile binding from repopulating the freshly cleared registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RunPodProfileGeneration(u64);
+
 #[derive(Debug, Clone)]
 struct DeleteGrant {
     pod_id: String,
     verified_at: Instant,
+}
+
+/// A one-use Task 014 grant. Unlike the legacy delete grant this binds both
+/// the durable switch transaction and exact Pod ID, so a prior generic GET
+/// can never accidentally authorize a coordinated destructive operation.
+#[derive(Debug, Clone)]
+struct SwitchDeleteGrant {
+    switch_id: String,
+    pod_id: String,
+    issued_at: Instant,
+}
+
+/// One private, single-use ordinary Stop deletion authority. It is distinct
+/// from both legacy generic termination and coordinated Switch deletion so a
+/// prior list/GET or another operation cannot authorize this socket write.
+#[derive(Debug, Clone)]
+struct NormalStopDeleteGrant {
+    operation_id: String,
+    pod_id: String,
+    issued_at: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -153,17 +183,173 @@ pub struct RunPodHttpResponse {
     pub content_type: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NormalStartListPod {
+    id: String,
+    name: String,
+    template_id: String,
+    image_name: String,
+    network_volume: NormalStartNetworkVolume,
+    volume_mount_path: String,
+    interruptible: bool,
+    gpu: NormalStartGpu,
+    machine: NormalStartMachine,
+    gpu_count: u64,
+    ports: Vec<String>,
+    desired_status: Option<String>,
+    status: Option<String>,
+    adjusted_cost_per_hr: Option<Box<serde_json::value::RawValue>>,
+    cost_per_hr: Option<Box<serde_json::value::RawValue>>,
+    created_at: Option<String>,
+    last_started_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NormalStartNetworkVolume {
+    id: String,
+    data_center_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NormalStartGpu {
+    id: String,
+    display_name: String,
+    count: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NormalStartMachine {
+    secure_cloud: bool,
+    data_center_id: String,
+    gpu_type_id: String,
+}
+
+impl NormalStartListPod {
+    fn is_strictly_safe(&self, profile: &RunPodProfileBinding) -> bool {
+        safe_identifier(&self.id, false)
+            && safe_identifier(&self.name, true)
+            && self.name.starts_with("imageforge-")
+            && self.template_id == profile.template_id
+            && self.network_volume.id == profile.network_volume_id
+            && self.network_volume.data_center_id == "EU-RO-1"
+            && self.volume_mount_path == "/workspace"
+            && !self.interruptible
+            && self.gpu_count == 1
+            && self.gpu.count == 1
+            && safe_gpu_identifier(&self.gpu.id)
+            && safe_gpu_identifier(&self.gpu.display_name)
+            && self.machine.secure_cloud
+            && self.machine.data_center_id == "EU-RO-1"
+            && self.machine.gpu_type_id == self.gpu.id
+            && self.ports.len() == 1
+            && self.ports.first().is_some_and(|port| port == "8000/http")
+            && self.image_name == IMAGEFORGE_WORKER_IMAGE
+    }
+}
+
+/// Raw catalog bodies stay entirely inside the native boundary.  The selector
+/// needs the original JSON number lexemes for price validation, so projecting
+/// through `serde_json::Value` here would be a lossy authority boundary.
+#[derive(Debug, Clone)]
+pub(crate) struct NativeCatalogBody {
+    pub body: String,
+}
+
+/// The raw create response is likewise private.  The inventory controller
+/// extracts the exact adjusted-cost token before returning the small safe
+/// manual-start projection to the renderer.
+#[derive(Debug, Clone)]
+pub(crate) struct NativeCreatedPodResponse {
+    pub raw_body: String,
+    pub projected_body: String,
+}
+
+/// A native-only socket boundary notification. It exists solely so the
+/// installed queue release harness can reject paid provider mutations before
+/// their first byte is sent; renderer code cannot install or invoke it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeRunPodMutationKind {
+    Create,
+    Delete,
+}
+
+/// A fully profile-validated provider Pod projection for native lifecycle
+/// orchestration. It is not a Tauri wire type; the command layer decides which
+/// minimal fields, if any, are safe to return to React.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeRunPodManagedPodV1 {
+    pub pod_id: String,
+    pub pod_name: String,
+    pub gpu_id: String,
+    pub gpu_display_name: String,
+    pub hourly_price_micro_usd: Option<u64>,
+    pub status: String,
+    pub provider_response_sha256: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeRunPodDeleteDispositionV1 {
+    Deleted,
+    NotFound,
+    Uncertain,
+}
+
+/// Private replacement-create plan assembled exclusively from the bound
+/// ImageForge profile and durable switch identity. Neither the body nor its
+/// hashes are a renderer capability.
+#[derive(Debug, Clone)]
+pub(crate) struct NativeRunPodSwitchCreatePlanV1 {
+    body: Value,
+    canonical_body: String,
+    pub request_sha256: String,
+    pub create_marker_sha256: String,
+    pub create_intent_sha256: String,
+    pub create_wire_body_sha256: String,
+    pub target_gpu_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeRunPodSwitchCreateResultV1 {
+    pub pod: NativeRunPodManagedPodV1,
+    pub provider_response_sha256: String,
+}
+
+/// Immutable profile fields that a replacement worker must report through the
+/// owner-only runtime identity route.  This stays native-only and prevents the
+/// renderer from supplying a volume, region, image, or model binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeRunPodSwitchRuntimeBindingV1 {
+    pub network_volume_id: String,
+    pub data_center_id: &'static str,
+    pub image_digest: &'static str,
+}
+
+type NativeRunPodMutationHook =
+    Arc<dyn Fn(NativeRunPodMutationKind) -> NativeResult<()> + Send + Sync + 'static>;
+
 #[derive(Clone)]
 pub struct RunPodTransport {
     client: Client,
     vault: Arc<dyn CredentialVault>,
     profile: Arc<RwLock<Option<RunPodProfileBinding>>>,
+    profile_generation: Arc<Mutex<RunPodProfileGeneration>>,
+    /// Owned by `GpuPodService`, not renderer input. It fences verified-Pod
+    /// registry replacement when a Stop-owned R+1/R+2 observation supersedes
+    /// an already awaited background heartbeat under the same profile.
+    pod_observation_generation: Arc<Mutex<u64>>,
     delete_grant: Arc<Mutex<Option<DeleteGrant>>>,
+    switch_delete_grant: Arc<Mutex<Option<SwitchDeleteGrant>>>,
+    normal_stop_delete_grant: Arc<Mutex<Option<NormalStopDeleteGrant>>>,
     create_grant: Arc<Mutex<Option<ForegroundGrant>>>,
     emergency_grant: Arc<Mutex<Option<ForegroundGrant>>>,
     catalog_dynamic_gpus: Arc<RwLock<HashMap<String, String>>>,
     verified_pods: Arc<RwLock<HashMap<String, VerifiedManagedPod>>>,
     create_marker: Arc<CreateMarkerStore>,
+    mutation_hook: Arc<RwLock<Option<NativeRunPodMutationHook>>>,
 }
 
 impl RunPodTransport {
@@ -192,13 +378,44 @@ impl RunPodTransport {
             client,
             vault,
             profile: Arc::new(RwLock::new(None)),
+            profile_generation: Arc::new(Mutex::new(RunPodProfileGeneration(0))),
+            pod_observation_generation: Arc::new(Mutex::new(0)),
             delete_grant: Arc::new(Mutex::new(None)),
+            switch_delete_grant: Arc::new(Mutex::new(None)),
+            normal_stop_delete_grant: Arc::new(Mutex::new(None)),
             create_grant: Arc::new(Mutex::new(None)),
             emergency_grant: Arc::new(Mutex::new(None)),
             catalog_dynamic_gpus: Arc::new(RwLock::new(HashMap::new())),
             verified_pods: Arc::new(RwLock::new(HashMap::new())),
             create_marker: Arc::new(CreateMarkerStore::new(marker_directory)),
+            mutation_hook: Arc::new(RwLock::new(None)),
         })
+    }
+
+    pub(crate) fn set_native_mutation_hook(
+        &self,
+        hook: Option<NativeRunPodMutationHook>,
+    ) -> NativeResult<()> {
+        *self.mutation_hook.write().map_err(|_| state_error())? = hook;
+        Ok(())
+    }
+
+    /// Call exactly at the native provider write boundary. The hook is absent
+    /// for normal launches; queue-release smoke installs one that records and
+    /// rejects the mutation before any socket write.
+    pub(crate) fn before_native_mutation(
+        &self,
+        kind: NativeRunPodMutationKind,
+    ) -> NativeResult<()> {
+        let hook = self
+            .mutation_hook
+            .read()
+            .map_err(|_| state_error())?
+            .clone();
+        if let Some(hook) = hook {
+            hook(kind)?;
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -227,11 +444,24 @@ impl RunPodTransport {
             ));
         }
         let mut profile = self.profile.write().map_err(|_| state_error())?;
+        let mut profile_generation = self.profile_generation.lock().map_err(|_| state_error())?;
+        let next_profile_generation = profile_generation
+            .0
+            .checked_add(1)
+            .map(RunPodProfileGeneration)
+            .ok_or_else(state_error)?;
         *profile = Some(RunPodProfileBinding {
             template_id: template_id.to_owned(),
             network_volume_id: network_volume_id.to_owned(),
         });
+        *profile_generation = next_profile_generation;
         if let Ok(mut grant) = self.delete_grant.lock() {
+            *grant = None;
+        }
+        if let Ok(mut grant) = self.switch_delete_grant.lock() {
+            *grant = None;
+        }
+        if let Ok(mut grant) = self.normal_stop_delete_grant.lock() {
             *grant = None;
         }
         self.clear_start_authorization()?;
@@ -244,6 +474,69 @@ impl RunPodTransport {
             .map_err(|_| state_error())?
             .clear();
         Ok(())
+    }
+
+    /// Snapshot the monotonic local profile binding epoch without issuing a
+    /// provider request. GPU action coordinators capture it before preflight
+    /// and recheck it immediately before their destructive socket boundaries.
+    pub(crate) fn gpu_control_profile_generation(&self) -> NativeResult<u64> {
+        Ok(self.profile_generation.lock().map_err(|_| state_error())?.0)
+    }
+
+    /// A private, canonical binding for the immutable profile that a GPU
+    /// switch must preserve. The renderer never supplies this value: a
+    /// switched Pod can only reuse ImageForge's configured template, image,
+    /// volume, mount, secure lane, region, and worker port.
+    pub(crate) fn gpu_switch_profile_binding_sha256(&self) -> NativeResult<String> {
+        let profile = self
+            .profile
+            .read()
+            .map_err(|_| state_error())?
+            .clone()
+            .ok_or_else(|| {
+                NativeError::new(
+                    "gpu_switch_profile_locked",
+                    "The ImageForge GPU profile is not available for this switch.",
+                )
+            })?;
+        validate_approved_profile_ids(&profile.template_id, &profile.network_volume_id).map_err(
+            |_| {
+                NativeError::new(
+                    "gpu_switch_profile_locked",
+                    "The ImageForge GPU profile changed before this switch could begin.",
+                )
+            },
+        )?;
+        let canonical = super::gpu_inventory::jcs_value(&serde_json::json!({
+            "schema_version": 1,
+            "template_id": profile.template_id,
+            "image_identity": IMAGEFORGE_WORKER_IMAGE,
+            "network_volume_id": profile.network_volume_id,
+            "volume_mount_path": IMAGEFORGE_VOLUME_MOUNT_PATH,
+            "worker_port": IMAGEFORGE_WORKER_PORT,
+            "cloud": "secure",
+            "data_center_id": "EU-RO-1",
+            "gpu_count": 1,
+            "interruptible": false,
+        }))
+        .map_err(|_| {
+            NativeError::new(
+                "gpu_switch_profile_locked",
+                "The ImageForge GPU profile could not be bound for this switch.",
+            )
+        })?;
+        Ok(hex::encode(Sha256::digest(canonical.as_bytes())))
+    }
+
+    pub(crate) fn gpu_switch_runtime_binding(
+        &self,
+    ) -> NativeResult<NativeRunPodSwitchRuntimeBindingV1> {
+        let profile = self.bound_switch_profile()?;
+        Ok(NativeRunPodSwitchRuntimeBindingV1 {
+            network_volume_id: profile.network_volume_id,
+            data_center_id: "EU-RO-1",
+            image_digest: IMAGEFORGE_WORKER_IMAGE,
+        })
     }
 
     pub fn authorize_create(&self) -> NativeResult<String> {
@@ -344,6 +637,839 @@ impl RunPodTransport {
         }
     }
 
+    /// Fetch one pinned inventory endpoint without exposing a URL, headers,
+    /// provider body, or credential to Tauri IPC.  It validates the transport
+    /// envelope and secret-reflection guard while deliberately preserving the
+    /// original JSON bytes for the lossless selector decoder.
+    pub(crate) async fn native_catalog_datacenters(&self) -> NativeResult<NativeCatalogBody> {
+        self.native_catalog_get("https://api.runpod.io/v2/catalog/datacenters")
+            .await
+    }
+
+    /// See `native_catalog_datacenters`. The query ordering is literal and
+    /// pinned by the Task 014 inventory contract.
+    pub(crate) async fn native_catalog_gpus(&self) -> NativeResult<NativeCatalogBody> {
+        self.native_catalog_get(
+            "https://api.runpod.io/v2/catalog/gpus?include=AVAILABILITY&product=POD&count=1&cloud=SECURE&minCudaVersion=13.0",
+        )
+        .await
+    }
+
+    async fn native_catalog_get(&self, raw_url: &str) -> NativeResult<NativeCatalogBody> {
+        let url = Url::parse(raw_url).map_err(|_| state_error())?;
+        validate_common_url(&url)?;
+        validate_inventory(&Method::GET, &url, None)?;
+        let credential = self.vault.load(CredentialKind::RunpodApiKey)?;
+        let worker_credential = self.vault.load(CredentialKind::WorkerToken).ok();
+        let response = self
+            .client
+            .request(Method::GET, url)
+            .header(ACCEPT, "application/json")
+            .header(AUTHORIZATION, format!("Bearer {credential}"))
+            .send()
+            .await
+            .map_err(|error| {
+                if error.is_timeout() {
+                    NativeError::retryable(
+                        "runpod_timeout",
+                        "RunPod inventory did not answer before the native deadline.",
+                    )
+                } else {
+                    NativeError::retryable(
+                        "runpod_network_error",
+                        "RunPod could not be reached over the secure network connection.",
+                    )
+                }
+            })?;
+        match response.status().as_u16() {
+            200 => {}
+            401 | 403 => {
+                return Err(NativeError::new(
+                    "runpod_auth_failed",
+                    "RunPod rejected the saved API credential.",
+                ))
+            }
+            429 => {
+                return Err(NativeError::retryable(
+                    "runpod_rate_limited",
+                    "RunPod inventory is temporarily rate limited.",
+                ))
+            }
+            500..=599 => {
+                return Err(NativeError::retryable(
+                    "runpod_provider_unavailable",
+                    "RunPod inventory is temporarily unavailable.",
+                ))
+            }
+            _ => {
+                return Err(NativeError::new(
+                    "runpod_response_invalid",
+                    "RunPod inventory returned an unexpected response.",
+                ))
+            }
+        }
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value
+                    .split(';')
+                    .next()
+                    .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
+            });
+        if !content_type {
+            return Err(response_invalid());
+        }
+        let body = read_bounded_body(response, MAX_RESPONSE_BYTES).await?;
+        if body.is_empty() {
+            return Err(response_invalid());
+        }
+        // Parse only for structural JSON/secret-reflection validation. Return
+        // the untouched text so price fields retain their exact JSON tokens.
+        let parsed: Value = serde_json::from_str(&body).map_err(|_| response_invalid())?;
+        reject_secret_reflection(
+            &parsed,
+            [&credential, worker_credential.as_deref().unwrap_or("")],
+        )?;
+        Ok(NativeCatalogBody { body })
+    }
+
+    /// Final normal-manual Start preflight. This is a native-owned profile GET,
+    /// distinct from the two catalog reads, and refuses to create beside any
+    /// provider-returned Pod rather than guessing whether it is reusable.
+    pub(crate) async fn native_preflight_no_managed_pod(&self) -> NativeResult<()> {
+        let profile = self
+            .profile
+            .read()
+            .map_err(|_| normal_start_error("gpu_start_profile_locked"))?
+            .clone()
+            .ok_or_else(|| normal_start_error("gpu_start_profile_locked"))?;
+        validate_approved_profile_ids(&profile.template_id, &profile.network_volume_id)
+            .map_err(|_| normal_start_error("gpu_start_profile_locked"))?;
+        let template_id = url::form_urlencoded::byte_serialize(profile.template_id.as_bytes())
+            .collect::<String>();
+        let network_volume_id =
+            url::form_urlencoded::byte_serialize(profile.network_volume_id.as_bytes())
+                .collect::<String>();
+        let url = format!(
+            "https://rest.runpod.io/v1/pods?computeType=GPU&includeMachine=true&includeNetworkVolume=true&templateId={template_id}&networkVolumeId={network_volume_id}&dataCenterId=EU-RO-1"
+        );
+        let response = self
+            .execute(RunPodHttpRequest::get(RunPodOperation::ListPods, url))
+            .await
+            .map_err(map_normal_start_preflight_error)?;
+        match response.status {
+            200 => {}
+            401 | 403 => return Err(normal_start_error("gpu_start_provider_auth_failed")),
+            429 => return Err(normal_start_error("gpu_start_provider_rate_limited")),
+            500..=599 => return Err(normal_start_error("gpu_start_provider_unavailable")),
+            _ => return Err(normal_start_error("gpu_start_provider_response_invalid")),
+        }
+        let pods = parse_normal_start_list_pods(&response.body, &profile)?;
+        if pods.is_empty() {
+            Ok(())
+        } else {
+            Err(normal_start_error("gpu_start_existing_pod"))
+        }
+    }
+
+    /// Read the complete profile-scoped managed-Pod set for a switch/Stop
+    /// decision. The URL, profile identifiers and projection checks are all
+    /// native-owned; malformed or partial results fail closed rather than
+    /// becoming an empty list.
+    pub(crate) async fn native_switch_list_pods(
+        &self,
+    ) -> NativeResult<Vec<NativeRunPodManagedPodV1>> {
+        let (pods, dynamic, profile_generation) = self.read_complete_profile_pods().await?;
+        self.replace_verified_switch_pods_for_generation(&pods, &dynamic, profile_generation)?;
+        Ok(pods)
+    }
+
+    /// The ordinary lifecycle projection has a deliberately smaller public
+    /// error registry than the coordinated Switch reconciliation path.  Both
+    /// routes consume the same complete, profile-pinned list and atomically
+    /// replace the verified-Pod registry only after every row validates; only
+    /// the safe classification presented to the renderer differs.
+    pub(crate) async fn native_pod_observation_list_pods(
+        &self,
+        observation_generation: u64,
+    ) -> NativeResult<Vec<NativeRunPodManagedPodV1>> {
+        self.begin_pod_observation_generation(observation_generation)?;
+        let (pods, dynamic, profile_generation) = self
+            .read_complete_profile_pods()
+            .await
+            .map_err(map_pod_observation_list_error)?;
+        // An overflowing but otherwise valid provider result is useful only
+        // as the renderer-safe overflow outcome. It must not replace native
+        // verified authority with a set that cannot cross IPC in full.
+        self.replace_verified_pod_observation_for_generations(
+            &pods,
+            &dynamic,
+            profile_generation,
+            observation_generation,
+        )
+        .map_err(map_pod_observation_list_error)?;
+        Ok(pods)
+    }
+
+    async fn read_complete_profile_pods(
+        &self,
+    ) -> NativeResult<(
+        Vec<NativeRunPodManagedPodV1>,
+        HashMap<String, String>,
+        RunPodProfileGeneration,
+    )> {
+        let (profile, profile_generation) = self.bound_switch_profile_with_generation()?;
+        // RunPod's documented `/v1/pods` response is one complete JSON array
+        // rather than a cursor envelope. Treat a future object/cursor shape as
+        // invalid instead of silently accepting a partial page; the parser
+        // below therefore proves the whole list before any caller decides
+        // whether it may replace verified-Pod authority.
+        let body = self.native_switch_profile_list_body(&profile).await?;
+        let dynamic = self.dynamic_catalog()?;
+        let pods = parse_switch_managed_pod_list(&body, &profile, &dynamic)?;
+        Ok((pods, dynamic, profile_generation))
+    }
+
+    fn begin_pod_observation_generation(&self, observation_generation: u64) -> NativeResult<()> {
+        let mut current = self
+            .pod_observation_generation
+            .lock()
+            .map_err(|_| state_error())?;
+        if observation_generation < *current {
+            return Err(profile_observation_superseded());
+        }
+        *current = observation_generation;
+        Ok(())
+    }
+
+    fn replace_verified_pod_observation_for_generations(
+        &self,
+        pods: &[NativeRunPodManagedPodV1],
+        dynamic: &HashMap<String, String>,
+        profile_generation: RunPodProfileGeneration,
+        observation_generation: u64,
+    ) -> NativeResult<bool> {
+        if pods.len() > 16 {
+            return Ok(false);
+        }
+        self.replace_verified_switch_pods_for_generations(
+            pods,
+            dynamic,
+            profile_generation,
+            Some(observation_generation),
+        )?;
+        Ok(true)
+    }
+
+    async fn native_switch_profile_list_body(
+        &self,
+        profile: &RunPodProfileBinding,
+    ) -> NativeResult<String> {
+        let url = Url::parse(&profile_pod_list_url(profile))
+            .map_err(|_| switch_provider_response_error())?;
+        validate_common_url(&url).map_err(|_| switch_provider_response_error())?;
+        validate_list_pods(&Method::GET, &url, None)
+            .map_err(|_| switch_provider_response_error())?;
+        validate_bound_list_profile(&url, profile).map_err(|_| switch_provider_response_error())?;
+        let credential = self
+            .vault
+            .load(CredentialKind::RunpodApiKey)
+            .map_err(map_switch_provider_error)?;
+        let worker_credential = self.vault.load(CredentialKind::WorkerToken).ok();
+        let response = self
+            .client
+            .get(url)
+            .header(ACCEPT, "application/json")
+            .header(AUTHORIZATION, format!("Bearer {credential}"))
+            .send()
+            .await
+            .map_err(|_| {
+                NativeError::retryable(
+                    "gpu_switch_inventory_unavailable",
+                    "Live RunPod GPU state is temporarily unavailable. Refresh before continuing the switch.",
+                )
+            })?;
+        match response.status().as_u16() {
+            200 => {}
+            429 | 500..=599 => {
+                return Err(NativeError::retryable(
+                    "gpu_switch_inventory_unavailable",
+                    "Live RunPod GPU state is temporarily unavailable. Refresh before continuing the switch.",
+                ))
+            }
+            _ => return Err(switch_provider_response_error()),
+        }
+        let content_type_is_json = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value
+                    .split(';')
+                    .next()
+                    .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
+            });
+        if !content_type_is_json {
+            return Err(switch_provider_response_error());
+        }
+        let body = read_bounded_body(response, MAX_RESPONSE_BYTES)
+            .await
+            .map_err(map_switch_provider_error)?;
+        if body.is_empty() {
+            return Err(switch_provider_response_error());
+        }
+        let parsed: Value =
+            serde_json::from_str(&body).map_err(|_| switch_provider_response_error())?;
+        // The documented endpoint returns one complete JSON array. A future
+        // cursor/envelope/pagination shape is not silently treated as an
+        // empty first page: native has no verified continuation contract for
+        // it, so it is an invalid/partial observation with zero registry
+        // mutation.
+        validate_complete_profile_list_shape(&parsed)?;
+        reject_secret_reflection(
+            &parsed,
+            [&credential, worker_credential.as_deref().unwrap_or("")],
+        )
+        .map_err(|_| switch_provider_response_error())?;
+        Ok(body)
+    }
+
+    fn replace_verified_switch_pods_for_generation(
+        &self,
+        pods: &[NativeRunPodManagedPodV1],
+        dynamic: &HashMap<String, String>,
+        profile_generation: RunPodProfileGeneration,
+    ) -> NativeResult<()> {
+        self.replace_verified_switch_pods_for_generations(pods, dynamic, profile_generation, None)
+    }
+
+    fn replace_verified_switch_pods_for_generations(
+        &self,
+        pods: &[NativeRunPodManagedPodV1],
+        dynamic: &HashMap<String, String>,
+        profile_generation: RunPodProfileGeneration,
+        observation_generation: Option<u64>,
+    ) -> NativeResult<()> {
+        // Keep the profile read guard through registry replacement. A bind
+        // holds the corresponding write guard, advances this generation, and
+        // clears the registry; therefore a stale read either writes before
+        // that clear or is rejected without changing verified authority.
+        let _profile = self.profile.read().map_err(|_| state_error())?;
+        let current_generation = *self.profile_generation.lock().map_err(|_| state_error())?;
+        if current_generation != profile_generation {
+            return Err(profile_observation_superseded());
+        }
+        if let Some(observation_generation) = observation_generation {
+            let current_observation_generation = *self
+                .pod_observation_generation
+                .lock()
+                .map_err(|_| state_error())?;
+            if current_observation_generation != observation_generation {
+                return Err(profile_observation_superseded());
+            }
+        }
+        let verified = pods
+            .iter()
+            .map(|pod| {
+                (
+                    pod.pod_id.clone(),
+                    VerifiedManagedPod {
+                        pod_name: pod.pod_name.clone(),
+                        gpu_id: pod.gpu_id.clone(),
+                        gpu_display_name: pod.gpu_display_name.clone(),
+                        dynamic_catalog_gpu: dynamic.get(&pod.gpu_id).is_some_and(|expected| {
+                            normalize_catalog_name(expected)
+                                == normalize_catalog_name(&pod.gpu_display_name)
+                        }),
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        *self.verified_pods.write().map_err(|_| state_error())? = verified;
+        Ok(())
+    }
+
+    /// Exact native GET for one profile-validated Pod. A 404 is kept distinct
+    /// from a malformed/ambiguous result so deletion reconciliation never
+    /// mistakes a transport failure for absence.
+    pub(crate) async fn native_switch_get_pod(
+        &self,
+        pod_id: &str,
+    ) -> NativeResult<Option<NativeRunPodManagedPodV1>> {
+        validate_pod_id(pod_id)?;
+        let profile = self.bound_switch_profile()?;
+        let url = format!(
+            "https://rest.runpod.io/v1/pods/{pod_id}?includeMachine=true&includeNetworkVolume=true"
+        );
+        let response = self
+            .execute(RunPodHttpRequest::get(RunPodOperation::GetPod, url))
+            .await
+            .map_err(map_switch_provider_error)?;
+        match response.status {
+            200 => parse_switch_managed_pod(&response.body, &profile, &self.dynamic_catalog()?)
+                .map(Some),
+            404 => Ok(None),
+            _ => Err(switch_provider_response_error()),
+        }
+    }
+
+    /// Mint a one-use delete authority only after the switch journal has
+    /// committed the matching destructive intent and native preflight has
+    /// validated this exact Pod/profile. The renderer cannot construct either
+    /// binding or reuse an ordinary lifecycle GET as authority.
+    pub(crate) fn authorize_native_switch_delete(
+        &self,
+        switch_id: &str,
+        pod_id: &str,
+    ) -> NativeResult<()> {
+        if uuid::Uuid::parse_str(switch_id)
+            .ok()
+            .filter(|uuid| uuid.get_version() == Some(uuid::Version::Random))
+            .is_none()
+            || validate_pod_id(pod_id).is_err()
+        {
+            return Err(switch_provider_response_error());
+        }
+        *self
+            .switch_delete_grant
+            .lock()
+            .map_err(|_| switch_provider_response_error())? = Some(SwitchDeleteGrant {
+            switch_id: switch_id.to_owned(),
+            pod_id: pod_id.to_owned(),
+            issued_at: Instant::now(),
+        });
+        Ok(())
+    }
+
+    /// Send one exact native DELETE after `authorize_native_switch_delete`
+    /// persisted/consumed the matching private authority. Ambiguous responses
+    /// are deliberately returned as a third state and never converted to
+    /// absence.
+    pub(crate) async fn native_switch_delete_pod(
+        &self,
+        switch_id: &str,
+        pod_id: &str,
+    ) -> NativeResult<NativeRunPodDeleteDispositionV1> {
+        validate_pod_id(pod_id)?;
+        let grant = self
+            .switch_delete_grant
+            .lock()
+            .map_err(|_| switch_provider_response_error())?
+            .take();
+        if !grant.is_some_and(|grant| {
+            grant.switch_id == switch_id
+                && grant.pod_id == pod_id
+                && grant.issued_at.elapsed() <= DELETE_GRANT_TTL
+        }) {
+            return Err(switch_provider_response_error());
+        }
+        let url = format!("https://rest.runpod.io/v1/pods/{pod_id}");
+        let url = Url::parse(&url).map_err(|_| switch_provider_response_error())?;
+        validate_pod_item(&Method::DELETE, &url, None, true)
+            .map_err(|_| switch_provider_response_error())?;
+        let credential = self.vault.load(CredentialKind::RunpodApiKey)?;
+        self.before_native_mutation(NativeRunPodMutationKind::Delete)?;
+        let response = self
+            .client
+            .delete(url)
+            .header(ACCEPT, "application/json")
+            .header(AUTHORIZATION, format!("Bearer {credential}"))
+            .send()
+            .await;
+        match response {
+            Ok(response) => Ok(match response.status().as_u16() {
+                204 => NativeRunPodDeleteDispositionV1::Deleted,
+                404 => NativeRunPodDeleteDispositionV1::NotFound,
+                _ => NativeRunPodDeleteDispositionV1::Uncertain,
+            }),
+            Err(_) => Ok(NativeRunPodDeleteDispositionV1::Uncertain),
+        }
+    }
+
+    /// Mint one ordinary Stop DELETE authority only after native has checked
+    /// the exact approved worker finalization and persisted its delete intent.
+    /// This is deliberately distinct from Switch and legacy delete grants.
+    pub(crate) fn authorize_native_normal_stop_delete(
+        &self,
+        operation_id: &str,
+        pod_id: &str,
+    ) -> NativeResult<()> {
+        if !canonical_uuid_v4(operation_id) || validate_pod_id(pod_id).is_err() {
+            return Err(normal_stop_provider_error());
+        }
+        *self
+            .normal_stop_delete_grant
+            .lock()
+            .map_err(|_| normal_stop_provider_error())? = Some(NormalStopDeleteGrant {
+            operation_id: operation_id.to_owned(),
+            pod_id: pod_id.to_owned(),
+            issued_at: Instant::now(),
+        });
+        Ok(())
+    }
+
+    /// Send the one native-authorized ordinary Stop DELETE. A transport or
+    /// non-204/404 result is intentionally ambiguous: callers must preserve
+    /// the worker finalization guard and never retry this operation by timer.
+    pub(crate) async fn native_normal_stop_delete_pod(
+        &self,
+        operation_id: &str,
+        pod_id: &str,
+    ) -> NativeResult<NativeRunPodDeleteDispositionV1> {
+        if !canonical_uuid_v4(operation_id) || validate_pod_id(pod_id).is_err() {
+            return Err(normal_stop_provider_error());
+        }
+        let grant = self
+            .normal_stop_delete_grant
+            .lock()
+            .map_err(|_| normal_stop_provider_error())?
+            .take();
+        if !grant.is_some_and(|grant| {
+            grant.operation_id == operation_id
+                && grant.pod_id == pod_id
+                && grant.issued_at.elapsed() <= DELETE_GRANT_TTL
+        }) {
+            return Err(normal_stop_provider_error());
+        }
+        let url = format!("https://rest.runpod.io/v1/pods/{pod_id}");
+        let url = Url::parse(&url).map_err(|_| normal_stop_provider_error())?;
+        validate_pod_item(&Method::DELETE, &url, None, true)
+            .map_err(|_| normal_stop_provider_error())?;
+        let credential = self
+            .vault
+            .load(CredentialKind::RunpodApiKey)
+            .map_err(|_| normal_stop_provider_error())?;
+        self.before_native_mutation(NativeRunPodMutationKind::Delete)
+            .map_err(|_| normal_stop_provider_error())?;
+        let response = self
+            .client
+            .delete(url)
+            .header(ACCEPT, "application/json")
+            .header(AUTHORIZATION, format!("Bearer {credential}"))
+            .send()
+            .await;
+        match response {
+            Ok(response) => Ok(match response.status().as_u16() {
+                204 => NativeRunPodDeleteDispositionV1::Deleted,
+                404 => NativeRunPodDeleteDispositionV1::NotFound,
+                _ => NativeRunPodDeleteDispositionV1::Uncertain,
+            }),
+            Err(_) => Ok(NativeRunPodDeleteDispositionV1::Uncertain),
+        }
+    }
+
+    fn bound_switch_profile(&self) -> NativeResult<RunPodProfileBinding> {
+        Ok(self.bound_switch_profile_with_generation()?.0)
+    }
+
+    fn bound_switch_profile_with_generation(
+        &self,
+    ) -> NativeResult<(RunPodProfileBinding, RunPodProfileGeneration)> {
+        // Profile read -> generation mutex is the sole lock order for profile
+        // snapshots. `bind_profile` takes the write side in the same order,
+        // yielding one atomic profile/generation pair without serializing any
+        // network request.
+        let profile_guard = self
+            .profile
+            .read()
+            .map_err(|_| switch_provider_response_error())?;
+        let profile = profile_guard
+            .clone()
+            .ok_or_else(switch_provider_response_error)?;
+        let profile_generation = *self
+            .profile_generation
+            .lock()
+            .map_err(|_| switch_provider_response_error())?;
+        validate_approved_profile_ids(&profile.template_id, &profile.network_volume_id)
+            .map_err(|_| switch_provider_response_error())?;
+        Ok((profile, profile_generation))
+    }
+
+    /// Construct one exact replacement-create request without accepting a
+    /// provider URL, profile field, Pod name, or GPU fallback from React. The
+    /// stable switch/attempt marker makes reconciliation distinguish this POST
+    /// from every ordinary Start request.
+    pub(crate) fn prepare_native_switch_create(
+        &self,
+        switch_id: &str,
+        replacement_attempt_id: &str,
+        replacement_attempt_revision: u64,
+        target_gpu_id: &str,
+    ) -> NativeResult<NativeRunPodSwitchCreatePlanV1> {
+        if uuid::Uuid::parse_str(switch_id)
+            .ok()
+            .filter(|uuid| uuid.get_version() == Some(uuid::Version::Random))
+            .is_none()
+            || uuid::Uuid::parse_str(replacement_attempt_id)
+                .ok()
+                .filter(|uuid| uuid.get_version() == Some(uuid::Version::Random))
+                .is_none()
+            || replacement_attempt_revision == 0
+            || replacement_attempt_revision > 9_007_199_254_740_991
+            || !safe_gpu_identifier(target_gpu_id)
+        {
+            return Err(switch_provider_response_error());
+        }
+        let profile = self.bound_switch_profile()?;
+        let name = format!("imageforge-switch-{replacement_attempt_id}");
+        let create_marker = serde_json::json!({
+            "schema_version": 1,
+            "switch_id": switch_id,
+            "replacement_attempt_id": replacement_attempt_id,
+            "replacement_attempt_revision": replacement_attempt_revision,
+            "target_gpu_id": target_gpu_id,
+        });
+        let create_marker_jcs = super::gpu_inventory::jcs_value(&create_marker)
+            .map_err(|_| switch_provider_response_error())?;
+        let create_marker_sha256 = hex::encode(Sha256::digest(create_marker_jcs.as_bytes()));
+        let body = serde_json::json!({
+            "name": name,
+            "templateId": profile.template_id,
+            "imageName": IMAGEFORGE_WORKER_IMAGE,
+            "networkVolumeId": profile.network_volume_id,
+            "volumeMountPath": IMAGEFORGE_VOLUME_MOUNT_PATH,
+            "ports": [format!("{IMAGEFORGE_WORKER_PORT}/http")],
+            "computeType": "GPU",
+            "cloudType": "SECURE",
+            "gpuTypeIds": [target_gpu_id],
+            "gpuTypePriority": "custom",
+            "gpuCount": 1,
+            "interruptible": false,
+            "dataCenterIds": ["EU-RO-1"],
+            "env": {
+                "IMAGEFORGE_EXPECTED_GPU_TYPE_ID": target_gpu_id,
+                "IMAGEFORGE_GPU_SWITCH_ID": switch_id,
+                "IMAGEFORGE_REPLACEMENT_ATTEMPT_ID": replacement_attempt_id,
+                "IMAGEFORGE_REPLACEMENT_ATTEMPT_REVISION": replacement_attempt_revision.to_string(),
+                "IMAGEFORGE_CREATE_CONTRACT_REVISION": "1",
+                "IMAGEFORGE_CREATE_MARKER_SHA256": create_marker_sha256,
+            },
+            "allowedCudaVersions": ["13.0"],
+            "minRAMPerGPU": 16,
+        });
+        let canonical_body =
+            super::gpu_inventory::jcs_value(&body).map_err(|_| switch_provider_response_error())?;
+        let create_wire_body_sha256 = hex::encode(Sha256::digest(canonical_body.as_bytes()));
+        let create_intent = serde_json::json!({
+            "schema_version": 1,
+            "create_contract_revision": 1,
+            "switch_id": switch_id,
+            "replacement_attempt_id": replacement_attempt_id,
+            "replacement_attempt_revision": replacement_attempt_revision,
+            "request_body": body.clone(),
+        });
+        let create_intent_jcs = super::gpu_inventory::jcs_value(&create_intent)
+            .map_err(|_| switch_provider_response_error())?;
+        let create_intent_sha256 = hex::encode(Sha256::digest(create_intent_jcs.as_bytes()));
+        let create_url = Url::parse("https://rest.runpod.io/v1/pods")
+            .map_err(|_| switch_provider_response_error())?;
+        validate_create_pod(&Method::POST, &create_url, Some(&body))
+            .map_err(|_| switch_provider_response_error())?;
+        validate_bound_create_profile(Some(&body), &profile)
+            .map_err(|_| switch_provider_response_error())?;
+        self.validate_create_gpu_policy(Some(&body))
+            .map_err(|_| switch_provider_response_error())?;
+        Ok(NativeRunPodSwitchCreatePlanV1 {
+            body,
+            request_sha256: create_wire_body_sha256.clone(),
+            canonical_body,
+            create_marker_sha256,
+            create_intent_sha256,
+            create_wire_body_sha256,
+            target_gpu_id: target_gpu_id.to_owned(),
+        })
+    }
+
+    /// Perform the exact POST committed by `prepare_native_switch_create`.
+    /// The caller must have durably recorded the request fingerprint first;
+    /// any result that cannot prove the full returned identity is an error so
+    /// the switch journal parks as create-uncertain rather than creating again.
+    pub(crate) async fn execute_native_switch_create(
+        &self,
+        plan: &NativeRunPodSwitchCreatePlanV1,
+    ) -> NativeResult<NativeRunPodSwitchCreateResultV1> {
+        let profile = self.bound_switch_profile()?;
+        let url = Url::parse("https://rest.runpod.io/v1/pods")
+            .map_err(|_| switch_provider_response_error())?;
+        if super::gpu_inventory::jcs_value(&plan.body)
+            .map_err(|_| switch_provider_response_error())?
+            != plan.canonical_body
+            || hex::encode(Sha256::digest(plan.canonical_body.as_bytes())) != plan.request_sha256
+        {
+            return Err(switch_provider_response_error());
+        }
+        validate_create_pod(&Method::POST, &url, Some(&plan.body))
+            .map_err(|_| switch_provider_response_error())?;
+        validate_bound_create_profile(Some(&plan.body), &profile)
+            .map_err(|_| switch_provider_response_error())?;
+        self.validate_create_gpu_policy(Some(&plan.body))
+            .map_err(|_| switch_provider_response_error())?;
+        let credential = self.vault.load(CredentialKind::RunpodApiKey)?;
+        let worker_credential = self.vault.load(CredentialKind::WorkerToken).ok();
+        self.before_native_mutation(NativeRunPodMutationKind::Create)?;
+        let response = self
+            .client
+            .post(url)
+            .header(ACCEPT, "application/json")
+            .header(AUTHORIZATION, format!("Bearer {credential}"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(plan.canonical_body.clone())
+            .send()
+            .await
+            .map_err(|_| NativeError::new(
+                "gpu_switch_create_uncertain",
+                "RunPod may have created the replacement GPU. Reconcile the exact attempt before continuing.",
+            ))?;
+        if response.status().as_u16() != 201
+            || !response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| {
+                    value
+                        .split(';')
+                        .next()
+                        .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
+                })
+        {
+            return Err(NativeError::new(
+                "gpu_switch_create_uncertain",
+                "RunPod may have created the replacement GPU. Reconcile the exact attempt before continuing.",
+            ));
+        }
+        let raw_body = read_bounded_body(response, MAX_RESPONSE_BYTES)
+            .await
+            .map_err(|_| NativeError::new(
+                "gpu_switch_create_uncertain",
+                "RunPod may have created the replacement GPU. Reconcile the exact attempt before continuing.",
+            ))?;
+        let raw: Value = serde_json::from_str(&raw_body).map_err(|_| NativeError::new(
+            "gpu_switch_create_uncertain",
+            "RunPod may have created the replacement GPU. Reconcile the exact attempt before continuing.",
+        ))?;
+        reject_secret_reflection(
+            &raw,
+            [&credential, worker_credential.as_deref().unwrap_or("")],
+        )?;
+        let pod = parse_switch_managed_pod_with_value(
+            raw,
+            &raw_body,
+            &profile,
+            &self.dynamic_catalog()?,
+        )?;
+        if pod.gpu_id != plan.target_gpu_id {
+            return Err(switch_provider_response_error());
+        }
+        Ok(NativeRunPodSwitchCreateResultV1 {
+            pod,
+            provider_response_sha256: hex::encode(Sha256::digest(raw_body.as_bytes())),
+        })
+    }
+
+    /// Issue and consume the legacy create grants wholly inside Rust.  No
+    /// grant token, provider URL, or request body crosses renderer IPC.  The
+    /// durable marker is written before the network write, preserving the
+    /// existing ambiguous-create recovery behavior.
+    pub(crate) async fn native_create_selected_pod(
+        &self,
+        body: Value,
+        canonical_body: String,
+    ) -> NativeResult<NativeCreatedPodResponse> {
+        let profile = self
+            .profile
+            .read()
+            .map_err(|_| state_error())?
+            .clone()
+            .ok_or_else(|| normal_start_error("gpu_start_profile_locked"))?;
+        let url = Url::parse("https://rest.runpod.io/v1/pods").map_err(|_| state_error())?;
+        if super::gpu_inventory::jcs_value(&body)? != canonical_body {
+            return Err(normal_start_error("gpu_start_provider_response_invalid"));
+        }
+        validate_create_pod(&Method::POST, &url, Some(&body))?;
+        validate_bound_create_profile(Some(&body), &profile)
+            .map_err(|_| normal_start_error("gpu_start_profile_locked"))?;
+        self.validate_create_gpu_policy(Some(&body))
+            .map_err(|_| normal_start_error("gpu_start_provider_response_invalid"))?;
+        if self.create_marker.metadata()?.pending {
+            return Err(normal_start_error("gpu_start_operation_in_progress"));
+        }
+        self.create_marker
+            .begin(&body)
+            .map_err(|_| normal_start_error("gpu_start_store_unavailable"))?;
+        let credential = self.vault.load(CredentialKind::RunpodApiKey)?;
+        let worker_credential = self.vault.load(CredentialKind::WorkerToken).ok();
+        self.before_native_mutation(NativeRunPodMutationKind::Create)?;
+        let response = self
+            .client
+            .post(url)
+            .header(ACCEPT, "application/json")
+            .header(AUTHORIZATION, format!("Bearer {credential}"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(canonical_body)
+            .send()
+            .await
+            .map_err(|_| {
+                NativeError::new(
+                    "gpu_start_create_uncertain",
+                    "The Pod create result is unknown; reconcile the exact native create marker before trying again.",
+                )
+            })?;
+        if response.status().as_u16() != 201 {
+            return Err(NativeError::new(
+                "gpu_start_create_uncertain",
+                "The Pod create result is unknown; reconcile the exact native create marker before trying again.",
+            ));
+        }
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value
+                    .split(';')
+                    .next()
+                    .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
+            });
+        if !content_type {
+            return Err(NativeError::new(
+                "gpu_start_create_uncertain",
+                "The Pod create result is unknown; reconcile the exact native create marker before trying again.",
+            ));
+        }
+        let raw_body = read_bounded_body(response, MAX_RESPONSE_BYTES)
+            .await
+            .map_err(|_| {
+                NativeError::new(
+                    "gpu_start_create_uncertain",
+                    "The Pod create result is unknown; reconcile the exact native create marker before trying again.",
+                )
+            })?;
+        let raw: Value = serde_json::from_str(&raw_body).map_err(|_| {
+            NativeError::new(
+                "gpu_start_create_uncertain",
+                "The Pod create result is unknown; reconcile the exact native create marker before trying again.",
+            )
+        })?;
+        reject_secret_reflection(
+            &raw,
+            [&credential, worker_credential.as_deref().unwrap_or("")],
+        )?;
+        let projected_body = self
+            .project_and_register_created_pod(&raw, &body, &profile)
+            .map_err(|_| {
+                NativeError::new(
+                    "gpu_start_create_uncertain",
+                    "The Pod create result is unknown; reconcile the exact native create marker before trying again.",
+                )
+            })?;
+        Ok(NativeCreatedPodResponse {
+            raw_body,
+            projected_body,
+        })
+    }
+
     pub async fn execute(&self, request: RunPodHttpRequest) -> NativeResult<RunPodHttpResponse> {
         let validated = ValidatedRequest::try_from(request)?;
         let profile = if validated.operation == RunPodOperation::Inventory {
@@ -389,11 +1515,26 @@ impl RunPodTransport {
         if let Some(body) = validated.body.as_ref() {
             builder = builder.header(CONTENT_TYPE, "application/json").json(&body);
         }
-        let response = builder.send().await.map_err(|_| {
-            NativeError::retryable(
-                "runpod_network_error",
-                "RunPod could not be reached over the secure network connection.",
-            )
+        if matches!(
+            validated.operation,
+            RunPodOperation::CreatePod | RunPodOperation::TerminatePod
+        ) {
+            self.before_native_mutation(
+                native_mutation_kind_for_operation(validated.operation).ok_or_else(state_error)?,
+            )?;
+        }
+        let response = builder.send().await.map_err(|error| {
+            if error.is_timeout() {
+                NativeError::retryable(
+                    "runpod_timeout",
+                    "RunPod did not answer before the native deadline.",
+                )
+            } else {
+                NativeError::retryable(
+                    "runpod_network_error",
+                    "RunPod could not be reached over the secure network connection.",
+                )
+            }
         })?;
         let status = response.status().as_u16();
         let retry_after = response
@@ -545,6 +1686,29 @@ impl RunPodTransport {
             .catalog_dynamic_gpus
             .write()
             .map_err(|_| state_error())? = approved;
+        Ok(())
+    }
+
+    /// The strict native inventory decoder calls this only after the paired
+    /// catalog observation has validated an approved dynamic Blackwell row.
+    /// Keeping this mapping native preserves the existing managed-Pod identity
+    /// check without accepting a renderer-proposed GPU name.
+    pub(crate) fn native_replace_dynamic_catalog(
+        &self,
+        dynamic: HashMap<String, String>,
+    ) -> NativeResult<()> {
+        if dynamic.iter().any(|(id, name)| {
+            !safe_gpu_identifier(id)
+                || canonical_dynamic_gpu_name(name).is_none()
+                || normalize_catalog_name(name)
+                    != normalize_catalog_name(canonical_dynamic_gpu_name(name).unwrap_or(""))
+        }) {
+            return Err(response_invalid());
+        }
+        *self
+            .catalog_dynamic_gpus
+            .write()
+            .map_err(|_| state_error())? = dynamic;
         Ok(())
     }
 
@@ -738,6 +1902,37 @@ impl RunPodTransport {
         }
         Ok(())
     }
+}
+
+/// The release harness must observe exactly the paid provider mutation paths
+/// and nothing else. Keeping this classification beside the socket boundary
+/// makes the read-only List/Get rule independently testable.
+fn native_mutation_kind_for_operation(
+    operation: RunPodOperation,
+) -> Option<NativeRunPodMutationKind> {
+    match operation {
+        RunPodOperation::CreatePod => Some(NativeRunPodMutationKind::Create),
+        RunPodOperation::TerminatePod => Some(NativeRunPodMutationKind::Delete),
+        RunPodOperation::Inventory | RunPodOperation::ListPods | RunPodOperation::GetPod => None,
+    }
+}
+
+/// The ordinary Start path treats its profile list as an authority boundary:
+/// no unknown top-level Pod fields, duplicate identities, or a partially
+/// matching ImageForge Pod can be reinterpreted as an empty list.
+fn parse_normal_start_list_pods(
+    body: &str,
+    profile: &RunPodProfileBinding,
+) -> NativeResult<Vec<NormalStartListPod>> {
+    let pods: Vec<NormalStartListPod> = serde_json::from_str(body)
+        .map_err(|_| normal_start_error("gpu_start_provider_response_invalid"))?;
+    let mut ids = std::collections::HashSet::new();
+    if pods.iter().any(|pod| !ids.insert(pod.id.as_str()))
+        || pods.iter().any(|pod| !pod.is_strictly_safe(profile))
+    {
+        return Err(normal_start_error("gpu_start_provider_response_invalid"));
+    }
+    Ok(pods)
 }
 
 fn expected_success_status(operation: RunPodOperation) -> u16 {
@@ -1138,18 +2333,22 @@ fn validate_managed_pod_value(
 ) -> NativeResult<()> {
     validate_approved_profile_ids(&profile.template_id, &profile.network_volume_id)?;
     let object = pod.as_object().ok_or_else(rejected)?;
+    ensure_only_allowed_projection_keys(object, POD_PROJECTION_KEYS)?;
     let network_volume = object
         .get("networkVolume")
         .and_then(Value::as_object)
         .ok_or_else(rejected)?;
+    ensure_only_allowed_projection_keys(network_volume, &["id", "dataCenterId"])?;
     let machine = object
         .get("machine")
         .and_then(Value::as_object)
         .ok_or_else(rejected)?;
+    ensure_only_allowed_projection_keys(machine, &["secureCloud", "dataCenterId", "gpuTypeId"])?;
     let gpu = object
         .get("gpu")
         .and_then(Value::as_object)
         .ok_or_else(rejected)?;
+    ensure_only_allowed_projection_keys(gpu, &["id", "displayName", "count"])?;
     let ports = object
         .get("ports")
         .and_then(Value::as_array)
@@ -1169,13 +2368,19 @@ fn validate_managed_pod_value(
             .and_then(Value::as_str)
             .is_some_and(|name| name == "imageforge" || name.starts_with("imageforge-"))
         && object.get("templateId").and_then(Value::as_str) == Some(profile.template_id.as_str())
+        && object
+            .get("imageName")
+            .and_then(Value::as_str)
+            .is_some_and(|image| image == IMAGEFORGE_WORKER_IMAGE)
         && object.get("volumeMountPath").and_then(Value::as_str) == Some("/workspace")
         && object.get("interruptible").and_then(Value::as_bool) == Some(false)
+        && object.get("gpuCount").and_then(Value::as_u64) == Some(1)
         && network_volume.get("id").and_then(Value::as_str)
             == Some(profile.network_volume_id.as_str())
         && network_volume.get("dataCenterId").and_then(Value::as_str) == Some("EU-RO-1")
         && machine.get("secureCloud").and_then(Value::as_bool) == Some(true)
         && machine.get("dataCenterId").and_then(Value::as_str) == Some("EU-RO-1")
+        && machine.get("gpuTypeId").and_then(Value::as_str) == Some(gpu_id)
         && gpu.get("count").and_then(Value::as_u64) == Some(1)
         && gpu_approved
         && ports.len() == 1
@@ -1189,16 +2394,32 @@ fn validate_managed_pod_value(
     Ok(())
 }
 
+/// This validator always receives the native allowlisted projection rather
+/// than raw provider JSON. Keep the accepted keys explicit at each nesting
+/// level so a future projection edit cannot accidentally make a mutable or
+/// private provider field part of managed-Pod authority.
+fn ensure_only_allowed_projection_keys(
+    object: &Map<String, Value>,
+    allowed: &[&str],
+) -> NativeResult<()> {
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err(rejected());
+    }
+    Ok(())
+}
+
 const POD_PROJECTION_KEYS: &[&str] = &[
     "id",
     "name",
     "desiredStatus",
     "status",
     "templateId",
+    "imageName",
     "volumeMountPath",
     "interruptible",
     "networkVolume",
     "gpu",
+    "gpuCount",
     "machine",
     "ports",
     "adjustedCostPerHr",
@@ -1373,6 +2594,262 @@ fn response_invalid() -> NativeError {
     )
 }
 
+// Task 014's ordinary Start boundary deliberately translates every private
+// transport/profile failure into the small documented action registry.  The
+// generic compatibility transport keeps its existing richer internal codes;
+// only the narrow native Start path uses this mapping.
+fn normal_start_error(code: &'static str) -> NativeError {
+    let (retryable, message) = match code {
+        "gpu_start_profile_locked" => (false, "The ImageForge GPU profile changed before Start."),
+        "gpu_start_existing_pod" => (
+            false,
+            "An ImageForge Pod already exists. Refresh before starting another.",
+        ),
+        "gpu_start_operation_in_progress" => (
+            true,
+            "Another ImageForge GPU operation is already in progress.",
+        ),
+        "gpu_start_create_uncertain" => (
+            false,
+            "RunPod may have created the GPU. Resolve this Start before trying again.",
+        ),
+        "gpu_start_provider_response_invalid" => {
+            (false, "RunPod returned an invalid GPU response.")
+        }
+        "gpu_start_store_unavailable" => (
+            true,
+            "ImageForge could not access the GPU Start recovery journal.",
+        ),
+        "gpu_start_provider_auth_failed" => (
+            false,
+            "RunPod rejected the saved API credential. Replace it before starting a GPU.",
+        ),
+        "gpu_start_provider_timeout" => (
+            true,
+            "RunPod did not answer the final GPU check. Try Start again.",
+        ),
+        "gpu_start_provider_unavailable" => (
+            true,
+            "RunPod is unavailable for the final GPU check. Try Start again.",
+        ),
+        "gpu_start_provider_rate_limited" => (
+            true,
+            "RunPod rate-limited the final GPU check. Wait, then try Start again.",
+        ),
+        _ => (false, "RunPod returned an invalid GPU response."),
+    };
+    if retryable {
+        NativeError::retryable(code, message)
+    } else {
+        NativeError::new(code, message)
+    }
+}
+
+fn map_normal_start_preflight_error(error: NativeError) -> NativeError {
+    match error.code {
+        "runpod_profile_unconfigured"
+        | "runpod_profile_invalid"
+        | "pod_create_reconciliation_required" => normal_start_error("gpu_start_profile_locked"),
+        "runpod_network_error" => normal_start_error("gpu_start_provider_unavailable"),
+        "runpod_response_invalid" => normal_start_error("gpu_start_provider_response_invalid"),
+        "runpod_timeout" => normal_start_error("gpu_start_provider_timeout"),
+        "runpod_auth_failed" => normal_start_error("gpu_start_provider_auth_failed"),
+        "runpod_rate_limited" => normal_start_error("gpu_start_provider_rate_limited"),
+        "runpod_provider_unavailable" => normal_start_error("gpu_start_provider_unavailable"),
+        _ => normal_start_error("gpu_start_provider_response_invalid"),
+    }
+}
+
+fn switch_provider_response_error() -> NativeError {
+    NativeError::new(
+        "gpu_switch_provider_response_mismatch",
+        "RunPod did not return the exact GPU switch provider identity.",
+    )
+}
+
+fn map_switch_provider_error(error: NativeError) -> NativeError {
+    match error.code {
+        "runpod_timeout"
+        | "runpod_network_error"
+        | "runpod_rate_limited"
+        | "runpod_provider_unavailable" => NativeError::retryable(
+            "gpu_switch_inventory_unavailable",
+            "Live RunPod GPU state is temporarily unavailable. Refresh before continuing the switch.",
+        ),
+        _ => switch_provider_response_error(),
+    }
+}
+
+fn map_pod_observation_list_error(error: NativeError) -> NativeError {
+    if error.retryable {
+        NativeError::retryable(
+            "gpu_pod_observation_unavailable",
+            "Live ImageForge Pod state is temporarily unavailable. Refresh before continuing.",
+        )
+    } else {
+        // Do not leak whether a malformed row was an identity mismatch,
+        // duplicate, incomplete page, or provider shape drift. All of those
+        // retain the prior validated observation and leave the verified-Pod
+        // registry untouched.
+        NativeError::new(
+            "gpu_pod_observation_invalid",
+            "RunPod returned an invalid ImageForge Pod observation.",
+        )
+    }
+}
+
+fn profile_observation_superseded() -> NativeError {
+    NativeError::retryable(
+        "gpu_switch_inventory_unavailable",
+        "Live RunPod GPU state is temporarily unavailable. Refresh before continuing the switch.",
+    )
+}
+
+fn canonical_uuid_v4(value: &str) -> bool {
+    uuid::Uuid::parse_str(value).ok().is_some_and(|parsed| {
+        parsed.get_version() == Some(uuid::Version::Random) && parsed.to_string() == value
+    })
+}
+
+fn normal_stop_provider_error() -> NativeError {
+    NativeError::new(
+        "gpu_pod_observation_invalid",
+        "The ImageForge Pod deletion request is invalid.",
+    )
+}
+
+fn profile_pod_list_url(profile: &RunPodProfileBinding) -> String {
+    let template_id =
+        url::form_urlencoded::byte_serialize(profile.template_id.as_bytes()).collect::<String>();
+    let network_volume_id =
+        url::form_urlencoded::byte_serialize(profile.network_volume_id.as_bytes())
+            .collect::<String>();
+    format!(
+        "https://rest.runpod.io/v1/pods?computeType=GPU&includeMachine=true&includeNetworkVolume=true&templateId={template_id}&networkVolumeId={network_volume_id}&dataCenterId=EU-RO-1"
+    )
+}
+
+fn validate_complete_profile_list_shape(value: &Value) -> NativeResult<()> {
+    if value.is_array() {
+        Ok(())
+    } else {
+        Err(switch_provider_response_error())
+    }
+}
+
+fn parse_switch_managed_pod_list(
+    body: &str,
+    profile: &RunPodProfileBinding,
+    dynamic: &HashMap<String, String>,
+) -> NativeResult<Vec<NativeRunPodManagedPodV1>> {
+    let values: Vec<Value> =
+        serde_json::from_str(body).map_err(|_| switch_provider_response_error())?;
+    let mut pods = Vec::with_capacity(values.len());
+    for raw in values {
+        // Provider responses may contain mutable or private fields. Project
+        // them through the one explicit top-level/nested allowlist before any
+        // identity parsing, so unknown fields never become authority or a
+        // fingerprint input. Missing/wrong-type allowlist fields are still
+        // rejected by the strict projection/validation below.
+        let value = project_pod_with_dynamic(&raw, dynamic)
+            .map_err(|_| switch_provider_response_error())?;
+        let encoded =
+            serde_json::to_string(&value).map_err(|_| switch_provider_response_error())?;
+        pods.push(parse_switch_managed_pod_with_value(
+            value, &encoded, profile, dynamic,
+        )?);
+    }
+    pods.sort_by(|left, right| left.pod_id.cmp(&right.pod_id));
+    if pods.windows(2).any(|pair| pair[0].pod_id == pair[1].pod_id) {
+        return Err(switch_provider_response_error());
+    }
+    Ok(pods)
+}
+
+fn parse_switch_managed_pod(
+    body: &str,
+    profile: &RunPodProfileBinding,
+    dynamic: &HashMap<String, String>,
+) -> NativeResult<NativeRunPodManagedPodV1> {
+    let value: Value = serde_json::from_str(body).map_err(|_| switch_provider_response_error())?;
+    parse_switch_managed_pod_with_value(value, body, profile, dynamic)
+}
+
+fn parse_switch_managed_pod_with_value(
+    value: Value,
+    encoded: &str,
+    profile: &RunPodProfileBinding,
+    dynamic: &HashMap<String, String>,
+) -> NativeResult<NativeRunPodManagedPodV1> {
+    let object = value
+        .as_object()
+        .ok_or_else(switch_provider_response_error)?;
+    let pod_id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(switch_provider_response_error)?;
+    let pod_name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(switch_provider_response_error)?;
+    validate_managed_pod_value(&value, pod_id, profile, dynamic)
+        .map_err(|_| switch_provider_response_error())?;
+    let gpu = object
+        .get("gpu")
+        .and_then(Value::as_object)
+        .ok_or_else(switch_provider_response_error)?;
+    let gpu_id = gpu
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(switch_provider_response_error)?;
+    let gpu_display_name = gpu
+        .get("displayName")
+        .and_then(Value::as_str)
+        .ok_or_else(switch_provider_response_error)?;
+    let status = match object
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or_else(switch_provider_response_error)?
+    {
+        "provisioning" => "provisioning",
+        "starting" => "starting",
+        "running" => "running",
+        "exited" => "exited",
+        "error" => "error",
+        "terminated" => "terminated",
+        _ => return Err(switch_provider_response_error()),
+    }
+    .to_owned();
+    let hourly_price_micro_usd = Some(parse_strict_observed_pod_price(object)?);
+    Ok(NativeRunPodManagedPodV1 {
+        pod_id: pod_id.to_owned(),
+        pod_name: pod_name.to_owned(),
+        gpu_id: gpu_id.to_owned(),
+        gpu_display_name: gpu_display_name.to_owned(),
+        hourly_price_micro_usd,
+        status,
+        provider_response_sha256: hex::encode(Sha256::digest(encoded.as_bytes())),
+    })
+}
+
+fn parse_strict_observed_pod_price(object: &Map<String, Value>) -> NativeResult<u64> {
+    let adjusted = object
+        .get("adjustedCostPerHr")
+        .ok_or_else(switch_provider_response_error)?;
+    let adjusted = match adjusted {
+        Value::Null => "null".to_owned(),
+        Value::Number(number) => number.to_string(),
+        _ => return Err(switch_provider_response_error()),
+    };
+    let cost = object
+        .get("costPerHr")
+        .filter(|value| value.is_string())
+        .ok_or_else(switch_provider_response_error)?
+        .to_string();
+    super::gpu_inventory::parse_created_price_tokens(&adjusted, &cost)
+        .ok_or_else(switch_provider_response_error)
+}
+
 fn state_error() -> NativeError {
     NativeError::new(
         "runpod_state_unavailable",
@@ -1431,9 +2908,13 @@ fn validate_list_pods(method: &Method, url: &Url, body: Option<&Value>) -> Nativ
             return Err(rejected());
         }
     }
-    if pairs.get("templateId").map(String::as_str) != Some(IMAGEFORGE_TEMPLATE_ID)
-        || pairs.get("networkVolumeId").map(String::as_str) != Some(IMAGEFORGE_NETWORK_VOLUME_ID)
-    {
+    let Some(template_id) = pairs.get("templateId") else {
+        return Err(rejected());
+    };
+    let Some(network_volume_id) = pairs.get("networkVolumeId") else {
+        return Err(rejected());
+    };
+    if !safe_identifier(template_id, false) || !safe_identifier(network_volume_id, false) {
         return Err(rejected());
     }
     if pairs.len() != 6 {
@@ -1465,6 +2946,7 @@ fn validate_create_pod(method: &Method, url: &Url, body: Option<&Value>) -> Nati
         "gpuCount",
         "interruptible",
         "dataCenterIds",
+        "env",
         "allowedCudaVersions",
         "minRAMPerGPU",
         "minDiskBandwidthMBps",
@@ -1487,6 +2969,65 @@ fn validate_create_pod(method: &Method, url: &Url, body: Option<&Value>) -> Nati
     require_json_string_array(object, "ports", &["8000/http"])?;
     require_json_string_array(object, "dataCenterIds", &["EU-RO-1"])?;
     require_json_string_array(object, "allowedCudaVersions", &["13.0"])?;
+    if let Some(env) = object.get("env") {
+        let env = env.as_object().ok_or_else(rejected)?;
+        const SWITCH_ENV_KEYS: &[&str] = &[
+            "IMAGEFORGE_EXPECTED_GPU_TYPE_ID",
+            "IMAGEFORGE_GPU_SWITCH_ID",
+            "IMAGEFORGE_REPLACEMENT_ATTEMPT_ID",
+            "IMAGEFORGE_REPLACEMENT_ATTEMPT_REVISION",
+            "IMAGEFORGE_CREATE_CONTRACT_REVISION",
+            "IMAGEFORGE_CREATE_MARKER_SHA256",
+        ];
+        if env.len() != SWITCH_ENV_KEYS.len()
+            || env
+                .keys()
+                .any(|key| !SWITCH_ENV_KEYS.contains(&key.as_str()))
+        {
+            return Err(rejected());
+        }
+        let switch_id = env
+            .get("IMAGEFORGE_GPU_SWITCH_ID")
+            .and_then(Value::as_str)
+            .ok_or_else(rejected)?;
+        let attempt_id = env
+            .get("IMAGEFORGE_REPLACEMENT_ATTEMPT_ID")
+            .and_then(Value::as_str)
+            .ok_or_else(rejected)?;
+        let attempt_revision = env
+            .get("IMAGEFORGE_REPLACEMENT_ATTEMPT_REVISION")
+            .and_then(Value::as_str)
+            .ok_or_else(rejected)?;
+        let target_gpu_id = env
+            .get("IMAGEFORGE_EXPECTED_GPU_TYPE_ID")
+            .and_then(Value::as_str)
+            .ok_or_else(rejected)?;
+        let marker_sha256 = env
+            .get("IMAGEFORGE_CREATE_MARKER_SHA256")
+            .and_then(Value::as_str)
+            .ok_or_else(rejected)?;
+        if !canonical_uuid_v4(switch_id)
+            || !canonical_uuid_v4(attempt_id)
+            || attempt_revision == "0"
+            || attempt_revision.starts_with('0')
+            || attempt_revision
+                .parse::<u64>()
+                .ok()
+                .filter(|value| *value <= 9_007_199_254_740_991)
+                .is_none()
+            || !safe_gpu_identifier(target_gpu_id)
+            || env
+                .get("IMAGEFORGE_CREATE_CONTRACT_REVISION")
+                .and_then(Value::as_str)
+                != Some("1")
+            || marker_sha256.len() != 64
+            || !marker_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(rejected());
+        }
+    }
     for key in ["name", "templateId", "networkVolumeId"] {
         let candidate = object
             .get(key)
@@ -1948,15 +3489,290 @@ mod tests {
         serde_json::json!({
             "id": "abc123xy",
             "name": "imageforge-request-123",
+            "status": "running",
             "templateId": IMAGEFORGE_TEMPLATE_ID,
+            "imageName": IMAGEFORGE_WORKER_IMAGE,
             "volumeMountPath": "/workspace",
             "interruptible": false,
             "networkVolume": {"id": volume_id, "dataCenterId": "EU-RO-1"},
-            "machine": {"secureCloud": true, "dataCenterId": "EU-RO-1"},
+            "machine": {
+                "secureCloud": true,
+                "dataCenterId": "EU-RO-1",
+                "gpuTypeId": gpu_id
+            },
             "gpu": {"id": gpu_id, "displayName": gpu_id, "count": 1},
-            "ports": ["8000/http"]
+            "gpuCount": 1,
+            "ports": ["8000/http"],
+            "adjustedCostPerHr": 0.54,
+            "costPerHr": "0.54"
         })
         .to_string()
+    }
+
+    fn normal_start_profile() -> RunPodProfileBinding {
+        RunPodProfileBinding {
+            template_id: IMAGEFORGE_TEMPLATE_ID.to_owned(),
+            network_volume_id: IMAGEFORGE_NETWORK_VOLUME_ID.to_owned(),
+        }
+    }
+
+    #[test]
+    fn normal_start_profile_list_rejects_unknown_rows_wrong_image_and_duplicate_ids() {
+        let profile = normal_start_profile();
+        let valid: Value = serde_json::from_str(&managed_pod_json(
+            IMAGEFORGE_NETWORK_VOLUME_ID,
+            "NVIDIA GeForce RTX 4090",
+        ))
+        .unwrap();
+
+        let mut unknown = valid.clone();
+        unknown["unreviewedProviderField"] = Value::Bool(true);
+        assert!(serde_json::from_value::<NormalStartListPod>(unknown).is_err());
+
+        let mut wrong_image = valid.clone();
+        wrong_image["imageName"] = Value::String(
+            "ghcr.io/attacker/imageforge-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_owned(),
+        );
+        let wrong_image: NormalStartListPod = serde_json::from_value(wrong_image).unwrap();
+        assert!(!wrong_image.is_strictly_safe(&profile));
+
+        let duplicate = serde_json::to_string(&vec![valid.clone(), valid]).unwrap();
+        assert_eq!(
+            parse_normal_start_list_pods(&duplicate, &profile)
+                .unwrap_err()
+                .code,
+            "gpu_start_provider_response_invalid"
+        );
+    }
+
+    #[test]
+    fn strict_profile_list_projects_only_allowlisted_fields_and_rejects_partial_or_invalid_rows() {
+        let profile = normal_start_profile();
+        let valid: Value = serde_json::from_str(&managed_pod_json(
+            IMAGEFORGE_NETWORK_VOLUME_ID,
+            "NVIDIA GeForce RTX 4090",
+        ))
+        .unwrap();
+
+        // Raw provider fields outside the explicit projection are ignored;
+        // they cannot enter a managed-Pod identity or the verified registry.
+        let mut raw_with_extra = valid.clone();
+        raw_with_extra["providerPrivateField"] = Value::String("ignored".to_owned());
+        let parsed = parse_switch_managed_pod_list(
+            &serde_json::to_string(&vec![raw_with_extra]).unwrap(),
+            &profile,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].status, "running");
+        assert_eq!(parsed[0].hourly_price_micro_usd, Some(540_000));
+
+        // A field that somehow appears after native projection is a schema
+        // drift/error, not an ignorable identity input.
+        let mut crafted_projection = valid.clone();
+        crafted_projection["unreviewedProjectedField"] = Value::Bool(true);
+        assert!(validate_managed_pod_value(
+            &crafted_projection,
+            "abc123xy",
+            &profile,
+            &HashMap::new(),
+        )
+        .is_err());
+
+        let duplicate = serde_json::to_string(&vec![valid.clone(), valid.clone()]).unwrap();
+        let duplicate_error =
+            parse_switch_managed_pod_list(&duplicate, &profile, &HashMap::new()).unwrap_err();
+        assert_eq!(
+            duplicate_error.code,
+            "gpu_switch_provider_response_mismatch"
+        );
+        let observation_error = map_pod_observation_list_error(duplicate_error);
+        assert_eq!(observation_error.code, "gpu_pod_observation_invalid");
+        assert!(!observation_error.retryable);
+
+        let mut missing_status = valid.clone();
+        missing_status.as_object_mut().unwrap().remove("status");
+        let missing_status_error = parse_switch_managed_pod_list(
+            &serde_json::to_string(&vec![missing_status]).unwrap(),
+            &profile,
+            &HashMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            map_pod_observation_list_error(missing_status_error).code,
+            "gpu_pod_observation_invalid"
+        );
+
+        let mut unknown_status = valid.clone();
+        unknown_status["status"] = Value::String("migrating".to_owned());
+        assert!(parse_switch_managed_pod_list(
+            &serde_json::to_string(&vec![unknown_status]).unwrap(),
+            &profile,
+            &HashMap::new(),
+        )
+        .is_err());
+
+        let mut missing_price = valid;
+        missing_price
+            .as_object_mut()
+            .unwrap()
+            .remove("adjustedCostPerHr");
+        assert!(parse_switch_managed_pod_list(
+            &serde_json::to_string(&vec![missing_price]).unwrap(),
+            &profile,
+            &HashMap::new(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn profile_list_rejects_cursor_envelopes_instead_of_treating_a_partial_page_as_empty() {
+        let partial = serde_json::json!({
+            "data": [],
+            "nextCursor": "cursor-not-authorized"
+        });
+        let error = validate_complete_profile_list_shape(&partial).unwrap_err();
+        assert_eq!(error.code, "gpu_switch_provider_response_mismatch");
+        let observation_error = map_pod_observation_list_error(error);
+        assert_eq!(observation_error.code, "gpu_pod_observation_invalid");
+        assert!(!observation_error.retryable);
+
+        let unavailable = map_pod_observation_list_error(NativeError::retryable(
+            "gpu_switch_inventory_unavailable",
+            "ignored",
+        ));
+        assert_eq!(unavailable.code, "gpu_pod_observation_unavailable");
+        assert!(unavailable.retryable);
+    }
+
+    #[test]
+    fn pod_observation_overflow_keeps_the_prior_verified_registry() {
+        let temporary = tempfile::tempdir().unwrap();
+        let transport = RunPodTransport::new_for_test(
+            Arc::new(MemoryVault::default()),
+            temporary.path().join("marker"),
+        )
+        .unwrap();
+        transport
+            .bind_profile(IMAGEFORGE_TEMPLATE_ID, IMAGEFORGE_NETWORK_VOLUME_ID)
+            .unwrap();
+        transport.verified_pods.write().unwrap().insert(
+            "pod-prior".to_owned(),
+            VerifiedManagedPod {
+                pod_name: "imageforge-prior".to_owned(),
+                gpu_id: "NVIDIA L4".to_owned(),
+                gpu_display_name: "NVIDIA L4".to_owned(),
+                dynamic_catalog_gpu: false,
+            },
+        );
+        let overflow = (0..17)
+            .map(|index| NativeRunPodManagedPodV1 {
+                pod_id: format!("pod-{index:02}"),
+                pod_name: format!("imageforge-{index:02}"),
+                gpu_id: "NVIDIA GeForce RTX 4090".to_owned(),
+                gpu_display_name: "NVIDIA GeForce RTX 4090".to_owned(),
+                hourly_price_micro_usd: Some(540_000),
+                status: "running".to_owned(),
+                provider_response_sha256:
+                    "1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
+            })
+            .collect::<Vec<_>>();
+        let profile_generation = *transport.profile_generation.lock().unwrap();
+        transport.begin_pod_observation_generation(0).unwrap();
+        assert!(!transport
+            .replace_verified_pod_observation_for_generations(
+                &overflow,
+                &HashMap::new(),
+                profile_generation,
+                0,
+            )
+            .unwrap());
+        let registry = transport.verified_pods.read().unwrap();
+        assert_eq!(registry.len(), 1);
+        assert!(registry.contains_key("pod-prior"));
+    }
+
+    #[test]
+    fn old_profile_generation_cannot_repopulate_verified_pods_after_rebind() {
+        let temporary = tempfile::tempdir().unwrap();
+        let transport = RunPodTransport::new_for_test(
+            Arc::new(MemoryVault::default()),
+            temporary.path().join("marker"),
+        )
+        .unwrap();
+        transport
+            .bind_profile(IMAGEFORGE_TEMPLATE_ID, IMAGEFORGE_NETWORK_VOLUME_ID)
+            .unwrap();
+        let old_generation = *transport.profile_generation.lock().unwrap();
+        transport.begin_pod_observation_generation(0).unwrap();
+        let late_old_profile_result = vec![NativeRunPodManagedPodV1 {
+            pod_id: "pod-old-profile".to_owned(),
+            pod_name: "imageforge-old-profile".to_owned(),
+            gpu_id: "NVIDIA GeForce RTX 4090".to_owned(),
+            gpu_display_name: "NVIDIA GeForce RTX 4090".to_owned(),
+            hourly_price_micro_usd: Some(540_000),
+            status: "running".to_owned(),
+            provider_response_sha256:
+                "1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
+        }];
+
+        // Rebinding the same configured profile is still a new authority
+        // epoch: an old in-flight request must not repopulate its registry.
+        transport
+            .bind_profile(IMAGEFORGE_TEMPLATE_ID, IMAGEFORGE_NETWORK_VOLUME_ID)
+            .unwrap();
+        let error = transport
+            .replace_verified_pod_observation_for_generations(
+                &late_old_profile_result,
+                &HashMap::new(),
+                old_generation,
+                0,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "gpu_switch_inventory_unavailable");
+        assert!(error.retryable);
+        assert!(transport.verified_pods.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stop_observation_generation_blocks_a_late_heartbeat_registry_commit() {
+        let temporary = tempfile::tempdir().unwrap();
+        let transport = RunPodTransport::new_for_test(
+            Arc::new(MemoryVault::default()),
+            temporary.path().join("marker"),
+        )
+        .unwrap();
+        transport
+            .bind_profile(IMAGEFORGE_TEMPLATE_ID, IMAGEFORGE_NETWORK_VOLUME_ID)
+            .unwrap();
+        let profile_generation = *transport.profile_generation.lock().unwrap();
+        let old_heartbeat = vec![NativeRunPodManagedPodV1 {
+            pod_id: "pod-heartbeat-old".to_owned(),
+            pod_name: "imageforge-heartbeat-old".to_owned(),
+            gpu_id: "NVIDIA GeForce RTX 4090".to_owned(),
+            gpu_display_name: "NVIDIA GeForce RTX 4090".to_owned(),
+            hourly_price_micro_usd: Some(540_000),
+            status: "running".to_owned(),
+            provider_response_sha256:
+                "1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
+        }];
+        transport.begin_pod_observation_generation(0).unwrap();
+        // Stop reserves the next action-owned observation before its R+1
+        // profile read. The old in-flight heartbeat may still finish on the
+        // wire but can no longer replace verified Pod authority.
+        transport.begin_pod_observation_generation(1).unwrap();
+        let error = transport
+            .replace_verified_pod_observation_for_generations(
+                &old_heartbeat,
+                &HashMap::new(),
+                profile_generation,
+                0,
+            )
+            .unwrap_err();
+        assert!(error.retryable);
+        assert!(transport.verified_pods.read().unwrap().is_empty());
     }
 
     #[test]
@@ -2145,10 +3961,17 @@ mod tests {
 
         let raw = serde_json::json!({
             "id": "abc123xy", "name": "imageforge-request-123", "templateId": IMAGEFORGE_TEMPLATE_ID,
+            "imageName": IMAGEFORGE_WORKER_IMAGE,
             "volumeMountPath": "/workspace", "interruptible": false,
             "networkVolume": {"id": IMAGEFORGE_NETWORK_VOLUME_ID, "dataCenterId": "EU-RO-1", "secret": "hidden"},
-            "machine": {"secureCloud": true, "dataCenterId": "EU-RO-1", "internalIp": "hidden"},
+            "machine": {
+                "secureCloud": true,
+                "dataCenterId": "EU-RO-1",
+                "gpuTypeId": "dynamic-4500-id",
+                "internalIp": "hidden"
+            },
             "gpu": {"id": "dynamic-4500-id", "displayName": "RTX PRO 4500 Blackwell", "count": 1, "serial": "hidden"},
+            "gpuCount": 1,
             "ports": ["8000/http"], "env": {"WORKER_TOKEN": "must-not-cross"}
         });
         let projected = project_pod(&raw).unwrap();
@@ -2235,6 +4058,7 @@ mod tests {
             "id": "live4090pod",
             "name": "imageforge-live",
             "templateId": IMAGEFORGE_TEMPLATE_ID,
+            "imageName": IMAGEFORGE_WORKER_IMAGE,
             "volumeMountPath": "/workspace",
             "networkVolume": {"id": IMAGEFORGE_NETWORK_VOLUME_ID, "dataCenterId": "EU-RO-1"},
             "machine": {
@@ -2275,6 +4099,7 @@ mod tests {
             "id": "live-omitted-gpu",
             "name": "imageforge-live",
             "templateId": IMAGEFORGE_TEMPLATE_ID,
+            "imageName": IMAGEFORGE_WORKER_IMAGE,
             "volumeMountPath": "/workspace",
             "interruptible": false,
             "networkVolume": {"id": IMAGEFORGE_NETWORK_VOLUME_ID, "dataCenterId": "EU-RO-1"},
@@ -2371,6 +4196,120 @@ mod tests {
                 .unwrap_err()
                 .code,
             "secret_reflection_rejected"
+        );
+    }
+
+    #[test]
+    fn mutation_boundary_classifies_only_paid_provider_writes() {
+        assert_eq!(
+            native_mutation_kind_for_operation(RunPodOperation::CreatePod),
+            Some(NativeRunPodMutationKind::Create)
+        );
+        assert_eq!(
+            native_mutation_kind_for_operation(RunPodOperation::TerminatePod),
+            Some(NativeRunPodMutationKind::Delete)
+        );
+        for operation in [
+            RunPodOperation::Inventory,
+            RunPodOperation::ListPods,
+            RunPodOperation::GetPod,
+        ] {
+            assert_eq!(native_mutation_kind_for_operation(operation), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn rejecting_native_mutation_hook_stops_direct_and_generic_writes_before_send() {
+        fn rejecting_hook(
+            calls: Arc<Mutex<Vec<NativeRunPodMutationKind>>>,
+        ) -> NativeRunPodMutationHook {
+            Arc::new(move |kind| {
+                calls.lock().map_err(|_| state_error())?.push(kind);
+                Err(NativeError::new(
+                    "queue_release_provider_write_blocked",
+                    "The installed release harness rejected this provider mutation before send.",
+                ))
+            })
+        }
+
+        fn configured_transport() -> (tempfile::TempDir, RunPodTransport, Arc<MemoryVault>) {
+            let temporary = tempfile::tempdir().unwrap();
+            let marker = temporary.path().join("marker");
+            let vault = Arc::new(MemoryVault::default());
+            vault
+                .replace(CredentialKind::RunpodApiKey, "rp_live_test_hook_key")
+                .unwrap();
+            let transport = RunPodTransport::new_for_test(vault.clone(), marker).unwrap();
+            transport
+                .bind_profile(IMAGEFORGE_TEMPLATE_ID, IMAGEFORGE_NETWORK_VOLUME_ID)
+                .unwrap();
+            (temporary, transport, vault)
+        }
+
+        // The direct native Start POST has no generic request object. Its hook
+        // must still reject at the same pre-wire boundary.
+        let (_direct_temp, direct, _vault) = configured_transport();
+        let direct_calls = Arc::new(Mutex::new(Vec::new()));
+        direct
+            .set_native_mutation_hook(Some(rejecting_hook(direct_calls.clone())))
+            .unwrap();
+        let direct_body = create_body(&["NVIDIA GeForce RTX 4090"]);
+        let direct_error = direct
+            .native_create_selected_pod(
+                direct_body.clone(),
+                super::super::gpu_inventory::jcs_value(&direct_body).unwrap(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(direct_error.code, "queue_release_provider_write_blocked");
+        assert_eq!(
+            *direct_calls.lock().unwrap(),
+            vec![NativeRunPodMutationKind::Create]
+        );
+
+        // The legacy generic Create path remains native-only, but is also
+        // guarded until it is fully removed from compatibility internals.
+        let (_generic_create_temp, generic_create, _vault) = configured_transport();
+        let create_calls = Arc::new(Mutex::new(Vec::new()));
+        generic_create
+            .set_native_mutation_hook(Some(rejecting_hook(create_calls.clone())))
+            .unwrap();
+        let create_grant = generic_create.authorize_create().unwrap();
+        let create_error = generic_create
+            .execute(RunPodHttpRequest::post(
+                RunPodOperation::CreatePod,
+                "https://rest.runpod.io/v1/pods".to_owned(),
+                create_body(&["NVIDIA GeForce RTX 4090"]),
+                create_grant,
+                None,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(create_error.code, "queue_release_provider_write_blocked");
+        assert_eq!(
+            *create_calls.lock().unwrap(),
+            vec![NativeRunPodMutationKind::Create]
+        );
+
+        // Generic Terminate has its own one-use identity grant, which must be
+        // consumed before the same rejecting socket boundary is reached.
+        let (_generic_delete_temp, generic_delete, _vault) = configured_transport();
+        let delete_calls = Arc::new(Mutex::new(Vec::new()));
+        generic_delete
+            .set_native_mutation_hook(Some(rejecting_hook(delete_calls.clone())))
+            .unwrap();
+        generic_delete.record_delete_grant("safe-pod-1").unwrap();
+        let delete_error = generic_delete
+            .execute(RunPodHttpRequest::delete(
+                RunPodOperation::TerminatePod,
+                "https://rest.runpod.io/v1/pods/safe-pod-1".to_owned(),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(delete_error.code, "queue_release_provider_write_blocked");
+        assert_eq!(
+            *delete_calls.lock().unwrap(),
+            vec![NativeRunPodMutationKind::Delete]
         );
     }
 

@@ -95,10 +95,15 @@ export function TopBar({ state, dispatch }: { state: AppState; dispatch: Dispatc
       </div>
 
       <div className="top-instruments">
-        <div className="top-instrument top-instrument--gpu">
+        <button
+          className="top-instrument top-instrument--gpu"
+          type="button"
+          aria-label={state.pod.podId === null ? 'Choose a GPU' : 'Current GPU / Switch GPU'}
+          onClick={() => dispatch({ type: 'OPEN_GPU_SELECTOR' })}
+        >
           <span>GPU</span>
           <strong>{state.pod.gpu ?? 'offline'}</strong>
-        </div>
+        </button>
         <div className="top-instrument top-instrument--health">
           <StatusDot tone={state.pod.health === 'healthy' ? 'success' : state.pod.health === 'degraded' ? 'danger' : 'neutral'} />
           <span>{state.pod.health}</span>

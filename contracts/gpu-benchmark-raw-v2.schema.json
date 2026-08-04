@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://imageforge.local/contracts/gpu-benchmark-raw-v2.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "gpuId", "policyKey", "measuredAt", "bootDurationMs", "contract", "samples"],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "gpuId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9 ._()+:-]{0,126}[A-Za-z0-9])?$" },
+    "policyKey": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_]{0,63}$" },
+    "measuredAt": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
+    "bootDurationMs": { "type": "integer", "minimum": 0, "maximum": 1200000 },
+    "contract": { "$ref": "#/$defs/contract" },
+    "samples": { "type": "array", "minItems": 30, "maxItems": 30, "items": { "$ref": "#/$defs/sample" } }
+  },
+  "$defs": {
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modelId", "modelRevision", "workerImageDigest", "templateId", "precision", "width", "height", "steps", "guidanceMilli", "jpegQuality", "referenceMode", "promptFixtureId", "promptFixtureSha256", "seedFixtureSha256"],
+      "properties": {
+        "modelId": { "const": "black-forest-labs/FLUX.2-klein-4B" },
+        "modelRevision": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "workerImageDigest": { "type": "string", "maxLength": 512, "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[1-9][0-9]{0,4})?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$" },
+        "templateId": { "type": "string", "minLength": 1, "maxLength": 191 },
+        "precision": { "const": "bf16" }, "width": { "const": 1280 }, "height": { "const": 720 },
+        "steps": { "const": 4 }, "guidanceMilli": { "const": 1000 }, "jpegQuality": { "const": 95 },
+        "referenceMode": { "const": "none" }, "promptFixtureId": { "const": "imageforge-gpu-benchmark-30-v1" },
+        "promptFixtureSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "seedFixtureSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "sample": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ordinal", "promptFixtureOrdinal", "seed", "outcome", "durationUs", "failureCode"],
+      "properties": {
+        "ordinal": { "type": "integer", "minimum": 1, "maximum": 30 },
+        "promptFixtureOrdinal": { "type": "integer", "minimum": 1, "maximum": 30 },
+        "seed": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "outcome": { "enum": ["success", "failure"] },
+        "durationUs": { "type": ["integer", "null"], "minimum": 1, "maximum": 3600000000 },
+        "failureCode": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "outcome": { "const": "success" } }, "required": ["outcome"] },
+          "then": {
+            "properties": {
+              "durationUs": { "type": "integer", "minimum": 1, "maximum": 3600000000 },
+              "failureCode": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "outcome": { "const": "failure" } }, "required": ["outcome"] },
+          "then": {
+            "properties": {
+              "durationUs": { "type": "null" },
+              "failureCode": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$" }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

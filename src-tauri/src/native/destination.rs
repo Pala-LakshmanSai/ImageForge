@@ -48,6 +48,17 @@ struct RootIdentity {
     index: Option<u64>,
 }
 
+/// A queue record keeps this private binding beside the renderer-visible
+/// destination string.  The chooser grant itself is deliberately short lived
+/// and never serialized; this identity is what lets a later dispatch reject a
+/// replaced, linked, or otherwise different destination root.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct QueueDestinationBinding {
+    path: String,
+    identity: RootIdentity,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PersistedDestination {
@@ -216,6 +227,67 @@ impl DestinationStore {
             return Err(destination_root_replaced());
         }
         Ok(bound.path)
+    }
+
+    /// Capture the currently authorized destination for a new local queue
+    /// item. The renderer may name the path it already displays, but it cannot
+    /// supply a grant, root identity, or an alternate filesystem location.
+    pub(crate) fn capture_queue_destination(
+        &self,
+        visible_path: &str,
+    ) -> NativeResult<QueueDestinationBinding> {
+        let current = self.current()?;
+        let rendered = current.to_string_lossy();
+        if visible_path != rendered {
+            return Err(destination_root_replaced());
+        }
+        Ok(QueueDestinationBinding {
+            path: rendered.into_owned(),
+            identity: root_identity(&current)?,
+        })
+    }
+
+    /// Validate only the serialized private binding shape while reading the
+    /// queue journal. This deliberately does not touch the filesystem (a
+    /// disconnected destination is handled at dispatch), but it prevents a
+    /// tampered row from pairing a visible destination path with another
+    /// root's private identity.
+    pub(crate) fn validate_queue_binding(
+        &self,
+        binding: &QueueDestinationBinding,
+        visible_path: &str,
+    ) -> NativeResult<()> {
+        if binding.path != visible_path
+            || binding.path.is_empty()
+            || binding.path.contains('\0')
+            || !Path::new(&binding.path).is_absolute()
+        {
+            return Err(destination_root_replaced());
+        }
+        #[cfg(unix)]
+        if binding.identity.inode == 0 {
+            return Err(destination_root_replaced());
+        }
+        #[cfg(windows)]
+        if binding.identity.volume.is_none() || binding.identity.index.unwrap_or_default() == 0 {
+            return Err(destination_root_replaced());
+        }
+        Ok(())
+    }
+
+    /// Re-check a private queue binding immediately before reference bytes are
+    /// exposed for dispatch. This intentionally performs no implicit rebind:
+    /// an editor must explicitly choose and validate a replacement folder.
+    pub(crate) fn verify_queue_destination(
+        &self,
+        binding: &QueueDestinationBinding,
+    ) -> NativeResult<()> {
+        let current = self.current()?;
+        if current.to_string_lossy() != binding.path || root_identity(&current)? != binding.identity
+        {
+            return Err(destination_root_replaced());
+        }
+        probe_writable(&current)
     }
 
     pub fn confine(&self, relative: &Path) -> NativeResult<PathBuf> {

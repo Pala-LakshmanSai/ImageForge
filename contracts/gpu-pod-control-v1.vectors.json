@@ -1,0 +1,804 @@
+{
+  "schemaVersion": 1,
+  "contract": "gpu-pod-control-v1",
+  "processEpochId": "50000000-0000-4000-8000-000000000000",
+  "accepted": [
+    {
+      "id": "offline_observation",
+      "kind": "podObservation",
+      "value": {
+        "schemaVersion": 1,
+        "processEpochId": "50000000-0000-4000-8000-000000000000",
+        "lifecycleRevision": 1,
+        "state": "offline",
+        "observedAt": "2026-08-04T00:00:00.000Z",
+        "stale": false,
+        "pods": [],
+        "overflow": false,
+        "issue": null
+      },
+      "canonicalJson": "{\"schemaVersion\":1,\"processEpochId\":\"50000000-0000-4000-8000-000000000000\",\"lifecycleRevision\":1,\"state\":\"offline\",\"observedAt\":\"2026-08-04T00:00:00.000Z\",\"stale\":false,\"pods\":[],\"overflow\":false,\"issue\":null}"
+    },
+    {
+      "id": "single_observation",
+      "kind": "podObservation",
+      "value": {
+        "schemaVersion": 1,
+        "processEpochId": "50000000-0000-4000-8000-000000000000",
+        "lifecycleRevision": 2,
+        "state": "single",
+        "observedAt": "2026-08-04T00:00:05.000Z",
+        "stale": false,
+        "pods": [
+          {
+            "podId": "pod-exact-1",
+            "gpuId": "NVIDIA GeForce RTX 4090",
+            "gpuDisplayName": "RTX 4090",
+            "hourlyPriceMicroUsd": 540000,
+            "status": "running"
+          }
+        ],
+        "overflow": false,
+        "issue": null
+      },
+      "canonicalJson": "{\"schemaVersion\":1,\"processEpochId\":\"50000000-0000-4000-8000-000000000000\",\"lifecycleRevision\":2,\"state\":\"single\",\"observedAt\":\"2026-08-04T00:00:05.000Z\",\"stale\":false,\"pods\":[{\"podId\":\"pod-exact-1\",\"gpuId\":\"NVIDIA GeForce RTX 4090\",\"gpuDisplayName\":\"RTX 4090\",\"hourlyPriceMicroUsd\":540000,\"status\":\"running\"}],\"overflow\":false,\"issue\":null}"
+    },
+    {
+      "id": "retained_transport_failure",
+      "kind": "podObservation",
+      "value": {
+        "schemaVersion": 1,
+        "processEpochId": "50000000-0000-4000-8000-000000000000",
+        "lifecycleRevision": 3,
+        "state": "unavailable",
+        "observedAt": "2026-08-04T00:00:05.000Z",
+        "stale": true,
+        "pods": [
+          {
+            "podId": "pod-exact-1",
+            "gpuId": "NVIDIA GeForce RTX 4090",
+            "gpuDisplayName": "RTX 4090",
+            "hourlyPriceMicroUsd": 540000,
+            "status": "running"
+          }
+        ],
+        "overflow": false,
+        "issue": {
+          "code": "gpu_pod_observation_unavailable",
+          "retryable": true
+        }
+      },
+      "canonicalJson": "{\"schemaVersion\":1,\"processEpochId\":\"50000000-0000-4000-8000-000000000000\",\"lifecycleRevision\":3,\"state\":\"unavailable\",\"observedAt\":\"2026-08-04T00:00:05.000Z\",\"stale\":true,\"pods\":[{\"podId\":\"pod-exact-1\",\"gpuId\":\"NVIDIA GeForce RTX 4090\",\"gpuDisplayName\":\"RTX 4090\",\"hourlyPriceMicroUsd\":540000,\"status\":\"running\"}],\"overflow\":false,\"issue\":{\"code\":\"gpu_pod_observation_unavailable\",\"retryable\":true}}"
+    },
+    {
+      "id": "overflow_without_partial_ids",
+      "kind": "podObservation",
+      "value": {
+        "schemaVersion": 1,
+        "processEpochId": "50000000-0000-4000-8000-000000000000",
+        "lifecycleRevision": 4,
+        "state": "multiple",
+        "observedAt": "2026-08-04T00:00:10.000Z",
+        "stale": false,
+        "pods": [],
+        "overflow": true,
+        "issue": {
+          "code": "gpu_pod_observation_invalid",
+          "retryable": false
+        }
+      },
+      "canonicalJson": "{\"schemaVersion\":1,\"processEpochId\":\"50000000-0000-4000-8000-000000000000\",\"lifecycleRevision\":4,\"state\":\"multiple\",\"observedAt\":\"2026-08-04T00:00:10.000Z\",\"stale\":false,\"pods\":[],\"overflow\":true,\"issue\":{\"code\":\"gpu_pod_observation_invalid\",\"retryable\":false}}"
+    },
+    {
+      "id": "normal_stop_input",
+      "kind": "normalStopInput",
+      "value": {
+        "podId": "pod-exact-1",
+        "stopRequestId": "40000000-0000-4000-8000-000000000000",
+        "sessionId": "30000000-0000-4000-8000-000000000000",
+        "expectedServerInstanceId": "20000000-0000-4000-8000-000000000000",
+        "expectedCoordinationRevision": 7,
+        "expectedLifecycleRevision": 10
+      },
+      "canonicalJson": "{\"podId\":\"pod-exact-1\",\"stopRequestId\":\"40000000-0000-4000-8000-000000000000\",\"sessionId\":\"30000000-0000-4000-8000-000000000000\",\"expectedServerInstanceId\":\"20000000-0000-4000-8000-000000000000\",\"expectedCoordinationRevision\":7,\"expectedLifecycleRevision\":10}"
+    },
+    {
+      "id": "normal_stop_success",
+      "kind": "normalStopResult",
+      "value": {
+        "schemaVersion": 1,
+        "operationId": "60000000-0000-4000-8000-000000000000",
+        "podId": "pod-exact-1",
+        "disposition": "stopped",
+        "observation": {
+          "schemaVersion": 1,
+          "processEpochId": "50000000-0000-4000-8000-000000000000",
+          "lifecycleRevision": 12,
+          "state": "offline",
+          "observedAt": "2026-08-04T00:00:12.000Z",
+          "stale": false,
+          "pods": [],
+          "overflow": false,
+          "issue": null
+        },
+        "issue": null
+      },
+      "canonicalJson": "{\"schemaVersion\":1,\"operationId\":\"60000000-0000-4000-8000-000000000000\",\"podId\":\"pod-exact-1\",\"disposition\":\"stopped\",\"observation\":{\"schemaVersion\":1,\"processEpochId\":\"50000000-0000-4000-8000-000000000000\",\"lifecycleRevision\":12,\"state\":\"offline\",\"observedAt\":\"2026-08-04T00:00:12.000Z\",\"stale\":false,\"pods\":[],\"overflow\":false,\"issue\":null},\"issue\":null}"
+    },
+    {
+      "id": "normal_stop_already_stopped_peer_visible",
+      "kind": "normalStopResult",
+      "value": {
+        "schemaVersion": 1,
+        "operationId": "80000000-0000-4000-8000-000000000000",
+        "podId": "pod-exact-1",
+        "disposition": "already_stopped",
+        "observation": {
+          "schemaVersion": 1,
+          "processEpochId": "50000000-0000-4000-8000-000000000000",
+          "lifecycleRevision": 12,
+          "state": "single",
+          "observedAt": "2026-08-04T00:00:12.000Z",
+          "stale": false,
+          "pods": [
+            {
+              "podId": "pod-peer-2",
+              "gpuId": "NVIDIA L4",
+              "gpuDisplayName": "NVIDIA L4",
+              "hourlyPriceMicroUsd": 420000,
+              "status": "running"
+            }
+          ],
+          "overflow": false,
+          "issue": null
+        },
+        "issue": null
+      },
+      "canonicalJson": "{\"schemaVersion\":1,\"operationId\":\"80000000-0000-4000-8000-000000000000\",\"podId\":\"pod-exact-1\",\"disposition\":\"already_stopped\",\"observation\":{\"schemaVersion\":1,\"processEpochId\":\"50000000-0000-4000-8000-000000000000\",\"lifecycleRevision\":12,\"state\":\"single\",\"observedAt\":\"2026-08-04T00:00:12.000Z\",\"stale\":false,\"pods\":[{\"podId\":\"pod-peer-2\",\"gpuId\":\"NVIDIA L4\",\"gpuDisplayName\":\"NVIDIA L4\",\"hourlyPriceMicroUsd\":420000,\"status\":\"running\"}],\"overflow\":false,\"issue\":null},\"issue\":null}"
+    },
+    {
+      "id": "normal_stop_delete_uncertain",
+      "kind": "normalStopResult",
+      "value": {
+        "schemaVersion": 1,
+        "operationId": "70000000-0000-4000-8000-000000000000",
+        "podId": "pod-exact-1",
+        "disposition": "delete_uncertain",
+        "observation": {
+          "schemaVersion": 1,
+          "processEpochId": "50000000-0000-4000-8000-000000000000",
+          "lifecycleRevision": 12,
+          "state": "unavailable",
+          "observedAt": "2026-08-04T00:00:05.000Z",
+          "stale": true,
+          "pods": [
+            {
+              "podId": "pod-exact-1",
+              "gpuId": "NVIDIA GeForce RTX 4090",
+              "gpuDisplayName": "RTX 4090",
+              "hourlyPriceMicroUsd": 540000,
+              "status": "running"
+            }
+          ],
+          "overflow": false,
+          "issue": {
+            "code": "gpu_pod_observation_unavailable",
+            "retryable": true
+          }
+        },
+        "issue": {
+          "code": "gpu_stop_delete_uncertain",
+          "retryable": false
+        }
+      },
+      "canonicalJson": "{\"schemaVersion\":1,\"operationId\":\"70000000-0000-4000-8000-000000000000\",\"podId\":\"pod-exact-1\",\"disposition\":\"delete_uncertain\",\"observation\":{\"schemaVersion\":1,\"processEpochId\":\"50000000-0000-4000-8000-000000000000\",\"lifecycleRevision\":12,\"state\":\"unavailable\",\"observedAt\":\"2026-08-04T00:00:05.000Z\",\"stale\":true,\"pods\":[{\"podId\":\"pod-exact-1\",\"gpuId\":\"NVIDIA GeForce RTX 4090\",\"gpuDisplayName\":\"RTX 4090\",\"hourlyPriceMicroUsd\":540000,\"status\":\"running\"}],\"overflow\":false,\"issue\":{\"code\":\"gpu_pod_observation_unavailable\",\"retryable\":true}},\"issue\":{\"code\":\"gpu_stop_delete_uncertain\",\"retryable\":false}}"
+    }
+  ],
+  "rejected": [
+    {
+      "id": "observation_unknown_field",
+      "kind": "podObservation",
+      "value": {
+        "schemaVersion": 1,
+        "processEpochId": "50000000-0000-4000-8000-000000000000",
+        "lifecycleRevision": 1,
+        "state": "offline",
+        "observedAt": "2026-08-04T00:00:00.000Z",
+        "stale": false,
+        "pods": [],
+        "overflow": false,
+        "issue": null,
+        "extra": true
+      },
+      "reason": "unknown_field"
+    },
+    {
+      "id": "observation_bad_process_uuid",
+      "kind": "podObservation",
+      "value": {
+        "schemaVersion": 1,
+        "processEpochId": "NOT-A-UUID",
+        "lifecycleRevision": 1,
+        "state": "offline",
+        "observedAt": "2026-08-04T00:00:00.000Z",
+        "stale": false,
+        "pods": [],
+        "overflow": false,
+        "issue": null
+      },
+      "reason": "uuid"
+    },
+    {
+      "id": "observation_unsafe_revision",
+      "kind": "podObservation",
+      "value": {
+        "schemaVersion": 1,
+        "processEpochId": "50000000-0000-4000-8000-000000000000",
+        "lifecycleRevision": 9007199254740992,
+        "state": "offline",
+        "observedAt": "2026-08-04T00:00:00.000Z",
+        "stale": false,
+        "pods": [],
+        "overflow": false,
+        "issue": null
+      },
+      "reason": "revision"
+    },
+    {
+      "id": "observation_offline_with_pod",
+      "kind": "podObservation",
+      "value": {
+        "schemaVersion": 1,
+        "processEpochId": "50000000-0000-4000-8000-000000000000",
+        "lifecycleRevision": 1,
+        "state": "offline",
+        "observedAt": "2026-08-04T00:00:00.000Z",
+        "stale": false,
+        "pods": [
+          {
+            "podId": "pod-exact-1",
+            "gpuId": "NVIDIA GeForce RTX 4090",
+            "gpuDisplayName": "RTX 4090",
+            "hourlyPriceMicroUsd": 540000,
+            "status": "running"
+          }
+        ],
+        "overflow": false,
+        "issue": null
+      },
+      "reason": "state_relation"
+    },
+    {
+      "id": "observation_duplicate_ids",
+      "kind": "podObservation",
+      "value": {
+        "schemaVersion": 1,
+        "processEpochId": "50000000-0000-4000-8000-000000000000",
+        "lifecycleRevision": 2,
+        "state": "multiple",
+        "observedAt": "2026-08-04T00:00:05.000Z",
+        "stale": false,
+        "pods": [
+          {
+            "podId": "pod-exact-1",
+            "gpuId": "NVIDIA GeForce RTX 4090",
+            "gpuDisplayName": "RTX 4090",
+            "hourlyPriceMicroUsd": 540000,
+            "status": "running"
+          },
+          {
+            "podId": "pod-exact-1",
+            "gpuId": "NVIDIA GeForce RTX 4090",
+            "gpuDisplayName": "RTX 4090",
+            "hourlyPriceMicroUsd": 540000,
+            "status": "running"
+          }
+        ],
+        "overflow": false,
+        "issue": null
+      },
+      "reason": "sorted_unique"
+    },
+    {
+      "id": "observation_unsorted_ids",
+      "kind": "podObservation",
+      "value": {
+        "schemaVersion": 1,
+        "processEpochId": "50000000-0000-4000-8000-000000000000",
+        "lifecycleRevision": 2,
+        "state": "multiple",
+        "observedAt": "2026-08-04T00:00:05.000Z",
+        "stale": false,
+        "pods": [
+          {
+            "podId": "pod-z",
+            "gpuId": "NVIDIA GeForce RTX 4090",
+            "gpuDisplayName": "RTX 4090",
+            "hourlyPriceMicroUsd": 540000,
+            "status": "running"
+          },
+          {
+            "podId": "pod-exact-1",
+            "gpuId": "NVIDIA GeForce RTX 4090",
+            "gpuDisplayName": "RTX 4090",
+            "hourlyPriceMicroUsd": 540000,
+            "status": "running"
+          }
+        ],
+        "overflow": false,
+        "issue": null
+      },
+      "reason": "sorted_unique"
+    },
+    {
+      "id": "unavailable_without_issue",
+      "kind": "podObservation",
+      "value": {
+        "schemaVersion": 1,
+        "processEpochId": "50000000-0000-4000-8000-000000000000",
+        "lifecycleRevision": 3,
+        "state": "unavailable",
+        "observedAt": "2026-08-04T00:00:05.000Z",
+        "stale": true,
+        "pods": [
+          {
+            "podId": "pod-exact-1",
+            "gpuId": "NVIDIA GeForce RTX 4090",
+            "gpuDisplayName": "RTX 4090",
+            "hourlyPriceMicroUsd": 540000,
+            "status": "running"
+          }
+        ],
+        "overflow": false,
+        "issue": null
+      },
+      "reason": "state_relation"
+    },
+    {
+      "id": "overflow_with_partial_ids",
+      "kind": "podObservation",
+      "value": {
+        "schemaVersion": 1,
+        "processEpochId": "50000000-0000-4000-8000-000000000000",
+        "lifecycleRevision": 4,
+        "state": "multiple",
+        "observedAt": "2026-08-04T00:00:10.000Z",
+        "stale": false,
+        "pods": [
+          {
+            "podId": "pod-exact-1",
+            "gpuId": "NVIDIA GeForce RTX 4090",
+            "gpuDisplayName": "RTX 4090",
+            "hourlyPriceMicroUsd": 540000,
+            "status": "running"
+          }
+        ],
+        "overflow": true,
+        "issue": {
+          "code": "gpu_pod_observation_invalid",
+          "retryable": false
+        }
+      },
+      "reason": "overflow_relation"
+    },
+    {
+      "id": "normal_stop_input_unknown_field",
+      "kind": "normalStopInput",
+      "value": {
+        "podId": "pod-exact-1",
+        "stopRequestId": "40000000-0000-4000-8000-000000000000",
+        "sessionId": "30000000-0000-4000-8000-000000000000",
+        "expectedServerInstanceId": "20000000-0000-4000-8000-000000000000",
+        "expectedCoordinationRevision": 7,
+        "expectedLifecycleRevision": 10,
+        "finalizationId": "80000000-0000-4000-8000-000000000000"
+      },
+      "reason": "unknown_field"
+    },
+    {
+      "id": "normal_stop_input_bad_revision",
+      "kind": "normalStopInput",
+      "value": {
+        "podId": "pod-exact-1",
+        "stopRequestId": "40000000-0000-4000-8000-000000000000",
+        "sessionId": "30000000-0000-4000-8000-000000000000",
+        "expectedServerInstanceId": "20000000-0000-4000-8000-000000000000",
+        "expectedCoordinationRevision": 7,
+        "expectedLifecycleRevision": -1
+      },
+      "reason": "revision"
+    },
+    {
+      "id": "normal_stop_result_wrong_pod",
+      "kind": "normalStopResult",
+      "input": {
+        "podId": "pod-exact-1",
+        "stopRequestId": "40000000-0000-4000-8000-000000000000",
+        "sessionId": "30000000-0000-4000-8000-000000000000",
+        "expectedServerInstanceId": "20000000-0000-4000-8000-000000000000",
+        "expectedCoordinationRevision": 7,
+        "expectedLifecycleRevision": 10
+      },
+      "value": {
+        "schemaVersion": 1,
+        "operationId": "60000000-0000-4000-8000-000000000000",
+        "podId": "pod-other-1",
+        "disposition": "stopped",
+        "observation": {
+          "schemaVersion": 1,
+          "processEpochId": "50000000-0000-4000-8000-000000000000",
+          "lifecycleRevision": 12,
+          "state": "offline",
+          "observedAt": "2026-08-04T00:00:12.000Z",
+          "stale": false,
+          "pods": [],
+          "overflow": false,
+          "issue": null
+        },
+        "issue": null
+      },
+      "reason": "input_result_pod_mismatch"
+    },
+    {
+      "id": "normal_stop_success_old_pod_present",
+      "kind": "normalStopResult",
+      "value": {
+        "schemaVersion": 1,
+        "operationId": "60000000-0000-4000-8000-000000000000",
+        "podId": "pod-exact-1",
+        "disposition": "stopped",
+        "observation": {
+          "schemaVersion": 1,
+          "processEpochId": "50000000-0000-4000-8000-000000000000",
+          "lifecycleRevision": 12,
+          "state": "single",
+          "observedAt": "2026-08-04T00:00:05.000Z",
+          "stale": false,
+          "pods": [
+            {
+              "podId": "pod-exact-1",
+              "gpuId": "NVIDIA GeForce RTX 4090",
+              "gpuDisplayName": "RTX 4090",
+              "hourlyPriceMicroUsd": 540000,
+              "status": "running"
+            }
+          ],
+          "overflow": false,
+          "issue": null
+        },
+        "issue": null
+      },
+      "reason": "success_absence_relation"
+    },
+    {
+      "id": "already_stopped_overflow_is_not_absence_proof",
+      "kind": "normalStopResult",
+      "value": {
+        "schemaVersion": 1,
+        "operationId": "80000000-0000-4000-8000-000000000000",
+        "podId": "pod-exact-1",
+        "disposition": "already_stopped",
+        "observation": {
+          "schemaVersion": 1,
+          "processEpochId": "50000000-0000-4000-8000-000000000000",
+          "lifecycleRevision": 12,
+          "state": "multiple",
+          "observedAt": "2026-08-04T00:00:12.000Z",
+          "stale": false,
+          "pods": [],
+          "overflow": true,
+          "issue": {
+            "code": "gpu_pod_observation_invalid",
+            "retryable": false
+          }
+        },
+        "issue": null
+      },
+      "reason": "success_requires_fresh_valid_observation"
+    },
+    {
+      "id": "delete_uncertain_without_issue",
+      "kind": "normalStopResult",
+      "value": {
+        "schemaVersion": 1,
+        "operationId": "70000000-0000-4000-8000-000000000000",
+        "podId": "pod-exact-1",
+        "disposition": "delete_uncertain",
+        "observation": {
+          "schemaVersion": 1,
+          "processEpochId": "50000000-0000-4000-8000-000000000000",
+          "lifecycleRevision": 12,
+          "state": "unavailable",
+          "observedAt": "2026-08-04T00:00:05.000Z",
+          "stale": true,
+          "pods": [
+            {
+              "podId": "pod-exact-1",
+              "gpuId": "NVIDIA GeForce RTX 4090",
+              "gpuDisplayName": "RTX 4090",
+              "hourlyPriceMicroUsd": 540000,
+              "status": "running"
+            }
+          ],
+          "overflow": false,
+          "issue": {
+            "code": "gpu_pod_observation_unavailable",
+            "retryable": true
+          }
+        },
+        "issue": null
+      },
+      "reason": "disposition_issue_relation"
+    },
+    {
+      "id": "delete_uncertain_must_retain_old_pod",
+      "kind": "normalStopResult",
+      "value": {
+        "schemaVersion": 1,
+        "operationId": "70000000-0000-4000-8000-000000000000",
+        "podId": "pod-exact-1",
+        "disposition": "delete_uncertain",
+        "observation": {
+          "schemaVersion": 1,
+          "processEpochId": "50000000-0000-4000-8000-000000000000",
+          "lifecycleRevision": 12,
+          "state": "offline",
+          "observedAt": "2026-08-04T00:00:12.000Z",
+          "stale": false,
+          "pods": [],
+          "overflow": false,
+          "issue": null
+        },
+        "issue": {
+          "code": "gpu_stop_delete_uncertain",
+          "retryable": false
+        }
+      },
+      "reason": "uncertain_preserves_old_pod"
+    },
+    {
+      "id": "already_stopped_with_issue",
+      "kind": "normalStopResult",
+      "value": {
+        "schemaVersion": 1,
+        "operationId": "60000000-0000-4000-8000-000000000000",
+        "podId": "pod-exact-1",
+        "disposition": "already_stopped",
+        "observation": {
+          "schemaVersion": 1,
+          "processEpochId": "50000000-0000-4000-8000-000000000000",
+          "lifecycleRevision": 12,
+          "state": "offline",
+          "observedAt": "2026-08-04T00:00:12.000Z",
+          "stale": false,
+          "pods": [],
+          "overflow": false,
+          "issue": null
+        },
+        "issue": {
+          "code": "gpu_stop_delete_uncertain",
+          "retryable": false
+        }
+      },
+      "reason": "disposition_issue_relation"
+    }
+  ],
+  "lifecycleRevisionTransitions": [
+    {
+      "id": "first_success",
+      "priorRevision": 0,
+      "outcome": "success",
+      "nextRevision": 1,
+      "providerListCount": 1
+    },
+    {
+      "id": "coalesced_success",
+      "priorRevision": 1,
+      "outcome": "coalesced_success",
+      "nextRevision": 2,
+      "callerCount": 3,
+      "providerListCount": 1,
+      "allCallersSameBytes": true
+    },
+    {
+      "id": "transport_failure_with_prior",
+      "priorRevision": 2,
+      "outcome": "unavailable_retained",
+      "nextRevision": 3,
+      "providerListCount": 1
+    },
+    {
+      "id": "invalid_response_with_prior",
+      "priorRevision": 3,
+      "outcome": "invalid_retained",
+      "nextRevision": 4,
+      "providerListCount": 1
+    },
+    {
+      "id": "overflow",
+      "priorRevision": 4,
+      "outcome": "overflow",
+      "nextRevision": 5,
+      "providerListCount": 1
+    },
+    {
+      "id": "revision_exhausted",
+      "priorRevision": 9007199254740991,
+      "outcome": "gpu_pod_revision_exhausted",
+      "nextRevision": 9007199254740991,
+      "providerListCount": 0
+    },
+    {
+      "id": "normal_stop_revision_exhausted_max_minus_one",
+      "priorRevision": 9007199254740990,
+      "outcome": "gpu_pod_revision_exhausted",
+      "nextRevision": 9007199254740990,
+      "providerListCount": 0,
+      "providerDeleteCount": 0,
+      "workerFinalizeCount": 0,
+      "journalWriteCount": 0
+    },
+    {
+      "id": "normal_stop_success",
+      "priorRevision": 10,
+      "outcome": "stopped",
+      "preflightRevision": 11,
+      "resultRevision": 12,
+      "providerListCount": 2,
+      "providerDeleteCount": 1
+    },
+    {
+      "id": "normal_stop_delete_uncertain",
+      "priorRevision": 10,
+      "outcome": "delete_uncertain",
+      "preflightRevision": 11,
+      "resultRevision": 12,
+      "providerListCount": 2,
+      "providerDeleteCount": 1
+    }
+  ],
+  "normalStopProviderCases": [
+    {
+      "id": "delete_204_peer_remains_visible",
+      "inputPodId": "pod-exact-1",
+      "preflightExactGetStatus": 200,
+      "deleteStatus": 204,
+      "postListState": "single",
+      "postListPodIds": ["pod-peer-2"],
+      "expectedDisposition": "stopped",
+      "providerListCount": 2,
+      "providerDeleteCount": 1
+    },
+    {
+      "id": "delete_404_plus_absence_peer_remains_visible",
+      "inputPodId": "pod-exact-1",
+      "preflightExactGetStatus": 200,
+      "deleteStatus": 404,
+      "postListState": "single",
+      "postListPodIds": ["pod-peer-2"],
+      "expectedDisposition": "already_stopped",
+      "providerListCount": 2,
+      "providerDeleteCount": 1
+    },
+    {
+      "id": "delete_404_post_list_unavailable",
+      "inputPodId": "pod-exact-1",
+      "preflightExactGetStatus": 200,
+      "deleteStatus": 404,
+      "postListState": "unavailable",
+      "retainedPodIds": ["pod-exact-1"],
+      "expectedDisposition": "delete_uncertain",
+      "expectedIssueCode": "gpu_stop_delete_uncertain",
+      "providerListCount": 2,
+      "providerDeleteCount": 1
+    },
+    {
+      "id": "delete_404_post_list_still_contains_old",
+      "inputPodId": "pod-exact-1",
+      "preflightExactGetStatus": 200,
+      "deleteStatus": 404,
+      "postListState": "single",
+      "postListPodIds": ["pod-exact-1"],
+      "expectedDisposition": "delete_uncertain",
+      "expectedIssueCode": "gpu_stop_delete_uncertain",
+      "providerListCount": 2,
+      "providerDeleteCount": 1
+    }
+  ],
+  "normalStopReplayCases": [
+    {
+      "id": "completed_exact_replay",
+      "priorDisposition": "stopped",
+      "sameInput": true,
+      "relaunch": true,
+      "expectedByteIdentical": true,
+      "replaceCurrentProjection": false,
+      "requiresCurrentObserveBeforeLifecycle": true,
+      "providerListCount": 0,
+      "providerDeleteCount": 0,
+      "workerFinalizeCount": 0
+    },
+    {
+      "id": "already_stopped_exact_replay",
+      "priorDisposition": "already_stopped",
+      "sameInput": true,
+      "relaunch": true,
+      "expectedByteIdentical": true,
+      "replaceCurrentProjection": false,
+      "requiresCurrentObserveBeforeLifecycle": true,
+      "providerListCount": 0,
+      "providerDeleteCount": 0,
+      "workerFinalizeCount": 0
+    },
+    {
+      "id": "uncertain_same_request_relaunch",
+      "priorDisposition": "delete_uncertain",
+      "sameInput": true,
+      "relaunch": true,
+      "expectedDisposition": "delete_uncertain",
+      "sameDurableOperationId": true,
+      "returnedObservationProcessEpoch": "current",
+      "returnedObservationRevision": "current+1",
+      "oldPodRetained": true,
+      "replaceCurrentProjection": true,
+      "providerListCount": 1,
+      "providerDeleteCount": 0,
+      "workerFinalizeCount": 0,
+      "guardAction": "observe_until_worker_ttl_then_settle_without_delete"
+    },
+    {
+      "id": "same_uuid_different_input",
+      "priorDisposition": "stopped",
+      "sameInput": false,
+      "relaunch": false,
+      "expectedCode": "gpu_stop_request_conflict",
+      "providerListCount": 0,
+      "providerDeleteCount": 0,
+      "workerFinalizeCount": 0
+    }
+  ],
+  "normalStopLoadCases": [
+    {
+      "id": "active_delete_intent_relaunch",
+      "persistedPhase": "delete_intent",
+      "expectedInput": "byte_identical_persisted_input",
+      "providerListCount": 0,
+      "providerDeleteCount": 0,
+      "workerCallCount": 0,
+      "journalWriteCount": 0
+    },
+    {
+      "id": "active_delete_uncertain_relaunch",
+      "persistedPhase": "delete_uncertain",
+      "expectedInput": "byte_identical_persisted_input",
+      "providerListCount": 0,
+      "providerDeleteCount": 0,
+      "workerCallCount": 0,
+      "journalWriteCount": 0
+    },
+    {
+      "id": "preflight_only_does_not_resume",
+      "persistedPhase": "preflight",
+      "expectedInput": null,
+      "providerListCount": 0,
+      "providerDeleteCount": 0,
+      "workerCallCount": 0
+    },
+    {
+      "id": "completed_history_is_not_an_active_recovery",
+      "persistedPhase": "completed",
+      "expectedInput": null,
+      "providerListCount": 0,
+      "providerDeleteCount": 0,
+      "workerCallCount": 0
+    },
+    {
+      "id": "missing_journal",
+      "persistedPhase": null,
+      "expectedInput": null,
+      "providerListCount": 0,
+      "providerDeleteCount": 0,
+      "workerCallCount": 0
+    }
+  ]
+}

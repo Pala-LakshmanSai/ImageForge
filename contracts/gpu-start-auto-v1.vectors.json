@@ -1,0 +1,551 @@
+{
+  "schemaVersion": 1,
+  "schemaPath": "contracts/gpu-start-auto-v1.schema.json",
+  "acceptedInputs": [
+    {
+      "id": "initial_auto_start",
+      "value": {
+        "observationId": "00000000-0000-4000-8000-000000000001",
+        "receiptId": "00000000-0000-4000-8000-000000000002",
+        "sessionId": "00000000-0000-4000-8000-000000000003",
+        "expectedLifecycleRevision": 0
+      }
+    },
+    {
+      "id": "maximum_safe_revision",
+      "value": {
+        "observationId": "00000000-0000-4000-8000-000000000001",
+        "receiptId": "00000000-0000-4000-8000-000000000002",
+        "sessionId": "00000000-0000-4000-8000-000000000003",
+        "expectedLifecycleRevision": 9007199254740991
+      }
+    }
+  ],
+  "acceptedResults": [
+    {
+      "id": "create_intent",
+      "value": {
+        "schemaVersion": 1,
+        "operationId": "00000000-0000-4000-8000-000000000010",
+        "lifecycleRevision": 1,
+        "state": "create_intent",
+        "pod": null,
+        "confirmedHourlyPriceMicroUsd": 690000,
+        "actualHourlyPriceMicroUsd": null,
+        "issue": null
+      }
+    },
+    {
+      "id": "create_uncertain",
+      "value": {
+        "schemaVersion": 1,
+        "operationId": "00000000-0000-4000-8000-000000000010",
+        "lifecycleRevision": 2,
+        "state": "create_uncertain",
+        "pod": null,
+        "confirmedHourlyPriceMicroUsd": 690000,
+        "actualHourlyPriceMicroUsd": null,
+        "issue": {
+          "code": "gpu_start_create_uncertain",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "provisioning",
+      "value": {
+        "schemaVersion": 1,
+        "operationId": "00000000-0000-4000-8000-000000000010",
+        "lifecycleRevision": 2,
+        "state": "provisioning",
+        "pod": {
+          "podId": "imageforge-pod-1",
+          "gpuId": "NVIDIA GeForce RTX 4090",
+          "gpuDisplayName": "NVIDIA GeForce RTX 4090",
+          "hourlyPriceMicroUsd": 690000
+        },
+        "confirmedHourlyPriceMicroUsd": 690000,
+        "actualHourlyPriceMicroUsd": 690000,
+        "issue": null
+      }
+    },
+    {
+      "id": "ready",
+      "value": {
+        "schemaVersion": 1,
+        "operationId": "00000000-0000-4000-8000-000000000010",
+        "lifecycleRevision": 3,
+        "state": "ready",
+        "pod": {
+          "podId": "imageforge-pod-1",
+          "gpuId": "NVIDIA GeForce RTX 4090",
+          "gpuDisplayName": "NVIDIA GeForce RTX 4090",
+          "hourlyPriceMicroUsd": 690000
+        },
+        "confirmedHourlyPriceMicroUsd": 690000,
+        "actualHourlyPriceMicroUsd": 690000,
+        "issue": null
+      }
+    },
+    {
+      "id": "price_attention_changed",
+      "value": {
+        "schemaVersion": 1,
+        "operationId": "00000000-0000-4000-8000-000000000010",
+        "lifecycleRevision": 3,
+        "state": "price_attention",
+        "pod": {
+          "podId": "imageforge-pod-1",
+          "gpuId": "NVIDIA GeForce RTX 4090",
+          "gpuDisplayName": "NVIDIA GeForce RTX 4090",
+          "hourlyPriceMicroUsd": 700000
+        },
+        "confirmedHourlyPriceMicroUsd": 690000,
+        "actualHourlyPriceMicroUsd": 700000,
+        "issue": {
+          "code": "gpu_actual_price_changed",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "price_attention_unavailable",
+      "value": {
+        "schemaVersion": 1,
+        "operationId": "00000000-0000-4000-8000-000000000010",
+        "lifecycleRevision": 3,
+        "state": "price_attention",
+        "pod": {
+          "podId": "imageforge-pod-1",
+          "gpuId": "NVIDIA GeForce RTX 4090",
+          "gpuDisplayName": "NVIDIA GeForce RTX 4090",
+          "hourlyPriceMicroUsd": null
+        },
+        "confirmedHourlyPriceMicroUsd": 690000,
+        "actualHourlyPriceMicroUsd": null,
+        "issue": {
+          "code": "gpu_actual_price_unavailable",
+          "retryable": false
+        }
+      }
+    }
+  ],
+  "schemaRejections": [
+    {
+      "id": "unknown_input_field",
+      "surface": "input",
+      "value": {
+        "observationId": "00000000-0000-4000-8000-000000000001",
+        "receiptId": "00000000-0000-4000-8000-000000000002",
+        "sessionId": "00000000-0000-4000-8000-000000000003",
+        "expectedLifecycleRevision": 0,
+        "gpuTypeIds": ["NVIDIA GeForce RTX 4090"]
+      }
+    },
+    {
+      "id": "missing_receipt",
+      "surface": "input",
+      "value": {
+        "observationId": "00000000-0000-4000-8000-000000000001",
+        "sessionId": "00000000-0000-4000-8000-000000000003",
+        "expectedLifecycleRevision": 0
+      }
+    },
+    {
+      "id": "uppercase_uuid",
+      "surface": "input",
+      "value": {
+        "observationId": "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+        "receiptId": "00000000-0000-4000-8000-000000000002",
+        "sessionId": "00000000-0000-4000-8000-000000000003",
+        "expectedLifecycleRevision": 0
+      }
+    },
+    {
+      "id": "unsafe_revision",
+      "surface": "input",
+      "value": {
+        "observationId": "00000000-0000-4000-8000-000000000001",
+        "receiptId": "00000000-0000-4000-8000-000000000002",
+        "sessionId": "00000000-0000-4000-8000-000000000003",
+        "expectedLifecycleRevision": 9007199254740992
+      }
+    },
+    {
+      "id": "fractional_revision",
+      "surface": "input",
+      "value": {
+        "observationId": "00000000-0000-4000-8000-000000000001",
+        "receiptId": "00000000-0000-4000-8000-000000000002",
+        "sessionId": "00000000-0000-4000-8000-000000000003",
+        "expectedLifecycleRevision": 1.5
+      }
+    },
+    {
+      "id": "create_uncertain_without_issue",
+      "surface": "result",
+      "value": {
+        "schemaVersion": 1,
+        "operationId": "00000000-0000-4000-8000-000000000010",
+        "lifecycleRevision": 2,
+        "state": "create_uncertain",
+        "pod": null,
+        "confirmedHourlyPriceMicroUsd": 690000,
+        "actualHourlyPriceMicroUsd": null,
+        "issue": null
+      }
+    },
+    {
+      "id": "unknown_result_field",
+      "surface": "result",
+      "value": {
+        "schemaVersion": 1,
+        "operationId": "00000000-0000-4000-8000-000000000010",
+        "lifecycleRevision": 1,
+        "state": "create_intent",
+        "pod": null,
+        "confirmedHourlyPriceMicroUsd": 690000,
+        "actualHourlyPriceMicroUsd": null,
+        "issue": null,
+        "providerBody": {}
+      }
+    }
+  ],
+  "relationRejections": [
+    {
+      "id": "ready_confirmed_actual_mismatch",
+      "value": {
+        "schemaVersion": 1,
+        "operationId": "00000000-0000-4000-8000-000000000010",
+        "lifecycleRevision": 3,
+        "state": "ready",
+        "pod": { "podId": "imageforge-pod-1", "gpuId": "NVIDIA GeForce RTX 4090", "gpuDisplayName": "NVIDIA GeForce RTX 4090", "hourlyPriceMicroUsd": 700000 },
+        "confirmedHourlyPriceMicroUsd": 690000,
+        "actualHourlyPriceMicroUsd": 700000,
+        "issue": null
+      }
+    },
+    {
+      "id": "provisioning_actual_null",
+      "value": {
+        "schemaVersion": 1,
+        "operationId": "00000000-0000-4000-8000-000000000010",
+        "lifecycleRevision": 2,
+        "state": "provisioning",
+        "pod": { "podId": "imageforge-pod-1", "gpuId": "NVIDIA GeForce RTX 4090", "gpuDisplayName": "NVIDIA GeForce RTX 4090", "hourlyPriceMicroUsd": 690000 },
+        "confirmedHourlyPriceMicroUsd": 690000,
+        "actualHourlyPriceMicroUsd": null,
+        "issue": null
+      }
+    },
+    {
+      "id": "provisioning_pod_price_mismatch",
+      "value": {
+        "schemaVersion": 1,
+        "operationId": "00000000-0000-4000-8000-000000000010",
+        "lifecycleRevision": 2,
+        "state": "provisioning",
+        "pod": { "podId": "imageforge-pod-1", "gpuId": "NVIDIA GeForce RTX 4090", "gpuDisplayName": "NVIDIA GeForce RTX 4090", "hourlyPriceMicroUsd": 700000 },
+        "confirmedHourlyPriceMicroUsd": 690000,
+        "actualHourlyPriceMicroUsd": 690000,
+        "issue": null
+      }
+    },
+    {
+      "id": "changed_attention_equal_prices",
+      "value": {
+        "schemaVersion": 1,
+        "operationId": "00000000-0000-4000-8000-000000000010",
+        "lifecycleRevision": 3,
+        "state": "price_attention",
+        "pod": { "podId": "imageforge-pod-1", "gpuId": "NVIDIA GeForce RTX 4090", "gpuDisplayName": "NVIDIA GeForce RTX 4090", "hourlyPriceMicroUsd": 690000 },
+        "confirmedHourlyPriceMicroUsd": 690000,
+        "actualHourlyPriceMicroUsd": 690000,
+        "issue": { "code": "gpu_actual_price_changed", "retryable": false }
+      }
+    }
+  ],
+  "rawByteRejections": [
+    {
+      "id": "revision_exponent_token",
+      "surface": "input",
+      "utf8": "{\"observationId\":\"00000000-0000-4000-8000-000000000001\",\"receiptId\":\"00000000-0000-4000-8000-000000000002\",\"sessionId\":\"00000000-0000-4000-8000-000000000003\",\"expectedLifecycleRevision\":1e0}"
+    },
+    {
+      "id": "revision_fraction_lexeme",
+      "surface": "input",
+      "utf8": "{\"observationId\":\"00000000-0000-4000-8000-000000000001\",\"receiptId\":\"00000000-0000-4000-8000-000000000002\",\"sessionId\":\"00000000-0000-4000-8000-000000000003\",\"expectedLifecycleRevision\":1.0}"
+    },
+    {
+      "id": "duplicate_revision_key",
+      "surface": "input",
+      "utf8": "{\"observationId\":\"00000000-0000-4000-8000-000000000001\",\"receiptId\":\"00000000-0000-4000-8000-000000000002\",\"sessionId\":\"00000000-0000-4000-8000-000000000003\",\"expectedLifecycleRevision\":0,\"expectedLifecycleRevision\":1}"
+    },
+    {
+      "id": "price_exponent_token",
+      "surface": "result",
+      "utf8": "{\"schemaVersion\":1,\"operationId\":\"00000000-0000-4000-8000-000000000010\",\"lifecycleRevision\":1,\"state\":\"create_intent\",\"pod\":null,\"confirmedHourlyPriceMicroUsd\":6.9e5,\"actualHourlyPriceMicroUsd\":null,\"issue\":null}"
+    },
+    {
+      "id": "revision_negative_zero_token",
+      "surface": "input",
+      "utf8": "{\"observationId\":\"00000000-0000-4000-8000-000000000001\",\"receiptId\":\"00000000-0000-4000-8000-000000000002\",\"sessionId\":\"00000000-0000-4000-8000-000000000003\",\"expectedLifecycleRevision\":-0}"
+    },
+    {
+      "id": "revision_leading_zero_token",
+      "surface": "input",
+      "utf8": "{\"observationId\":\"00000000-0000-4000-8000-000000000001\",\"receiptId\":\"00000000-0000-4000-8000-000000000002\",\"sessionId\":\"00000000-0000-4000-8000-000000000003\",\"expectedLifecycleRevision\":01}"
+    },
+    {
+      "id": "revision_unsafe_raw_token",
+      "surface": "input",
+      "utf8": "{\"observationId\":\"00000000-0000-4000-8000-000000000001\",\"receiptId\":\"00000000-0000-4000-8000-000000000002\",\"sessionId\":\"00000000-0000-4000-8000-000000000003\",\"expectedLifecycleRevision\":9007199254740992}"
+    },
+    {
+      "id": "input_bom",
+      "surface": "input",
+      "utf8": "\ufeff{\"observationId\":\"00000000-0000-4000-8000-000000000001\",\"receiptId\":\"00000000-0000-4000-8000-000000000002\",\"sessionId\":\"00000000-0000-4000-8000-000000000003\",\"expectedLifecycleRevision\":0}"
+    },
+    {
+      "id": "input_trailing_lf",
+      "surface": "input",
+      "utf8": "{\"observationId\":\"00000000-0000-4000-8000-000000000001\",\"receiptId\":\"00000000-0000-4000-8000-000000000002\",\"sessionId\":\"00000000-0000-4000-8000-000000000003\",\"expectedLifecycleRevision\":0}\n"
+    },
+    {
+      "id": "duplicate_confirmed_price_key",
+      "surface": "result",
+      "utf8": "{\"schemaVersion\":1,\"operationId\":\"00000000-0000-4000-8000-000000000010\",\"lifecycleRevision\":1,\"state\":\"create_intent\",\"pod\":null,\"confirmedHourlyPriceMicroUsd\":690000,\"confirmedHourlyPriceMicroUsd\":700000,\"actualHourlyPriceMicroUsd\":null,\"issue\":null}"
+    }
+  ],
+  "authorityVector": {
+    "inputId": "initial_auto_start",
+    "inputJcs": "{\"expectedLifecycleRevision\":0,\"observationId\":\"00000000-0000-4000-8000-000000000001\",\"receiptId\":\"00000000-0000-4000-8000-000000000002\",\"sessionId\":\"00000000-0000-4000-8000-000000000003\"}",
+    "inputSha256": "eaed8df527058ee799ac010cbfc8dd01e7511b8e948be3332613cf495be9190d",
+    "createIntentResultId": "create_intent",
+    "createIntentResultJcs": "{\"actualHourlyPriceMicroUsd\":null,\"confirmedHourlyPriceMicroUsd\":690000,\"issue\":null,\"lifecycleRevision\":1,\"operationId\":\"00000000-0000-4000-8000-000000000010\",\"pod\":null,\"schemaVersion\":1,\"state\":\"create_intent\"}",
+    "createIntentResultSha256": "aef0020b3c1409975a4d9b7055719d4b5ca76688a2c43edc7c7eaa276985c58f",
+    "operationId": "00000000-0000-4000-8000-000000000010",
+    "processEpochId": "00000000-0000-4000-8000-000000000004",
+    "includeEmergencyTier": false,
+    "orderedGpuIds": [
+      "NVIDIA GeForce RTX 4090",
+      "NVIDIA L4"
+    ],
+    "orderedGpuIdsJcs": "[\"NVIDIA GeForce RTX 4090\",\"NVIDIA L4\"]",
+    "orderedGpuIdsSha256": "41f076078e68fd967c1b0c3300eb4eec24dab56fe975b5480723adc1e349392a",
+    "requestBody": {
+      "name": "imageforge-00000000-0000-4000-8000-000000000010",
+      "templateId": "imageforge-template-v1",
+      "imageName": "ghcr.io/imageforge/worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "networkVolumeId": "imageforge-volume-v1",
+      "volumeMountPath": "/workspace",
+      "ports": ["8000/http"],
+      "computeType": "GPU",
+      "cloudType": "SECURE",
+      "gpuTypeIds": [
+        "NVIDIA GeForce RTX 4090",
+        "NVIDIA L4"
+      ],
+      "gpuTypePriority": "custom",
+      "gpuCount": 1,
+      "interruptible": false,
+      "dataCenterIds": ["EU-RO-1"],
+      "allowedCudaVersions": ["13.0"],
+      "minRAMPerGPU": 16
+    },
+    "requestBodyJcs": "{\"allowedCudaVersions\":[\"13.0\"],\"cloudType\":\"SECURE\",\"computeType\":\"GPU\",\"dataCenterIds\":[\"EU-RO-1\"],\"gpuCount\":1,\"gpuTypeIds\":[\"NVIDIA GeForce RTX 4090\",\"NVIDIA L4\"],\"gpuTypePriority\":\"custom\",\"imageName\":\"ghcr.io/imageforge/worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"interruptible\":false,\"minRAMPerGPU\":16,\"name\":\"imageforge-00000000-0000-4000-8000-000000000010\",\"networkVolumeId\":\"imageforge-volume-v1\",\"ports\":[\"8000/http\"],\"templateId\":\"imageforge-template-v1\",\"volumeMountPath\":\"/workspace\"}",
+    "requestBodySha256": "9f1e711effb8e33e6eaae252dafae92eaadef5d4f356d6b4ee07f867615b9e81",
+    "privateAuthority": {
+      "kind": "normal_auto_start",
+      "operationId": "00000000-0000-4000-8000-000000000010",
+      "observationId": "00000000-0000-4000-8000-000000000020",
+      "receiptId": "00000000-0000-4000-8000-000000000021",
+      "orderedGpuIdsSha256": "41f076078e68fd967c1b0c3300eb4eec24dab56fe975b5480723adc1e349392a",
+      "requestBodySha256": "9f1e711effb8e33e6eaae252dafae92eaadef5d4f356d6b4ee07f867615b9e81"
+    },
+    "privateAuthorityJcs": "{\"kind\":\"normal_auto_start\",\"observationId\":\"00000000-0000-4000-8000-000000000020\",\"operationId\":\"00000000-0000-4000-8000-000000000010\",\"orderedGpuIdsSha256\":\"41f076078e68fd967c1b0c3300eb4eec24dab56fe975b5480723adc1e349392a\",\"receiptId\":\"00000000-0000-4000-8000-000000000021\",\"requestBodySha256\":\"9f1e711effb8e33e6eaae252dafae92eaadef5d4f356d6b4ee07f867615b9e81\"}",
+    "privateAuthoritySha256": "edb62eb92e2de9232cc7ce30580f93807f89e7c95b71f2a1b4fa7e6b94fade1a"
+  },
+  "semanticFixturePatchAlgorithm": "IMAGEFORGE_DEEP_OVERRIDE_V1",
+  "semanticFixtureBase": {
+    "input": {
+      "observationId": "00000000-0000-4000-8000-000000000001",
+      "receiptId": "00000000-0000-4000-8000-000000000002",
+      "sessionId": "00000000-0000-4000-8000-000000000003",
+      "expectedLifecycleRevision": 0
+    },
+    "process": {
+      "processEpochId": "00000000-0000-4000-8000-000000000004",
+      "windowLabel": "main",
+      "windowVisible": true,
+      "windowFocused": true,
+      "windowMinimized": false,
+      "nativeDialog": { "kind": "auto", "outcome": "accepted", "affirmativeLabel": "Start Auto GPU" },
+      "privateAuthority": { "kind": "auto", "ageMs": 0, "consumed": false },
+      "nowMonotonicMs": 59999
+    },
+    "receipt": {
+      "observationId": "00000000-0000-4000-8000-000000000001",
+      "receiptId": "00000000-0000-4000-8000-000000000002",
+      "processEpochId": "00000000-0000-4000-8000-000000000004",
+      "receivedMonotonicMs": 0,
+      "validForMs": 60000,
+      "includeEmergencyTier": false,
+      "catalogSha256": "6c436957a52aa7cfe93e46b5436b561a3a8742cfa3298d1ef93aba172dfe6ebe"
+    },
+    "profile": {
+      "templateId": "imageforge-template-v1",
+      "imageName": "ghcr.io/imageforge/worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "networkVolumeId": "imageforge-volume-v1",
+      "volumeMountPath": "/workspace",
+      "lifecycleRevision": 0,
+      "existingManagedPods": []
+    },
+    "ranking": {
+      "fixtureOnly": true,
+      "benchmarkVectorPath": "contracts/gpu-benchmark-v2.vectors.json",
+      "benchmarkVectorSha256": "f6d2aa31fbd6c6dc455de20ca823c2d7996873e738cbd8bbf049336631bf9c0b",
+      "benchmarkQuorumAvailable": true,
+      "profiles": [
+        { "gpuId": "NVIDIA GeForce RTX 4090", "benchmarkState": "measured", "successfulSampleCount": 30, "medianDurationUs": 1014500, "p95DurationUs": 1028000 },
+        { "gpuId": "NVIDIA L4", "benchmarkState": "measured", "successfulSampleCount": 30, "medianDurationUs": 1014500, "p95DurationUs": 1028000 }
+      ],
+      "winnerGpuId": "NVIDIA GeForce RTX 4090",
+      "orderedGpuIds": ["NVIDIA GeForce RTX 4090", "NVIDIA L4"],
+      "confirmedHourlyPriceMicroUsd": 690000,
+      "benchmarkEvidenceSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    },
+    "policy": {
+      "includeEmergencyTier": false,
+      "ordinaryPolicyOrder": ["rtx_4090", "rtx_pro_4500_blackwell", "rtx_5090", "rtx_pro_4000_blackwell", "l4", "rtx_a4500", "rtx_4000_ada"],
+      "emergencyPolicyKey": "rtx_2000_ada"
+    },
+    "finalObservation": {
+      "role": "expected_derived_output",
+      "observationId": "00000000-0000-4000-8000-000000000020",
+      "receiptId": "00000000-0000-4000-8000-000000000021",
+      "processEpochId": "00000000-0000-4000-8000-000000000004",
+      "state": "ready",
+      "includeEmergencyTier": false,
+      "catalogProjectionJcs": "{\"eu_ro_1_volume_supported\":true,\"include_emergency_tier\":false,\"offers\":[{\"availability\":\"high\",\"display_name\":\"RTX 4090\",\"emergency\":false,\"gpu_id\":\"NVIDIA GeForce RTX 4090\",\"hourly_price_micro_usd\":690000,\"max_count\":1,\"memory_gb\":24,\"policy_key\":\"rtx_4090\",\"secure\":true},{\"availability\":\"high\",\"display_name\":\"L4\",\"emergency\":false,\"gpu_id\":\"NVIDIA L4\",\"hourly_price_micro_usd\":710000,\"max_count\":1,\"memory_gb\":24,\"policy_key\":\"l4\",\"secure\":true}],\"schema_version\":1}",
+      "catalogSha256": "6c436957a52aa7cfe93e46b5436b561a3a8742cfa3298d1ef93aba172dfe6ebe",
+      "winnerGpuId": "NVIDIA GeForce RTX 4090",
+      "orderedGpuIds": ["NVIDIA GeForce RTX 4090", "NVIDIA L4"],
+      "winnerHourlyPriceMicroUsd": 690000
+    },
+    "providerScript": {
+      "datacentersGet": { "outcome": "http", "status": 200, "bodyUtf8": "{\"dataCenters\":[{\"id\":\"EU-RO-1\",\"networkVolumeTypes\":[\"NETWORK_VOLUME\"]}]}" },
+      "gpusGet": { "outcome": "http", "status": 200, "bodyUtf8": "{\"gpus\":[{\"dataCenters\":[{\"availability\":\"HIGH\",\"id\":\"EU-RO-1\"}],\"id\":\"NVIDIA GeForce RTX 4090\",\"manufacturer\":\"NVIDIA\",\"maxCount\":{\"secure\":1},\"memory\":24,\"name\":\"NVIDIA GeForce RTX 4090\",\"price\":{\"secure\":0.69},\"secure\":true},{\"dataCenters\":[{\"availability\":\"HIGH\",\"id\":\"EU-RO-1\"}],\"id\":\"NVIDIA L4\",\"manufacturer\":\"NVIDIA\",\"maxCount\":{\"secure\":1},\"memory\":24,\"name\":\"NVIDIA L4\",\"price\":{\"secure\":0.71},\"secure\":true}]}" },
+      "profilePodsGet": { "outcome": "http", "status": 200, "bodyUtf8": "{\"pods\":[]}" },
+      "createPost": { "outcome": "http", "status": 201, "contentType": "application/json", "bodyUtf8": "{\"adjustedCostPerHr\":0.69,\"attemptMarker\":\"00000000-0000-4000-8000-000000000010\",\"costPerHr\":\"0.69\",\"createdAt\":\"2026-08-04T00:00:00.000Z\",\"dataCenterId\":\"EU-RO-1\",\"desiredStatus\":\"RUNNING\",\"gpu\":{\"count\":1,\"displayName\":\"NVIDIA GeForce RTX 4090\",\"id\":\"NVIDIA GeForce RTX 4090\"},\"id\":\"imageforge-pod-1\",\"imageName\":\"ghcr.io/imageforge/worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"interruptible\":false,\"machine\":{\"dataCenterId\":\"EU-RO-1\",\"gpuTypeId\":\"NVIDIA GeForce RTX 4090\",\"secureCloud\":true},\"name\":\"imageforge-00000000-0000-4000-8000-000000000010\",\"networkVolume\":{\"dataCenterId\":\"EU-RO-1\",\"id\":\"imageforge-volume-v1\"},\"ports\":[\"8000/http\"],\"templateId\":\"imageforge-template-v1\",\"volumeMountPath\":\"/workspace\"}" }
+    },
+    "journal": null,
+    "expectedEffects": {
+      "finalInventoryStored": true,
+      "finalInventoryEventEmitted": true,
+      "finalInventoryEventBeforeProviderPost": true,
+      "promotedReceiptId": "00000000-0000-4000-8000-000000000021"
+    }
+  },
+  "semanticRejections": [
+    { "id": "ready_price_mismatch", "fixturePatch": { "journal": { "result": "ready_confirmed_actual_mismatch" }, "providerScript": null, "finalObservation": null, "expectedEffects": { "finalInventoryStored": false, "finalInventoryEventEmitted": false, "finalInventoryEventBeforeProviderPost": false, "promotedReceiptId": null } }, "expectedCode": "gpu_start_provider_response_invalid", "inventoryGetCount": 0, "profilePodsGetCount": 0, "providerPostCount": 0 },
+    { "id": "skipped_revision", "fixturePatch": { "input": { "expectedLifecycleRevision": 2 }, "profile": { "lifecycleRevision": 0 }, "providerScript": null, "finalObservation": null, "expectedEffects": { "finalInventoryStored": false, "finalInventoryEventEmitted": false, "finalInventoryEventBeforeProviderPost": false, "promotedReceiptId": null } }, "expectedCode": "gpu_start_revision_conflict", "inventoryGetCount": 0, "profilePodsGetCount": 0, "providerPostCount": 0 },
+    { "id": "revision_exhausted", "fixturePatch": { "input": { "expectedLifecycleRevision": 9007199254740991 }, "profile": { "lifecycleRevision": 9007199254740991 }, "providerScript": null, "finalObservation": null, "expectedEffects": { "finalInventoryStored": false, "finalInventoryEventEmitted": false, "finalInventoryEventBeforeProviderPost": false, "promotedReceiptId": null } }, "expectedCode": "gpu_start_revision_exhausted", "inventoryGetCount": 0, "profilePodsGetCount": 0, "providerPostCount": 0 },
+    { "id": "wrong_process_receipt", "fixturePatch": { "receipt": { "processEpochId": "00000000-0000-4000-8000-000000000099" }, "providerScript": null, "finalObservation": null, "expectedEffects": { "finalInventoryStored": false, "finalInventoryEventEmitted": false, "finalInventoryEventBeforeProviderPost": false, "promotedReceiptId": null } }, "expectedCode": "gpu_start_inventory_receipt_invalid", "inventoryGetCount": 0, "profilePodsGetCount": 0, "providerPostCount": 0 },
+    { "id": "expired_receipt_60000ms", "fixturePatch": { "process": { "nowMonotonicMs": 60000 }, "providerScript": null, "finalObservation": null, "expectedEffects": { "finalInventoryStored": false, "finalInventoryEventEmitted": false, "finalInventoryEventBeforeProviderPost": false, "promotedReceiptId": null } }, "expectedCode": "gpu_start_inventory_stale", "inventoryGetCount": 0, "profilePodsGetCount": 0, "providerPostCount": 0 },
+    { "id": "datacenters_get_unavailable", "fixturePatch": { "providerScript": { "datacentersGet": { "outcome": "transport_error", "code": "dns" } }, "finalObservation": { "state": "fallback", "receiptId": null, "catalogProjectionJcs": null, "catalogSha256": null, "winnerGpuId": null, "orderedGpuIds": [], "winnerHourlyPriceMicroUsd": null, "issue": { "code": "gpu_inventory_datacenters_unavailable", "retryable": true } } }, "expectedCode": "gpu_start_datacenters_unavailable", "providerPostCount": 0 },
+    { "id": "gpus_get_unavailable", "fixturePatch": { "providerScript": { "gpusGet": { "outcome": "transport_error", "code": "tls" } }, "finalObservation": { "state": "fallback", "receiptId": null, "catalogProjectionJcs": null, "catalogSha256": null, "winnerGpuId": null, "orderedGpuIds": [], "winnerHourlyPriceMicroUsd": null, "issue": { "code": "gpu_inventory_gpus_unavailable", "retryable": true } } }, "expectedCode": "gpu_start_gpus_unavailable", "providerPostCount": 0 },
+    { "id": "inventory_response_invalid", "fixturePatch": { "providerScript": { "gpusGet": { "outcome": "http", "status": 200, "bodyUtf8": "{\"gpus\":{}}" } }, "finalObservation": { "state": "error", "receiptId": null, "catalogProjectionJcs": null, "catalogSha256": null, "winnerGpuId": null, "orderedGpuIds": [], "winnerHourlyPriceMicroUsd": null, "issue": { "code": "gpu_inventory_response_invalid", "retryable": false } } }, "expectedCode": "gpu_start_inventory_response_invalid", "providerPostCount": 0 },
+    { "id": "inventory_region_unsupported", "fixturePatch": { "providerScript": { "datacentersGet": { "outcome": "http", "status": 200, "bodyUtf8": "{\"dataCenters\":[]}" } }, "finalObservation": { "state": "error", "receiptId": null, "catalogProjectionJcs": null, "catalogSha256": null, "winnerGpuId": null, "orderedGpuIds": [], "winnerHourlyPriceMicroUsd": null, "issue": { "code": "gpu_inventory_region_unsupported", "retryable": false } } }, "expectedCode": "gpu_start_region_unsupported", "providerPostCount": 0 },
+    { "id": "no_eligible_live_gpu", "fixturePatch": { "providerScript": { "gpusGet": { "outcome": "http", "status": 200, "bodyUtf8": "{\"gpus\":[]}" } }, "finalObservation": { "state": "empty", "catalogProjectionJcs": "{\"eu_ro_1_volume_supported\":true,\"include_emergency_tier\":false,\"offers\":[],\"schema_version\":1}", "catalogSha256": "93a065738e7003795927bfc4ab4ef475aecee020311cd35b7840e1ddb98280c2", "winnerGpuId": null, "orderedGpuIds": [], "winnerHourlyPriceMicroUsd": null } }, "expectedCode": "gpu_start_no_eligible_gpu", "providerPostCount": 0 },
+    { "id": "provider_auth_failed", "fixturePatch": { "providerScript": { "profilePodsGet": { "outcome": "http", "status": 401, "bodyUtf8": "{\"error\":\"unauthorized\"}" } } }, "expectedCode": "gpu_start_provider_auth_failed", "providerPostCount": 0 },
+    { "id": "provider_timeout_before_post", "fixturePatch": { "providerScript": { "profilePodsGet": { "outcome": "timeout" } } }, "expectedCode": "gpu_start_provider_timeout", "providerPostCount": 0 },
+    { "id": "provider_transport_failed_before_post", "fixturePatch": { "providerScript": { "profilePodsGet": { "outcome": "transport_error", "code": "connection_reset" } } }, "expectedCode": "gpu_start_provider_unavailable", "providerPostCount": 0 },
+    { "id": "provider_rate_limited_before_post", "fixturePatch": { "providerScript": { "profilePodsGet": { "outcome": "http", "status": 429, "bodyUtf8": "{\"error\":\"rate_limited\"}" } } }, "expectedCode": "gpu_start_provider_rate_limited", "providerPostCount": 0 },
+    { "id": "provider_redirect_before_post", "fixturePatch": { "providerScript": { "profilePodsGet": { "outcome": "http", "status": 302, "bodyUtf8": "" } } }, "expectedCode": "gpu_start_provider_response_invalid", "providerPostCount": 0 },
+    { "id": "provider_other_4xx_before_post", "fixturePatch": { "providerScript": { "profilePodsGet": { "outcome": "http", "status": 422, "bodyUtf8": "{\"error\":\"invalid\"}" } } }, "expectedCode": "gpu_start_provider_response_invalid", "providerPostCount": 0 },
+    { "id": "profile_pagination_ambiguous", "fixturePatch": { "providerScript": { "profilePodsGet": { "outcome": "http", "status": 200, "bodyUtf8": "{\"nextCursor\":\"opaque\",\"pods\":[]}" } } }, "expectedCode": "gpu_start_provider_response_invalid", "providerPostCount": 0 },
+    { "id": "emergency_policy_mismatch", "fixturePatch": { "policy": { "includeEmergencyTier": true }, "finalObservation": { "includeEmergencyTier": true, "catalogProjectionJcs": "{\"eu_ro_1_volume_supported\":true,\"include_emergency_tier\":true,\"offers\":[{\"availability\":\"high\",\"display_name\":\"RTX 4090\",\"emergency\":false,\"gpu_id\":\"NVIDIA GeForce RTX 4090\",\"hourly_price_micro_usd\":690000,\"max_count\":1,\"memory_gb\":24,\"policy_key\":\"rtx_4090\",\"secure\":true},{\"availability\":\"high\",\"display_name\":\"L4\",\"emergency\":false,\"gpu_id\":\"NVIDIA L4\",\"hourly_price_micro_usd\":710000,\"max_count\":1,\"memory_gb\":24,\"policy_key\":\"l4\",\"secure\":true}],\"schema_version\":1}", "catalogSha256": "42d1ca665190fa3fd4d3ea9bee29861c9dd80a94c716597556f90fc2f7bf6b21" } }, "expectedCode": "gpu_start_target_changed", "providerPostCount": 0 },
+    { "id": "winner_changed", "fixturePatch": { "providerScript": { "gpusGet": { "outcome": "http", "status": 200, "bodyUtf8": "{\"gpus\":[{\"dataCenters\":[{\"availability\":\"HIGH\",\"id\":\"EU-RO-1\"}],\"id\":\"NVIDIA GeForce RTX 4090\",\"manufacturer\":\"NVIDIA\",\"maxCount\":{\"secure\":1},\"memory\":24,\"name\":\"NVIDIA GeForce RTX 4090\",\"price\":{\"secure\":0.69},\"secure\":true},{\"dataCenters\":[{\"availability\":\"HIGH\",\"id\":\"EU-RO-1\"}],\"id\":\"NVIDIA L4\",\"manufacturer\":\"NVIDIA\",\"maxCount\":{\"secure\":1},\"memory\":24,\"name\":\"NVIDIA L4\",\"price\":{\"secure\":0.60},\"secure\":true}]}" } }, "finalObservation": { "catalogProjectionJcs": "{\"eu_ro_1_volume_supported\":true,\"include_emergency_tier\":false,\"offers\":[{\"availability\":\"high\",\"display_name\":\"RTX 4090\",\"emergency\":false,\"gpu_id\":\"NVIDIA GeForce RTX 4090\",\"hourly_price_micro_usd\":690000,\"max_count\":1,\"memory_gb\":24,\"policy_key\":\"rtx_4090\",\"secure\":true},{\"availability\":\"high\",\"display_name\":\"L4\",\"emergency\":false,\"gpu_id\":\"NVIDIA L4\",\"hourly_price_micro_usd\":600000,\"max_count\":1,\"memory_gb\":24,\"policy_key\":\"l4\",\"secure\":true}],\"schema_version\":1}", "catalogSha256": "f46f9c6ff8f3dce9a149aee1b8fb32c5f2595f37f460b76543405da0e464e591", "winnerGpuId": "NVIDIA L4", "orderedGpuIds": ["NVIDIA L4", "NVIDIA GeForce RTX 4090"], "winnerHourlyPriceMicroUsd": 600000 } }, "expectedCode": "gpu_start_target_changed", "providerPostCount": 0 },
+    { "id": "ordered_gpu_ids_changed", "fixturePatch": { "providerScript": { "gpusGet": { "outcome": "http", "status": 200, "bodyUtf8": "{\"gpus\":[{\"dataCenters\":[{\"availability\":\"HIGH\",\"id\":\"EU-RO-1\"}],\"id\":\"NVIDIA GeForce RTX 4090\",\"manufacturer\":\"NVIDIA\",\"maxCount\":{\"secure\":1},\"memory\":24,\"name\":\"NVIDIA GeForce RTX 4090\",\"price\":{\"secure\":0.69},\"secure\":true}]}" } }, "finalObservation": { "catalogProjectionJcs": "{\"eu_ro_1_volume_supported\":true,\"include_emergency_tier\":false,\"offers\":[{\"availability\":\"high\",\"display_name\":\"RTX 4090\",\"emergency\":false,\"gpu_id\":\"NVIDIA GeForce RTX 4090\",\"hourly_price_micro_usd\":690000,\"max_count\":1,\"memory_gb\":24,\"policy_key\":\"rtx_4090\",\"secure\":true}],\"schema_version\":1}", "catalogSha256": "fe4581a28dc26ffeeb8a2264927c5b11a5c868b23dd8b43dc9fca45c258e1e41", "orderedGpuIds": ["NVIDIA GeForce RTX 4090"] } }, "expectedCode": "gpu_start_target_changed", "providerPostCount": 0 },
+    { "id": "price_changed", "fixturePatch": { "providerScript": { "gpusGet": { "outcome": "http", "status": 200, "bodyUtf8": "{\"gpus\":[{\"dataCenters\":[{\"availability\":\"HIGH\",\"id\":\"EU-RO-1\"}],\"id\":\"NVIDIA GeForce RTX 4090\",\"manufacturer\":\"NVIDIA\",\"maxCount\":{\"secure\":1},\"memory\":24,\"name\":\"NVIDIA GeForce RTX 4090\",\"price\":{\"secure\":0.690001},\"secure\":true},{\"dataCenters\":[{\"availability\":\"HIGH\",\"id\":\"EU-RO-1\"}],\"id\":\"NVIDIA L4\",\"manufacturer\":\"NVIDIA\",\"maxCount\":{\"secure\":1},\"memory\":24,\"name\":\"NVIDIA L4\",\"price\":{\"secure\":0.71},\"secure\":true}]}" } }, "finalObservation": { "catalogProjectionJcs": "{\"eu_ro_1_volume_supported\":true,\"include_emergency_tier\":false,\"offers\":[{\"availability\":\"high\",\"display_name\":\"RTX 4090\",\"emergency\":false,\"gpu_id\":\"NVIDIA GeForce RTX 4090\",\"hourly_price_micro_usd\":690001,\"max_count\":1,\"memory_gb\":24,\"policy_key\":\"rtx_4090\",\"secure\":true},{\"availability\":\"high\",\"display_name\":\"L4\",\"emergency\":false,\"gpu_id\":\"NVIDIA L4\",\"hourly_price_micro_usd\":710000,\"max_count\":1,\"memory_gb\":24,\"policy_key\":\"l4\",\"secure\":true}],\"schema_version\":1}", "catalogSha256": "ac3a0c27d6f104212b5098f0706e597942d822bcca0f93d0a87452471d2430e9", "winnerHourlyPriceMicroUsd": 690001 } }, "expectedCode": "gpu_start_price_changed", "providerPostCount": 0 },
+    { "id": "existing_managed_pod", "fixturePatch": { "providerScript": { "profilePodsGet": { "outcome": "http", "status": 200, "bodyUtf8": "{\"pods\":[{\"adjustedCostPerHr\":0.69,\"attemptMarker\":\"existing-attempt\",\"costPerHr\":\"0.69\",\"createdAt\":\"2026-08-03T00:00:00.000Z\",\"desiredStatus\":\"RUNNING\",\"gpu\":{\"count\":1,\"displayName\":\"NVIDIA GeForce RTX 4090\",\"id\":\"NVIDIA GeForce RTX 4090\"},\"id\":\"existing-pod-1\",\"imageName\":\"ghcr.io/imageforge/worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"interruptible\":false,\"machine\":{\"dataCenterId\":\"EU-RO-1\",\"gpuTypeId\":\"NVIDIA GeForce RTX 4090\",\"secureCloud\":true},\"name\":\"imageforge-existing-attempt\",\"networkVolume\":{\"dataCenterId\":\"EU-RO-1\",\"id\":\"imageforge-volume-v1\"},\"ports\":[\"8000/http\"],\"templateId\":\"imageforge-template-v1\",\"volumeMountPath\":\"/workspace\"}]}" } } }, "expectedCode": "gpu_start_existing_pod", "providerPostCount": 0 },
+    { "id": "profile_lock_changed", "fixturePatch": { "profile": { "templateId": "changed-template" }, "providerScript": null, "finalObservation": null, "expectedEffects": { "finalInventoryStored": false, "finalInventoryEventEmitted": false, "finalInventoryEventBeforeProviderPost": false, "promotedReceiptId": null } }, "expectedCode": "gpu_start_profile_locked", "inventoryGetCount": 0, "profilePodsGetCount": 0, "providerPostCount": 0 },
+    { "id": "invalid_201_body_is_uncertain", "fixturePatch": { "providerScript": { "createPost": { "outcome": "http", "status": 201, "bodyUtf8": "{\"id\":42}" } } }, "expectedResultState": "create_uncertain", "expectedIssueCode": "gpu_start_create_uncertain", "providerPostCount": 1 },
+    { "id": "create_response_lost", "fixturePatch": { "providerScript": { "createPost": { "outcome": "transport_error", "code": "response_lost_after_write" } } }, "expectedResultState": "create_uncertain", "expectedIssueCode": "gpu_start_create_uncertain", "providerPostCount": 1 },
+    { "id": "exact_replay_after_intent", "fixturePatch": { "journal": { "lifecycleRevision": 1, "state": "create_intent", "inputSha256": "eaed8df527058ee799ac010cbfc8dd01e7511b8e948be3332613cf495be9190d" }, "providerScript": null, "finalObservation": null, "expectedEffects": { "finalInventoryStored": false, "finalInventoryEventEmitted": false, "finalInventoryEventBeforeProviderPost": false, "promotedReceiptId": null } }, "expectedReplay": "byte_identical_result", "inventoryGetCount": 0, "profilePodsGetCount": 0, "providerPostCount": 0 },
+    { "id": "request_body_hash_mismatch", "fixturePatch": { "journal": { "requestBodySha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }, "providerScript": null, "finalObservation": null, "expectedEffects": { "finalInventoryStored": false, "finalInventoryEventEmitted": false, "finalInventoryEventBeforeProviderPost": false, "promotedReceiptId": null } }, "expectedCode": "gpu_start_provider_response_invalid", "inventoryGetCount": 0, "profilePodsGetCount": 0, "providerPostCount": 0 },
+    { "id": "wide_integer_overflow", "fixturePatch": { "ranking": { "confirmedHourlyPriceMicroUsd": 9007199254740991 }, "journal": { "derivedWideArithmetic": "340282366920938463463374607431768211456" }, "providerScript": null, "finalObservation": null, "expectedEffects": { "finalInventoryStored": false, "finalInventoryEventEmitted": false, "finalInventoryEventBeforeProviderPost": false, "promotedReceiptId": null } }, "expectedCode": "gpu_start_provider_response_invalid", "inventoryGetCount": 0, "profilePodsGetCount": 0, "providerPostCount": 0 },
+    { "id": "native_dialog_cancelled", "fixturePatch": { "process": { "nativeDialog": { "kind": "auto", "outcome": "cancelled", "affirmativeLabel": "Start Auto GPU" }, "privateAuthority": null }, "providerScript": null, "finalObservation": null, "expectedEffects": { "finalInventoryStored": false, "finalInventoryEventEmitted": false, "finalInventoryEventBeforeProviderPost": false, "promotedReceiptId": null } }, "expectedCode": "gpu_start_foreground_required", "inventoryGetCount": 0, "profilePodsGetCount": 0, "providerPostCount": 0, "journalReadCount": 0, "journalWriteCount": 0 },
+    { "id": "native_dialog_closed", "fixturePatch": { "process": { "nativeDialog": { "kind": "auto", "outcome": "closed", "affirmativeLabel": "Start Auto GPU" }, "privateAuthority": null }, "providerScript": null, "finalObservation": null, "expectedEffects": { "finalInventoryStored": false, "finalInventoryEventEmitted": false, "finalInventoryEventBeforeProviderPost": false, "promotedReceiptId": null } }, "expectedCode": "gpu_start_foreground_required", "inventoryGetCount": 0, "profilePodsGetCount": 0, "providerPostCount": 0, "journalReadCount": 0, "journalWriteCount": 0 },
+    { "id": "foreground_wrong_window", "fixturePatch": { "process": { "windowLabel": "qa-window", "nativeDialog": null, "privateAuthority": null }, "providerScript": null, "finalObservation": null, "expectedEffects": { "finalInventoryStored": false, "finalInventoryEventEmitted": false, "finalInventoryEventBeforeProviderPost": false, "promotedReceiptId": null } }, "expectedCode": "gpu_start_foreground_required", "inventoryGetCount": 0, "profilePodsGetCount": 0, "providerPostCount": 0, "journalReadCount": 0, "journalWriteCount": 0 },
+    { "id": "foreground_background_window", "fixturePatch": { "process": { "windowFocused": false, "nativeDialog": null, "privateAuthority": null }, "providerScript": null, "finalObservation": null, "expectedEffects": { "finalInventoryStored": false, "finalInventoryEventEmitted": false, "finalInventoryEventBeforeProviderPost": false, "promotedReceiptId": null } }, "expectedCode": "gpu_start_foreground_required", "inventoryGetCount": 0, "profilePodsGetCount": 0, "providerPostCount": 0, "journalReadCount": 0, "journalWriteCount": 0 },
+    { "id": "foreground_hidden_window", "fixturePatch": { "process": { "windowVisible": false, "nativeDialog": null, "privateAuthority": null }, "providerScript": null, "finalObservation": null, "expectedEffects": { "finalInventoryStored": false, "finalInventoryEventEmitted": false, "finalInventoryEventBeforeProviderPost": false, "promotedReceiptId": null } }, "expectedCode": "gpu_start_foreground_required", "inventoryGetCount": 0, "profilePodsGetCount": 0, "providerPostCount": 0, "journalReadCount": 0, "journalWriteCount": 0 },
+    { "id": "foreground_minimized_window", "fixturePatch": { "process": { "windowMinimized": true, "nativeDialog": null, "privateAuthority": null }, "providerScript": null, "finalObservation": null, "expectedEffects": { "finalInventoryStored": false, "finalInventoryEventEmitted": false, "finalInventoryEventBeforeProviderPost": false, "promotedReceiptId": null } }, "expectedCode": "gpu_start_foreground_required", "inventoryGetCount": 0, "profilePodsGetCount": 0, "providerPostCount": 0, "journalReadCount": 0, "journalWriteCount": 0 },
+    { "id": "private_authority_replayed", "fixturePatch": { "process": { "privateAuthority": { "kind": "auto", "ageMs": 0, "consumed": true } }, "providerScript": null, "finalObservation": null, "expectedEffects": { "finalInventoryStored": false, "finalInventoryEventEmitted": false, "finalInventoryEventBeforeProviderPost": false, "promotedReceiptId": null } }, "expectedCode": "gpu_start_foreground_required", "inventoryGetCount": 0, "profilePodsGetCount": 0, "providerPostCount": 0, "journalReadCount": 0, "journalWriteCount": 0 },
+    { "id": "private_authority_expired", "fixturePatch": { "process": { "privateAuthority": { "kind": "auto", "ageMs": 5000, "consumed": false } }, "providerScript": null, "finalObservation": null, "expectedEffects": { "finalInventoryStored": false, "finalInventoryEventEmitted": false, "finalInventoryEventBeforeProviderPost": false, "promotedReceiptId": null } }, "expectedCode": "gpu_start_foreground_required", "inventoryGetCount": 0, "profilePodsGetCount": 0, "providerPostCount": 0, "journalReadCount": 0, "journalWriteCount": 0 }
+  ],
+  "capabilityBoundary": {
+    "productionCapabilityPath": "src-tauri/capabilities/default.json",
+    "productionCapabilityIdentifier": "main-capability",
+    "productionWindowLabels": ["main"],
+    "productionPluginPermissions": [
+      "notification:allow-is-permission-granted",
+      "notification:allow-request-permission",
+      "core:window:allow-is-minimized",
+      "core:window:allow-minimize",
+      "core:window:allow-unminimize",
+      "core:window:allow-show",
+      "core:window:allow-set-focus",
+      "core:window:allow-set-size",
+      "core:window:allow-unmaximize",
+      "core:window:allow-is-maximized",
+      "core:window:allow-is-fullscreen",
+      "core:window:allow-inner-size",
+      "core:window:allow-outer-size",
+      "core:window:allow-scale-factor"
+    ],
+    "task014MainWindowCommands": [
+      "gpu_inventory_load",
+      "gpu_inventory_begin_refresh",
+      "gpu_start_load",
+      "gpu_start_auto",
+      "gpu_start_selected",
+      "gpu_start_confirm_actual_price",
+      "gpu_pod_observe",
+      "gpu_normal_stop_load",
+      "gpu_normal_stop",
+      "gpu_switch_load",
+      "gpu_switch_authorize_foreground",
+      "gpu_switch_begin",
+      "gpu_switch_acquire",
+      "gpu_switch_release",
+      "gpu_switch_sync_worker",
+      "gpu_switch_finalize",
+      "gpu_switch_confirm_target",
+      "gpu_switch_delete_old",
+      "gpu_switch_prepare_attempt",
+      "gpu_switch_confirm_attempt",
+      "gpu_switch_create_replacement",
+      "gpu_switch_confirm_actual_price",
+      "gpu_switch_delete_replacement",
+      "gpu_switch_reconcile_provider",
+      "gpu_switch_verify_replacement",
+      "gpu_switch_complete",
+      "gpu_switch_cancel"
+    ],
+    "qaCapabilityPath": "src-tauri/capabilities/qa-gpu-selector-perf-v1.json",
+    "qaCapabilityIdentifier": "qa-gpu-selector-perf-v1",
+    "qaOnlyPermissions": [
+      "gpu-selector-perf:allow-arm",
+      "gpu-selector-perf:allow-commit"
+    ],
+    "forbiddenRendererCommands": [
+      "runpod_inventory_http",
+      "runpod_list_pods_http",
+      "runpod_create_pod_http",
+      "runpod_get_pod_http",
+      "runpod_terminate_pod_http"
+    ]
+  }
+}

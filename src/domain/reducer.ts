@@ -1,6 +1,7 @@
 import { parsePromptText, SAMPLE_PROMPTS } from './prompts';
 import { MAX_BATCH_REFERENCES } from './references';
 import { DEFAULT_ASPECT_RATIO } from './aspectRatio';
+import { createInitialQueueUiState, queueRunIsActive } from './queue';
 import { DEFAULT_STUDIO_PROFILE, emptyCredentialMetadata } from '../adapters/imageForgeAdapter';
 import type {
   AppAction,
@@ -86,6 +87,7 @@ function emptyDraft(): DraftState {
     destination: null,
     references: [],
     aspectRatio: DEFAULT_ASPECT_RATIO,
+    queueReplacementId: null,
   };
 }
 
@@ -115,6 +117,7 @@ function emptyStudio(): StudioSyncState {
       retryable: false,
       blockedByBatch: null,
     },
+    gpuSwitch: null,
   };
 }
 
@@ -139,6 +142,7 @@ export function createInitialState(): AppState {
     refreshedAt: null,
     localSyncIssue: null,
     studio: emptyStudio(),
+    queue: createInitialQueueUiState(),
   };
 }
 
@@ -261,6 +265,7 @@ export function createDemoState(): AppState {
       destination: defaultDestinationForPlatform(),
       references: [],
       aspectRatio: batch.aspectRatio,
+      queueReplacementId: null,
     },
     settings: { ...DEFAULT_SETTINGS, userName: 'Lakshman' },
     setup: {
@@ -349,6 +354,7 @@ export function canStartBatch(state: AppState): boolean {
     state.draft.prompts.length > 0 &&
     state.draft.destination !== null &&
     state.studio.stop.phase !== 'finalizing' &&
+    !queueRunIsActive(state.queue.document) &&
     !hasDraftErrors(state)
   );
 }
@@ -628,6 +634,145 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case 'SET_ASPECT_RATIO':
       if (state.batch && ['running', 'paused', 'validating', 'locked'].includes(state.batch.phase)) return state;
       return { ...state, draft: { ...state.draft, aspectRatio: action.aspectRatio } };
+    case 'QUEUE_LOADED':
+    case 'QUEUE_COMMITTED':
+      return {
+        ...state,
+        queue: {
+          ...state.queue,
+          ...action.snapshot,
+          loadState: 'ready',
+        },
+      };
+    case 'QUEUE_LOAD_FAILED':
+      return {
+        ...state,
+        queue: {
+          ...state.queue,
+          loadState: 'error',
+          issues: [{ code: action.code, queueItemId: null, retryable: false }],
+        },
+        ...toast(state, 'error', 'Local queue needs attention', 'ImageForge could not safely load the device queue. No queued work was started.'),
+      };
+    case 'QUEUE_LEASE_CHANGED':
+      return { ...state, queue: { ...state.queue, lease: action.lease } };
+    case 'QUEUE_POWER_CHANGED':
+      return { ...state, queue: { ...state.queue, power: action.power } };
+    case 'QUEUE_ALARM_TEST_STATE':
+      return { ...state, queue: { ...state.queue, alarmTest: action.state } };
+    case 'QUEUE_NOTIFICATION_PERMISSION':
+      return { ...state, queue: { ...state.queue, notificationPermission: action.permission } };
+    case 'SET_QUEUE_KEEP_AWAKE':
+      return { ...state, queue: { ...state.queue, keepAwakePreference: action.enabled } };
+    case 'QUEUE_DISPATCH_ITEM': {
+      const payload = action.payload;
+      const prompts: BatchPrompt[] = payload.prompts.map((text, index) => ({
+        id: `queue-prompt-${payload.queueItemId}-${index + 1}`,
+        index: index + 1,
+        sourceLine: index + 1,
+        text,
+        seed: payload.baseSeed + index,
+        issues: [],
+        status: 'pending',
+        attempts: 0,
+      }));
+      return {
+        ...state,
+        activeView: 'progress',
+        batch: {
+          // The deterministic fake uses the canonical submission UUID as its
+          // stand-in remote batch UUID so queue state obeys the same wire
+          // invariants as production.
+          id: payload.clientSubmissionId,
+          name: payload.name,
+          owner: state.settings.userName,
+          canManage: true,
+          phase: 'validating',
+          prompts,
+          destination: payload.destination,
+          startedAt: action.startedAt,
+          elapsedSeconds: 0,
+          estimatedSecondsPerImage: 8.4,
+          estimatedCost: 0,
+          lockMessage: null,
+          statusMessage: `Checking queued batch ${payload.name}`,
+          references: payload.references.map((reference) => ({
+            id: reference.id,
+            name: reference.name,
+            mimeType: reference.mimeType,
+            sizeBytes: reference.sizeBytes,
+            bytes: reference.bytes,
+          })),
+          aspectRatio: payload.aspectRatio,
+          queueItemId: payload.queueItemId,
+          clientSubmissionId: payload.clientSubmissionId,
+          admissionMode: 'queue',
+        },
+        toast: null,
+      };
+    }
+    case 'QUEUE_RELEASE_BATCH':
+      return state.batch?.queueItemId
+        ? { ...state, batch: null, activeView: 'create', localSyncIssue: null }
+        : state;
+    case 'RESTORE_QUEUE_ITEM_TO_DRAFT': {
+      const suffix = action.styleSuffix;
+      const sourcePrompts = action.payload.prompts.map((prompt) => (
+        suffix !== null && prompt.endsWith(` ${suffix}`)
+          ? prompt.slice(0, -(suffix.length + 1))
+          : prompt
+      ));
+      const rawText = sourcePrompts.join('\n');
+      const parsed = parsePromptText(rawText);
+      return {
+        ...state,
+        activeView: 'create',
+        settings: {
+          ...state.settings,
+          editorialSuffixEnabled: suffix !== null,
+          ...(suffix === null ? {} : { editorialSuffix: suffix }),
+        },
+        draft: {
+          name: action.payload.name,
+          rawText,
+          sourceName: null,
+          prompts: parsed.prompts,
+          issues: parsed.issues,
+          destination: action.payload.destination,
+          references: action.payload.references.map((reference) => ({
+            id: reference.id,
+            name: reference.name,
+            mimeType: reference.mimeType,
+            sizeBytes: reference.sizeBytes,
+            bytes: reference.bytes,
+          })),
+          aspectRatio: action.payload.aspectRatio,
+          queueReplacementId: action.payload.queueItemId,
+        },
+        ...toast(state, 'info', 'Editing staged batch', 'Save it back to the queue to create fresh item and submission IDs.'),
+      };
+    }
+    case 'STAGE_DRAFT':
+    case 'RUN_QUEUE':
+    case 'RESUME_QUEUE':
+    case 'PAUSE_QUEUE':
+    case 'MOVE_QUEUE_ITEM':
+    case 'REMOVE_QUEUE_ITEM':
+    case 'EDIT_QUEUE_ITEM':
+    case 'TEST_QUEUE_ALARM':
+    case 'CONFIRM_QUEUE_ALARM':
+    case 'SNOOZE_QUEUE_ALARM':
+    case 'DISMISS_QUEUE_ALARM':
+    case 'RING_QUEUE_ALARM':
+    case 'CLEAR_QUEUE_COMPLETED':
+    case 'CLEAR_QUEUE_HISTORY':
+    case 'CONFIRM_RESET_QUEUE':
+      return state;
+    case 'REQUEST_RESET_QUEUE':
+      return state.queue.loadState === 'error'
+        && state.queue.issues.some((issue) => issue.code === 'queue_store_unrecoverable')
+        ? { ...state, dialog: { type: 'reset-queue' } }
+        : state;
     case 'START_POD':
       if (state.pod.createRecovery) {
         return {
@@ -1059,6 +1204,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       };
     case 'RESPOND_STUDIO_STOP':
     case 'CANCEL_STUDIO_STOP':
+    case 'RESPOND_STUDIO_GPU_SWITCH':
       return state;
     case 'RUNTIME_ERROR':
       {
@@ -1223,6 +1369,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...reset,
         settings: state.settings,
         setup: state.setup,
+        queue: state.queue,
         ...toast(state, 'info', 'Workspace reset', 'You are back to an offline, empty workspace.'),
       };
     }

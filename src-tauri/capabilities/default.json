@@ -3,5 +3,20 @@
   "identifier": "main-capability",
   "description": "Minimal core capability for the ImageForge main window",
   "windows": ["main"],
-  "permissions": []
+  "permissions": [
+    "notification:allow-is-permission-granted",
+    "notification:allow-request-permission",
+    "core:window:allow-is-minimized",
+    "core:window:allow-minimize",
+    "core:window:allow-unminimize",
+    "core:window:allow-show",
+    "core:window:allow-set-focus",
+    "core:window:allow-set-size",
+    "core:window:allow-unmaximize",
+    "core:window:allow-is-maximized",
+    "core:window:allow-is-fullscreen",
+    "core:window:allow-inner-size",
+    "core:window:allow-outer-size",
+    "core:window:allow-scale-factor"
+  ]
 }

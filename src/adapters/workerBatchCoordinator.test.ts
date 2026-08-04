@@ -68,7 +68,7 @@ function status(isOwner = true) {
       pause_requested: false,
       cancel_requested: false,
     },
-    permissions: { can_create: false, can_manage_active: isOwner, is_owner: isOwner },
+    permissions: { can_create: false, can_manage_active: isOwner, is_owner: isOwner, create_block_reason: null },
   };
 }
 
@@ -154,7 +154,7 @@ function releasedStatus() {
     schema_version: 1,
     ready: true,
     active_batch: null,
-    permissions: { can_create: true, can_manage_active: false, is_owner: false },
+    permissions: { can_create: true, can_manage_active: false, is_owner: false, create_block_reason: null },
   };
 }
 
@@ -236,7 +236,27 @@ describe('WorkerBatchCoordinator', () => {
       700,
       [{ name: 'anchor.png', mimeType: 'image/png', bytes: [0x89, 0x50, 0x4e, 0x47] }],
       '16:9',
+      expect.stringMatching(/^[0-9a-f-]{36}$/),
+      'foreground',
     );
+  });
+
+  it('recovers only the exact owner submission association and returns its batch ID', async () => {
+    const submissionId = '22222222-2222-4222-8222-222222222222';
+    const associated = { ...manifest('downloaded'), client_submission_id: submissionId };
+    const coordinator = new WorkerBatchCoordinator(fakePort({
+      getSubmission: vi.fn(async () => ({ status: 200, body: associated })),
+      readReceipts: vi.fn(async () => [receipt()]),
+    }));
+    await expect(coordinator.lookupSubmission(submissionId)).resolves.toBe(batchId);
+
+    const missing = new WorkerBatchCoordinator(fakePort({
+      getSubmission: vi.fn(async () => ({
+        status: 404,
+        body: { error: { code: 'submission_not_found', message: 'Submission not found.', details: null } },
+      })),
+    }));
+    await expect(missing.lookupSubmission(submissionId)).resolves.toBeNull();
   });
 
   it('rejects malformed or oversized image references before transport', async () => {
@@ -385,7 +405,7 @@ describe('WorkerBatchCoordinator', () => {
           schema_version: 1,
           ready: true,
           active_batch: null,
-          permissions: { can_create: false, can_manage_active: false, is_owner: false },
+          permissions: { can_create: false, can_manage_active: false, is_owner: false, create_block_reason: 'gpu_stop_pending' },
         },
       })),
     });
@@ -422,7 +442,7 @@ describe('WorkerBatchCoordinator', () => {
     await expect(coordinator.create(['A second brief'], 900)).resolves.toMatchObject({ type: 'busy' });
     staleStatus.resolve({
       status: 200,
-      body: { schema_version: 1, ready: true, active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false } },
+      body: { schema_version: 1, ready: true, active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false, create_block_reason: null } },
     });
 
     await expect(stalePoll).resolves.toEqual({ type: 'idle' });
@@ -448,7 +468,7 @@ describe('WorkerBatchCoordinator', () => {
     const create = coordinator.create(['A second brief'], 900);
     staleStatus.resolve({
       status: 200,
-      body: { schema_version: 1, ready: true, active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false } },
+      body: { schema_version: 1, ready: true, active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false, create_block_reason: null } },
     });
 
     await expect(earlierPoll).resolves.toEqual({ type: 'idle' });
@@ -602,7 +622,7 @@ describe('WorkerBatchCoordinator', () => {
       createBatch: vi.fn(() => createResult.promise),
       status: vi.fn(async () => ({
         status: 200,
-        body: { schema_version: 1, ready: true, active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false } },
+        body: { schema_version: 1, ready: true, active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false, create_block_reason: null } },
       })),
       getBatch: vi.fn(async () => ({ status: 404, body: { error: { code: 'batch_not_found', message: 'Missing.', details: null } } })),
     });
@@ -620,12 +640,34 @@ describe('WorkerBatchCoordinator', () => {
     expect(eventTypes).toEqual(['manifest', 'idle']);
   });
 
+  it('treats an active-status then released-batch 404 as a confirmed idle race', async () => {
+    let statusReads = 0;
+    const getBatch = vi.fn(async () => ({
+      status: 404,
+      body: { error: { code: 'batch_not_found', message: 'Released.', details: null } },
+    }));
+    const port = fakePort({
+      createBatch: vi.fn(async () => ({ status: 201, body: manifest('generating') })),
+      status: vi.fn(async () => ({
+        status: 200,
+        body: statusReads++ === 0 ? status(true) : releasedStatus(),
+      })),
+      getBatch,
+    });
+    const coordinator = new WorkerBatchCoordinator(port);
+    await coordinator.create(['A race-safe brief'], 700);
+
+    await expect(coordinator.poll()).resolves.toEqual({ type: 'idle' });
+    expect(port.status).toHaveBeenCalledTimes(2);
+    expect(getBatch).toHaveBeenCalledOnce();
+  });
+
   it('reconciles a terminal manifest after the worker releases its active lease', async () => {
     const port = fakePort({
       createBatch: vi.fn(async () => ({ status: 201, body: manifest('generating') })),
       status: vi.fn(async () => ({
         status: 200,
-        body: { ...status(), active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false } },
+        body: { ...status(), active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false, create_block_reason: null } },
       })),
       getBatch: vi.fn(async () => ({ status: 200, body: manifest('downloaded') })),
       readReceipts: vi.fn(async () => []),
@@ -864,7 +906,7 @@ describe('WorkerBatchCoordinator', () => {
     const port = fakePort({
       status: vi.fn(async () => ({
         status: 200,
-        body: { ...status(), active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false } },
+        body: { ...status(), active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false, create_block_reason: null } },
       })),
       readReceipts: vi.fn(async () => [receipt()]),
     });
@@ -879,7 +921,7 @@ describe('WorkerBatchCoordinator', () => {
     const port = fakePort({
       status: vi.fn(async () => ({
         status: 200,
-        body: { schema_version: 1, ready: true, active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false } },
+        body: { schema_version: 1, ready: true, active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false, create_block_reason: null } },
       })),
     });
     const restarted = new WorkerBatchCoordinator(port, batchId);
@@ -896,7 +938,7 @@ describe('WorkerBatchCoordinator', () => {
         status: 200,
         body: active
           ? status(false)
-          : { schema_version: 1, ready: true, active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false } },
+          : { schema_version: 1, ready: true, active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false, create_block_reason: null } },
       })),
       getBatch: vi.fn(async () => ({ status: 200, body: manifest('downloaded') })),
     });
@@ -991,5 +1033,54 @@ describe('WorkerBatchCoordinator', () => {
     await expect(malformed.create(['A documentary shipyard at dawn'], 700)).rejects.toEqual(
       expect.objectContaining<Partial<WorkerBatchError>>({ code: 'worker_response_invalid' }),
     );
+  });
+
+  it('classifies submission history corruption as non-retryable despite HTTP 503', async () => {
+    const coordinator = new WorkerBatchCoordinator(fakePort({
+      createBatch: vi.fn(async () => ({
+        status: 503,
+        body: {
+          error: {
+            code: 'submission_store_corrupt',
+            message: 'Worker submission history is unavailable. Repair the shared volume before starting generation.',
+            details: null,
+          },
+        },
+      })),
+    }));
+    await expect(coordinator.create(['A documentary shipyard at dawn'], 700)).rejects.toMatchObject({
+      code: 'submission_store_corrupt',
+      status: 503,
+      retryable: false,
+    });
+  });
+
+  it('keeps submission-store corruption exact on repeated authoritative polling', async () => {
+    const port = fakePort({
+      status: vi.fn(async () => ({
+        status: 200,
+        body: {
+          schema_version: 1,
+          ready: true,
+          active_batch: null,
+          permissions: {
+            can_create: false,
+            can_manage_active: false,
+            is_owner: false,
+            create_block_reason: 'submission_store_corrupt',
+          },
+        },
+      })),
+    });
+    const coordinator = new WorkerBatchCoordinator(port);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await expect(coordinator.poll()).resolves.toEqual({
+        type: 'error',
+        code: 'submission_store_corrupt',
+        message: 'Worker submission history is unavailable. Repair the shared volume before starting generation.',
+        retryable: false,
+      });
+    }
+    expect(port.status).toHaveBeenCalledTimes(2);
   });
 });

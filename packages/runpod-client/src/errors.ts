@@ -17,6 +17,7 @@ export type RunPodErrorCode =
   | "api_response_invalid"
   | "inventory_unavailable"
   | "gpu_unavailable"
+  | "gpu_actual_price_unavailable"
   | "no_gpu_available"
   | "pod_create_rejected"
   | "pod_create_ambiguous"

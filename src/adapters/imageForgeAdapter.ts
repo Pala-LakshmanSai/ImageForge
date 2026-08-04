@@ -5,6 +5,8 @@ import type {
   PodPhase,
 } from '../domain/types';
 import type { ProductionRuntimeFacade } from './productionImageForgeAdapter';
+import type { QueueHostPort } from '../domain/queue';
+import { createMemoryQueueHost } from './queueStore';
 
 export const EU_RO_ORDINARY_GPUS = [
   'RTX 4090',
@@ -88,6 +90,7 @@ export interface StudioProfile {
 export interface ImageForgeAdapter {
   readonly mode?: 'fake' | 'production';
   readonly runtime?: ProductionRuntimeFacade;
+  readonly queue: QueueHostPort;
   chooseDestination(defaultPath: string): Promise<string | null>;
   validateDestination(path: string): Promise<boolean>;
   revealPath(relativePath?: string): Promise<void>;
@@ -237,9 +240,11 @@ function podSteps(policy: GpuSelectionPolicy): Array<Omit<PodLifecycleUpdate, 'p
 export function createFakeImageForgeAdapter(initialCredentials?: CredentialMetadataMap): ImageForgeAdapter {
   let podSequence = 0;
   let credentials = cloneCredentialMetadata(initialCredentials ?? emptyCredentialMetadata());
+  const queue = createMemoryQueueHost();
 
   return {
     mode: 'fake',
+    queue,
     async chooseDestination(defaultPath) {
       await new Promise((resolve) => window.setTimeout(resolve, 180));
       return defaultPath;

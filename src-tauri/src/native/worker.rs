@@ -4,6 +4,7 @@ use futures_util::StreamExt;
 use image::{guess_format, load_from_memory_with_format, ImageFormat};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Client, Method, StatusCode};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -25,6 +26,10 @@ const MAX_STUDIO_DISPLAY_NAME_CHARS: usize = 80;
 const MAX_STUDIO_TIMESTAMP_BYTES: usize = 32;
 const MAX_STUDIO_TTL_SECONDS: u64 = 300;
 const MAX_JSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+const IMAGEFORGE_WORKER_IMAGE_DIGEST: &str =
+    "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:f862e1ea8ece9f35101e7c47be55a5042c17e0eb3cf8414dd709ed73a59e33ed";
+const IMAGEFORGE_MODEL_ID: &str = "black-forest-labs/FLUX.2-klein-4B";
+const IMAGEFORGE_MODEL_REVISION: &str = "e7b7dc27f91deacad38e78976d1f2b499d76a294";
 const WORKER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const WORKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 
@@ -37,6 +42,22 @@ pub struct CreateBatchInput {
     pub references: Vec<ReferenceInput>,
     #[serde(default = "default_aspect_ratio")]
     pub aspect_ratio: String,
+    pub client_submission_id: String,
+    #[serde(default)]
+    pub admission_mode: AdmissionMode,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AdmissionMode {
+    Foreground,
+    Queue,
+}
+
+impl Default for AdmissionMode {
+    fn default() -> Self {
+        Self::Foreground
+    }
 }
 
 fn default_aspect_ratio() -> String {
@@ -89,6 +110,20 @@ pub struct StudioStopResponseInput {
     pub decision: StudioStopDecision,
 }
 
+/// Narrow peer-consent input for an already public GPU-switch request.  The
+/// renderer may name only the observed switch, its own current session and an
+/// approve/deny decision; native constructs the fixed authenticated route.
+/// In particular, it does not compare the input session to `waiting_for`:
+/// the worker deduplicates by authenticated principal and accepts any live
+/// session belonging to the eligible peer principal.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StudioGpuSwitchResponseInput {
+    pub switch_id: String,
+    pub session_id: String,
+    pub decision: StudioStopDecision,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StudioFinalizeStopInput {
@@ -105,6 +140,349 @@ pub struct StudioCancelStopInput {
     pub session_id: String,
     pub pod_id: String,
     pub finalization_id: Option<String>,
+}
+
+/// Native-only ordinary Stop finalization plan. The private finalization UUID
+/// is never serialized through Tauri; it exists only long enough for the
+/// pinned worker Finalize request and the matching native provider delete
+/// authority.
+#[derive(Debug, Clone)]
+pub(crate) struct NativeWorkerNormalStopFinalizePlanV1 {
+    pub operation_id: String,
+    pub request_id: String,
+    pub session_id: String,
+    pub pod_id: String,
+    pub finalization_id: String,
+    pub expected_server_instance_id: String,
+}
+
+/// The normal Stop journal has already committed before this POST is issued.
+/// A malformed/transport/5xx response is therefore deliberately ambiguous:
+/// the caller must preserve the worker guard and never infer that Finalize did
+/// not arrive. Only a structurally valid 4xx Studio rejection is proven to
+/// have performed no finalization mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeWorkerNormalStopFinalizeOutcomeV1 {
+    Finalized,
+    Rejected,
+    Uncertain,
+}
+
+/// The native-only, byte-identical worker request used to admit a coordinated
+/// GPU switch. It is deliberately not a Tauri command type: the renderer
+/// supplies only the reviewed begin input and native derives every field from
+/// durable inventory, worker-session, and queue evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeWorkerGpuSwitchCreateRequestV1 {
+    pub switch_id: String,
+    pub session_id: String,
+    pub old_pod_id: String,
+    pub old_gpu_id: String,
+    pub old_gpu_display_name: String,
+    pub initial_target_gpu_id: String,
+    pub initial_target_gpu_display_name: String,
+    pub initial_replacement_attempt_id: String,
+    pub expected_batch_id: Option<String>,
+    pub inventory_observed_at: String,
+}
+
+/// Holds the pinned origin, exact canonical request bytes, and short-lived
+/// bearer token from preflight until the one permitted socket write. It is
+/// crate-private and intentionally neither serializable nor debuggable so a
+/// caller cannot accidentally surface the token or raw request through IPC.
+pub(crate) struct NativeWorkerGpuSwitchCreatePreparedV1 {
+    pin: WorkerSessionPin,
+    request: NativeWorkerGpuSwitchCreateRequestV1,
+    canonical_body: Vec<u8>,
+    canonical_body_sha256: String,
+    credential_binding_sha256: String,
+    session_binding_sha256: String,
+    worker_token: String,
+}
+
+impl NativeWorkerGpuSwitchCreatePreparedV1 {
+    pub(crate) fn request(&self) -> &NativeWorkerGpuSwitchCreateRequestV1 {
+        &self.request
+    }
+
+    pub(crate) fn canonical_body(&self) -> &[u8] {
+        &self.canonical_body
+    }
+
+    pub(crate) fn canonical_body_sha256(&self) -> &str {
+        &self.canonical_body_sha256
+    }
+
+    pub(crate) fn credential_binding_sha256(&self) -> &str {
+        &self.credential_binding_sha256
+    }
+
+    pub(crate) fn session_binding_sha256(&self) -> &str {
+        &self.session_binding_sha256
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) struct NativeWorkerGpuSwitchParticipantV1 {
+    pub session_id: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) struct NativeWorkerGpuSwitchBatchOwnerV1 {
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum NativeWorkerGpuSwitchStateV1 {
+    Pending,
+    Approved,
+    Denied,
+    Expired,
+    Cancelled,
+    Pausing,
+    ReadyToDelete,
+    DeleteIntent,
+    ReplacementReady,
+    Completed,
+    NeedsAttention,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum NativeWorkerGpuSwitchReasonV1 {
+    PeerDenied,
+    ResponseTimeout,
+    RequesterCancelled,
+    RequesterExpired,
+    GenerationStarted,
+    BatchChanged,
+    StopStarted,
+    TargetChangedPreDelete,
+    PauseFailed,
+    ReplacementMismatch,
+    CompletionFailed,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum NativeWorkerGpuSwitchBatchStateV1 {
+    Running,
+    Paused,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) struct NativeWorkerGpuSwitchRequestViewV1 {
+    pub schema_version: u8,
+    pub switch_id: String,
+    pub old_pod_id: String,
+    pub old_gpu_id: String,
+    pub old_gpu_display_name: String,
+    pub initial_target_gpu_id: String,
+    pub initial_target_gpu_display_name: String,
+    pub initial_replacement_attempt_id: String,
+    pub requester: NativeWorkerGpuSwitchParticipantV1,
+    pub state: NativeWorkerGpuSwitchStateV1,
+    pub reason: Option<NativeWorkerGpuSwitchReasonV1>,
+    pub requested_at: String,
+    pub response_deadline: String,
+    pub ready_to_delete_at: Option<String>,
+    pub waiting_for: Vec<NativeWorkerGpuSwitchParticipantV1>,
+    pub approved_by: Vec<NativeWorkerGpuSwitchParticipantV1>,
+    pub denied_by: Vec<NativeWorkerGpuSwitchParticipantV1>,
+    pub batch_id: Option<String>,
+    pub batch_owner: Option<NativeWorkerGpuSwitchBatchOwnerV1>,
+    pub batch_state_at_finalization: Option<NativeWorkerGpuSwitchBatchStateV1>,
+    pub replacement_attempt_id: Option<String>,
+    pub replacement_attempt_revision: Option<u64>,
+    pub replacement_pod_id: Option<String>,
+    pub actual_target_gpu_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) struct NativeWorkerGpuSwitchCreateResponseV1 {
+    pub schema_version: u8,
+    pub request: NativeWorkerGpuSwitchRequestViewV1,
+    pub requester_user_id: String,
+    pub principal_binding_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) struct NativeWorkerGpuSwitchOwnerLookupV1 {
+    pub schema_version: u8,
+    pub switch_id: String,
+    pub state: NativeWorkerGpuSwitchStateV1,
+    pub requester_user_id: String,
+    pub principal_binding_id: String,
+    pub finalization_id: Option<String>,
+    pub terminal_tombstone_sha256: Option<String>,
+    pub replacement_attempt_id: Option<String>,
+    pub replacement_attempt_revision: Option<u64>,
+    pub replacement_pod_id: Option<String>,
+    pub actual_target_gpu_id: Option<String>,
+}
+
+/// Strict safe projection returned by the public Switch lookup.  It contains
+/// no requester, principal binding, finalization, or tombstone evidence; the
+/// native coordinator uses it first for non-terminal state refresh and falls
+/// back to the owner-only route only when this projection is absent.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) struct NativeWorkerGpuSwitchPublicLookupV1 {
+    pub schema_version: u8,
+    pub switch_id: String,
+    pub state: NativeWorkerGpuSwitchStateV1,
+    pub replacement_attempt_id: Option<String>,
+    pub replacement_attempt_revision: Option<u64>,
+    pub replacement_pod_id: Option<String>,
+    pub actual_target_gpu_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeWorkerGpuSwitchErrorV1 {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NativeWorkerGpuSwitchCreateResultV1 {
+    Created(NativeWorkerGpuSwitchCreateResponseV1),
+    Rejected(NativeWorkerGpuSwitchErrorV1),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NativeWorkerGpuSwitchOwnerLookupResultV1 {
+    Found(NativeWorkerGpuSwitchOwnerLookupV1),
+    NotFound,
+    Rejected(NativeWorkerGpuSwitchErrorV1),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NativeWorkerGpuSwitchPublicLookupResultV1 {
+    Found(NativeWorkerGpuSwitchPublicLookupV1),
+    NotFound,
+    Rejected(NativeWorkerGpuSwitchErrorV1),
+}
+
+/// Strict owner-only runtime proof returned by the replacement worker.  The
+/// outer worker contract intentionally uses snake_case while the nested CUDA
+/// device mirrors the NVML/CUDA inspector's camelCase schema.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct NativeWorkerCudaDeviceIdentityV1 {
+    pub device_index: u8,
+    pub nvml_uuid: String,
+    pub pci_device_id: String,
+    pub cuda_name: String,
+    pub total_memory_bytes: u64,
+    pub compute_capability_major: u8,
+    pub compute_capability_minor: u8,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) struct NativeWorkerGpuSwitchRuntimeIdentityV1 {
+    pub schema_version: u8,
+    pub switch_id: String,
+    pub principal_binding_id: String,
+    pub server_instance_id: String,
+    pub runtime_pod_id: String,
+    pub runtime_volume_id: String,
+    pub runtime_data_center_id: String,
+    pub data_root_binding_sha256: String,
+    pub expected_provider_gpu_id: String,
+    pub device_count: u8,
+    pub cuda_device: NativeWorkerCudaDeviceIdentityV1,
+    pub image_digest: String,
+    pub model_id: String,
+    pub model_revision: String,
+    pub create_contract_revision: u8,
+    pub create_marker_sha256: String,
+    pub replacement_attempt_id: String,
+    pub replacement_attempt_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NativeWorkerGpuSwitchRuntimeIdentityResultV1 {
+    Found(NativeWorkerGpuSwitchRuntimeIdentityV1),
+    Rejected(NativeWorkerGpuSwitchErrorV1),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NativeGpuRuntimeMinimumComputeCapabilityV1 {
+    major: u8,
+    minor: u8,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NativeGpuRuntimeIdentityRecordV1 {
+    provider_gpu_id: String,
+    cuda_names: Vec<String>,
+    pci_device_ids: Vec<String>,
+    minimum_memory_bytes: u64,
+    minimum_compute_capability: NativeGpuRuntimeMinimumComputeCapabilityV1,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NativeGpuRuntimeIdentityContractV1 {
+    schema_version: u8,
+    identities: Vec<NativeGpuRuntimeIdentityRecordV1>,
+}
+
+/// Native-only follow-up commands for an already durable GPU-switch request.
+/// None of these values cross Tauri IPC: the command layer derives every UUID,
+/// Pod binding, hash and replacement identity from the switch journal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NativeWorkerGpuSwitchOwnerActionV1 {
+    Finalize {
+        finalization_id: String,
+    },
+    DeleteIntent {
+        finalization_id: String,
+    },
+    Adopt {
+        finalization_id: String,
+        replacement_attempt_id: String,
+        replacement_attempt_revision: u64,
+        replacement_pod_id: String,
+        target_gpu_id: String,
+        create_marker_sha256: String,
+        create_intent_sha256: String,
+        create_wire_body_sha256: String,
+    },
+    Complete {
+        finalization_id: String,
+        replacement_attempt_id: String,
+        replacement_attempt_revision: u64,
+        replacement_pod_id: String,
+    },
+    Cancel {
+        finalization_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NativeWorkerGpuSwitchOwnerActionResultV1 {
+    /// The operation received an exact HTTP success and the owner-only lookup
+    /// subsequently returned a valid, authenticated state projection.
+    Owner(NativeWorkerGpuSwitchOwnerLookupV1),
+    /// A fully received typed worker rejection. It is safe to surface only as
+    /// a local parked state; no automatic mutation retry is allowed.
+    Rejected(NativeWorkerGpuSwitchErrorV1),
+    /// The socket/response/owner lookup boundary is ambiguous. The caller
+    /// must persist an attention record and reconcile through an explicit
+    /// Resume, never resend this action opportunistically.
+    Uncertain,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -140,6 +518,7 @@ enum WorkerOperation {
     StudioStatus,
     StudioCreateStopRequest,
     StudioStopResponse,
+    StudioGpuSwitchResponse,
     StudioFinalizeStop,
     StudioCancelStop,
 }
@@ -168,6 +547,10 @@ enum StudioResponseBinding {
     },
     RespondToStop {
         request_id: Uuid,
+        session_id: Uuid,
+    },
+    RespondToGpuSwitch {
+        switch_id: Uuid,
         session_id: Uuid,
     },
     FinalizeStop {
@@ -209,6 +592,7 @@ impl WorkerOperation {
                 | Self::StudioStatus
                 | Self::StudioCreateStopRequest
                 | Self::StudioStopResponse
+                | Self::StudioGpuSwitchResponse
                 | Self::StudioFinalizeStop
                 | Self::StudioCancelStop
         ) {
@@ -224,6 +608,7 @@ impl WorkerOperation {
             Self::StudioHeartbeat
             | Self::StudioStatus
             | Self::StudioStopResponse
+            | Self::StudioGpuSwitchResponse
             | Self::StudioFinalizeStop
             | Self::StudioCancelStop => Some(StatusCode::OK),
             _ => None,
@@ -327,6 +712,20 @@ impl WorkerApi {
         .await
     }
 
+    pub async fn studio_respond_to_gpu_switch(
+        &self,
+        input: StudioGpuSwitchResponseInput,
+    ) -> NativeResult<WorkerHttpResponse> {
+        let switch_id = parse_studio_uuid(&input.switch_id, "gpu_switch_not_found")?;
+        let session_id = parse_studio_uuid(&input.session_id, "studio_session_id_invalid")?;
+        self.execute_studio_request(studio_gpu_switch_response_plan(
+            switch_id,
+            session_id,
+            input.decision,
+        ))
+        .await
+    }
+
     pub async fn studio_finalize_stop_request(
         &self,
         input: StudioFinalizeStopInput,
@@ -368,6 +767,452 @@ impl WorkerApi {
         .await
     }
 
+    /// Re-read the authoritative Studio projection immediately before a
+    /// native-owned ordinary Stop finalization. The renderer's revision and
+    /// IDs are only compare-and-swap intent; the worker decides whether the
+    /// exact approved consent is still live.
+    pub(crate) async fn prepare_native_normal_stop_finalization(
+        &self,
+        input: &super::gpu_pod::NativeGpuNormalStopV1,
+        operation_id: String,
+    ) -> NativeResult<NativeWorkerNormalStopFinalizePlanV1> {
+        let response = self.studio_status(&input.session_id).await?;
+        if response.status != StatusCode::OK.as_u16() {
+            return Err(NativeError::new(
+                "stop_request_in_progress",
+                "The GPU Stop request is no longer ready for finalization.",
+            ));
+        }
+        let projection: StudioStateProjection =
+            serde_json::from_value(response.body).map_err(|_| worker_response_invalid())?;
+        if projection.server_instance_id != input.expected_server_instance_id
+            || projection.coordination_revision != input.expected_coordination_revision
+        {
+            return Err(NativeError::retryable(
+                "stop_request_in_progress",
+                "The GPU Stop request changed. Refresh and confirm it again.",
+            ));
+        }
+        normal_stop_worker_switch_veto(&projection)?;
+        let stop = projection.stop_request.ok_or_else(|| {
+            NativeError::new(
+                "stop_request_in_progress",
+                "The GPU Stop request is no longer ready for finalization.",
+            )
+        })?;
+        if stop.request_id != input.stop_request_id
+            || stop.pod_id != input.pod_id
+            || stop.requester.session_id != input.session_id
+            || stop.state != StudioStopRequestState::Approved
+            || stop.finalization_id.is_some()
+            || stop.finalization_expires_at.is_some()
+        {
+            return Err(NativeError::new(
+                "stop_request_in_progress",
+                "The GPU Stop request is no longer ready for finalization.",
+            ));
+        }
+        Ok(NativeWorkerNormalStopFinalizePlanV1 {
+            operation_id,
+            request_id: input.stop_request_id.clone(),
+            session_id: input.session_id.clone(),
+            pod_id: input.pod_id.clone(),
+            finalization_id: Uuid::new_v4().to_string(),
+            expected_server_instance_id: input.expected_server_instance_id.clone(),
+        })
+    }
+
+    /// Send one pinned ordinary Stop Finalize request. `WorkerApi` validates
+    /// the returned finalizing projection against every private plan field
+    /// before this method returns, so the provider delete path cannot be
+    /// reached on a stale/mismatched consent response.
+    pub(crate) async fn execute_native_normal_stop_finalization(
+        &self,
+        plan: &NativeWorkerNormalStopFinalizePlanV1,
+    ) -> NativeResult<NativeWorkerNormalStopFinalizeOutcomeV1> {
+        let response = match self
+            .studio_finalize_stop_request(StudioFinalizeStopInput {
+                request_id: plan.request_id.clone(),
+                session_id: plan.session_id.clone(),
+                pod_id: plan.pod_id.clone(),
+                finalization_id: plan.finalization_id.clone(),
+            })
+            .await
+        {
+            Ok(response) => response,
+            // Any error after we enter this method might occur after the
+            // request crossed the socket boundary (for example malformed 2xx
+            // JSON or a response-body loss), so recovery must fail closed.
+            Err(_) => return Ok(NativeWorkerNormalStopFinalizeOutcomeV1::Uncertain),
+        };
+        if response.status == StatusCode::OK.as_u16() {
+            Ok(NativeWorkerNormalStopFinalizeOutcomeV1::Finalized)
+        } else if (400..500).contains(&response.status) {
+            Ok(NativeWorkerNormalStopFinalizeOutcomeV1::Rejected)
+        } else {
+            Ok(NativeWorkerNormalStopFinalizeOutcomeV1::Uncertain)
+        }
+    }
+
+    /// Re-read the authoritative finalizing Stop marker before native creates
+    /// a provider DELETE authority. The finalization POST's response is one
+    /// proof, but this strict follow-up prevents a stale local command from
+    /// deleting after the worker has transitioned to a conflicting Switch or
+    /// a different server epoch.
+    pub(crate) async fn verify_native_normal_stop_finalization(
+        &self,
+        plan: &NativeWorkerNormalStopFinalizePlanV1,
+    ) -> NativeResult<()> {
+        let response = self.studio_status(&plan.session_id).await?;
+        if response.status != StatusCode::OK.as_u16() {
+            return Err(NativeError::new(
+                "stop_request_in_progress",
+                "The GPU Stop request is no longer ready for deletion.",
+            ));
+        }
+        let projection: StudioStateProjection =
+            serde_json::from_value(response.body).map_err(|_| worker_response_invalid())?;
+        validate_native_normal_stop_finalizing_projection(plan, &projection)
+    }
+
+    /// Performs the non-mutating half of native Switch-create admission. The
+    /// returned plan holds the exact worker-session pin and canonical request
+    /// bytes. The switch journal must commit `send_pending`, then
+    /// `sent_uncertain`, before `execute_gpu_switch_create` is called.
+    pub(crate) async fn prepare_gpu_switch_create(
+        &self,
+        request: NativeWorkerGpuSwitchCreateRequestV1,
+    ) -> NativeResult<NativeWorkerGpuSwitchCreatePreparedV1> {
+        validate_gpu_switch_create_request(&request)?;
+        let pin = self.session.pin().await?;
+        ensure_pin_matches_pod(&pin, &request.old_pod_id)?;
+        let worker_token = self.worker_token()?;
+        let canonical_body = canonical_gpu_switch_create_body(&request)?;
+        let canonical_body_sha256 = sha256_hex(&canonical_body);
+        let credential_binding_sha256 =
+            sha256_text_with_domain("imageforge-gpu-switch-worker-credential-v1", &worker_token);
+        let session_binding_sha256 =
+            sha256_text_with_domain("imageforge-gpu-switch-worker-session-v1", pin.pod_id());
+        Ok(NativeWorkerGpuSwitchCreatePreparedV1 {
+            pin,
+            request,
+            canonical_body,
+            canonical_body_sha256,
+            credential_binding_sha256,
+            session_binding_sha256,
+            worker_token,
+        })
+    }
+
+    /// Execute exactly one already-durable Switch-create request. Network
+    /// loss, malformed/ambiguous responses, or an unexpected success status
+    /// are deliberately returned as `gpu_switch_worker_create_uncertain`; the
+    /// caller must park and resolve through owner lookup, never retry here.
+    pub(crate) async fn execute_gpu_switch_create(
+        &self,
+        prepared: NativeWorkerGpuSwitchCreatePreparedV1,
+    ) -> NativeResult<NativeWorkerGpuSwitchCreateResultV1> {
+        let NativeWorkerGpuSwitchCreatePreparedV1 {
+            pin,
+            request,
+            canonical_body,
+            worker_token,
+            ..
+        } = prepared;
+        let url = pin.endpoint("/v1/studio/gpu-switches")?;
+        let response = self
+            .client
+            .request(Method::POST, url)
+            .header(ACCEPT, "application/json")
+            .header(AUTHORIZATION, format!("Bearer {worker_token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(canonical_body)
+            .send()
+            .await
+            .map_err(|_| worker_gpu_switch_create_uncertain())?;
+        let status = response.status();
+        let bytes = read_bounded(response, MAX_STUDIO_RESPONSE_BYTES)
+            .await
+            .map_err(|_| worker_gpu_switch_create_uncertain())?;
+        reject_gpu_switch_secret_reflection(&self.vault, &bytes, &worker_token)?;
+        if status == StatusCode::CREATED {
+            let created: NativeWorkerGpuSwitchCreateResponseV1 =
+                strict_gpu_switch_json(&bytes).map_err(|_| gpu_switch_worker_response_invalid())?;
+            validate_gpu_switch_create_response(&created, &request)?;
+            return Ok(NativeWorkerGpuSwitchCreateResultV1::Created(created));
+        }
+        let error = parse_gpu_switch_error(status, &bytes)?;
+        Ok(NativeWorkerGpuSwitchCreateResultV1::Rejected(error))
+    }
+
+    /// Strict public Switch lookup. This is deliberately attempted before the
+    /// private owner route during ordinary sync so the safe live projection is
+    /// enough for consent/pause state and private IDs are fetched only for an
+    /// absent public projection or a terminal proof boundary.
+    pub(crate) async fn gpu_switch_public_lookup(
+        &self,
+        switch_id: &str,
+        session_id: &str,
+        expected_pod_id: &str,
+    ) -> NativeResult<NativeWorkerGpuSwitchPublicLookupResultV1> {
+        let switch_id = parse_studio_uuid(switch_id, "gpu_switch_not_found")?;
+        let session_id = parse_studio_uuid(session_id, "studio_session_id_invalid")?;
+        validate_pod_id(expected_pod_id)?;
+        let pin = self.session.pin().await?;
+        ensure_pin_matches_pod(&pin, expected_pod_id)?;
+        let worker_token = self.worker_token()?;
+        let mut url = pin.endpoint(&format!("/v1/studio/gpu-switches/{switch_id}"))?;
+        url.query_pairs_mut()
+            .append_pair("session_id", &session_id.to_string());
+        let response = self
+            .client
+            .request(Method::GET, url)
+            .header(ACCEPT, "application/json")
+            .header(AUTHORIZATION, format!("Bearer {worker_token}"))
+            .send()
+            .await
+            .map_err(|_| worker_gpu_switch_lookup_unavailable())?;
+        let status = response.status();
+        let bytes = read_bounded(response, MAX_STUDIO_RESPONSE_BYTES)
+            .await
+            .map_err(|_| worker_gpu_switch_lookup_unavailable())?;
+        reject_gpu_switch_secret_reflection(&self.vault, &bytes, &worker_token)
+            .map_err(|_| worker_gpu_switch_lookup_unavailable())?;
+        if status == StatusCode::OK {
+            let lookup: NativeWorkerGpuSwitchPublicLookupV1 = strict_gpu_switch_json(&bytes)
+                .map_err(|_| worker_gpu_switch_lookup_unavailable())?;
+            validate_gpu_switch_public_lookup(&lookup, &switch_id.to_string())
+                .map_err(|_| worker_gpu_switch_lookup_unavailable())?;
+            return Ok(NativeWorkerGpuSwitchPublicLookupResultV1::Found(lookup));
+        }
+        let error = parse_gpu_switch_error(status, &bytes)
+            .map_err(|_| worker_gpu_switch_lookup_unavailable())?;
+        if error.code == "gpu_switch_request_not_found" {
+            Ok(NativeWorkerGpuSwitchPublicLookupResultV1::NotFound)
+        } else {
+            Ok(NativeWorkerGpuSwitchPublicLookupResultV1::Rejected(error))
+        }
+    }
+
+    /// Owner-only recovery lookup for an exact unresolved Switch-create. Its
+    /// query pair is constructed by native code after path validation; callers
+    /// can never inject an origin, query, or arbitrary worker route.
+    pub(crate) async fn gpu_switch_owner_lookup(
+        &self,
+        switch_id: &str,
+        session_id: &str,
+        expected_pod_id: &str,
+    ) -> NativeResult<NativeWorkerGpuSwitchOwnerLookupResultV1> {
+        let switch_id = parse_studio_uuid(switch_id, "gpu_switch_not_found")?;
+        let session_id = parse_studio_uuid(session_id, "studio_session_id_invalid")?;
+        validate_pod_id(expected_pod_id)?;
+        let pin = self.session.pin().await?;
+        ensure_pin_matches_pod(&pin, expected_pod_id)?;
+        let worker_token = self.worker_token()?;
+        let mut url = pin.endpoint(&format!("/v1/internal/gpu-switches/{switch_id}/owner"))?;
+        url.query_pairs_mut()
+            .append_pair("session_id", &session_id.to_string());
+        let response = self
+            .client
+            .request(Method::GET, url)
+            .header(ACCEPT, "application/json")
+            .header(AUTHORIZATION, format!("Bearer {worker_token}"))
+            .send()
+            .await
+            .map_err(|_| worker_gpu_switch_lookup_unavailable())?;
+        let status = response.status();
+        let bytes = read_bounded(response, MAX_STUDIO_RESPONSE_BYTES)
+            .await
+            .map_err(|_| worker_gpu_switch_lookup_unavailable())?;
+        reject_gpu_switch_secret_reflection(&self.vault, &bytes, &worker_token)
+            .map_err(|_| worker_gpu_switch_lookup_unavailable())?;
+        if status == StatusCode::OK {
+            let lookup: NativeWorkerGpuSwitchOwnerLookupV1 = strict_gpu_switch_json(&bytes)
+                .map_err(|_| worker_gpu_switch_lookup_unavailable())?;
+            validate_gpu_switch_owner_lookup(&lookup, &switch_id.to_string())
+                .map_err(|_| worker_gpu_switch_lookup_unavailable())?;
+            return Ok(NativeWorkerGpuSwitchOwnerLookupResultV1::Found(lookup));
+        }
+        let error = parse_gpu_switch_error(status, &bytes)
+            .map_err(|_| worker_gpu_switch_lookup_unavailable())?;
+        if error.code == "gpu_switch_request_not_found" {
+            Ok(NativeWorkerGpuSwitchOwnerLookupResultV1::NotFound)
+        } else {
+            Ok(NativeWorkerGpuSwitchOwnerLookupResultV1::Rejected(error))
+        }
+    }
+
+    /// Fetch the replacement worker's owner-only runtime identity over the
+    /// exact pinned replacement-Pod origin.  No URL, principal, Pod identity,
+    /// or device assertion is accepted from the renderer.  A structurally or
+    /// semantically invalid success is the same fail-closed unavailable state
+    /// as an unreadable response; a complete typed worker rejection retains
+    /// its authoritative safe code.
+    pub(crate) async fn gpu_switch_runtime_identity(
+        &self,
+        switch_id: &str,
+        session_id: &str,
+        expected_pod_id: &str,
+    ) -> NativeResult<NativeWorkerGpuSwitchRuntimeIdentityResultV1> {
+        let switch_id = parse_studio_uuid(switch_id, "gpu_switch_not_found")?;
+        let session_id = parse_studio_uuid(session_id, "studio_session_id_invalid")?;
+        validate_pod_id(expected_pod_id)?;
+        let pin = self.session.pin().await?;
+        ensure_pin_matches_pod(&pin, expected_pod_id)?;
+        let worker_token = self.worker_token()?;
+        let mut url = pin.endpoint(&format!(
+            "/v1/internal/gpu-switches/{switch_id}/runtime-identity"
+        ))?;
+        url.query_pairs_mut()
+            .append_pair("session_id", &session_id.to_string());
+        let response = self
+            .client
+            .request(Method::GET, url)
+            .header(ACCEPT, "application/json")
+            .header(AUTHORIZATION, format!("Bearer {worker_token}"))
+            .send()
+            .await
+            .map_err(|_| worker_gpu_switch_runtime_identity_unavailable())?;
+        let status = response.status();
+        let bytes = read_bounded(response, MAX_STUDIO_RESPONSE_BYTES)
+            .await
+            .map_err(|_| worker_gpu_switch_runtime_identity_unavailable())?;
+        reject_gpu_switch_secret_reflection(&self.vault, &bytes, &worker_token)
+            .map_err(|_| worker_gpu_switch_runtime_identity_unavailable())?;
+        map_gpu_switch_runtime_identity_response(status, &bytes, &switch_id.to_string())
+    }
+
+    /// Execute one native-derived follow-up action against an already bound
+    /// GPU-switch request. The renderer never supplies a route, body, token,
+    /// finalization ID, or provider identity. A successful action is not
+    /// trusted from its broad Studio response alone: it is followed by the
+    /// exact owner-only lookup before any local state can advance.
+    pub(crate) async fn gpu_switch_owner_action(
+        &self,
+        switch_id: &str,
+        session_id: &str,
+        expected_pod_id: &str,
+        action: NativeWorkerGpuSwitchOwnerActionV1,
+    ) -> NativeResult<NativeWorkerGpuSwitchOwnerActionResultV1> {
+        let switch_id = parse_studio_uuid(switch_id, "gpu_switch_not_found")?;
+        let session_id = parse_studio_uuid(session_id, "studio_session_id_invalid")?;
+        validate_pod_id(expected_pod_id)?;
+        let (route_suffix, payload) = gpu_switch_owner_action_payload(&session_id, &action)?;
+        let pin = self.session.pin().await?;
+        ensure_pin_matches_pod(&pin, expected_pod_id)?;
+        let worker_token = self.worker_token()?;
+        let canonical_body = super::gpu_inventory::jcs_value(&payload)
+            .map_err(|_| gpu_switch_worker_response_invalid())?;
+        let url = pin.endpoint(&format!(
+            "/v1/studio/gpu-switches/{switch_id}/{route_suffix}"
+        ))?;
+        let response = match self
+            .client
+            .request(Method::POST, url)
+            .header(ACCEPT, "application/json")
+            .header(AUTHORIZATION, format!("Bearer {worker_token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(canonical_body)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(_) => return Ok(NativeWorkerGpuSwitchOwnerActionResultV1::Uncertain),
+        };
+        let status = response.status();
+        let bytes = match read_bounded(response, MAX_STUDIO_RESPONSE_BYTES).await {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(NativeWorkerGpuSwitchOwnerActionResultV1::Uncertain),
+        };
+        if reject_gpu_switch_secret_reflection(&self.vault, &bytes, &worker_token).is_err() {
+            return Ok(NativeWorkerGpuSwitchOwnerActionResultV1::Uncertain);
+        }
+        if status != StatusCode::OK {
+            return parse_gpu_switch_error(status, &bytes)
+                .map(NativeWorkerGpuSwitchOwnerActionResultV1::Rejected);
+        }
+        // Success without a parseable JSON envelope is ambiguous: the worker
+        // may have committed before an intermediary truncated the response.
+        if strict_gpu_switch_json::<Value>(&bytes).is_err() {
+            return Ok(NativeWorkerGpuSwitchOwnerActionResultV1::Uncertain);
+        }
+        match self
+            .gpu_switch_owner_lookup(
+                &switch_id.to_string(),
+                &session_id.to_string(),
+                expected_pod_id,
+            )
+            .await
+        {
+            Ok(NativeWorkerGpuSwitchOwnerLookupResultV1::Found(owner)) => {
+                Ok(NativeWorkerGpuSwitchOwnerActionResultV1::Owner(owner))
+            }
+            Ok(NativeWorkerGpuSwitchOwnerLookupResultV1::Rejected(_))
+            | Ok(NativeWorkerGpuSwitchOwnerLookupResultV1::NotFound)
+            | Err(_) => Ok(NativeWorkerGpuSwitchOwnerActionResultV1::Uncertain),
+        }
+    }
+
+    /// Settle exactly one durable `sent_uncertain` create. Unlike ordinary
+    /// cancel this sends the original canonical create request inside the
+    /// worker's tombstone-producing route, so a response-loss draft can never
+    /// be mistaken for an unsent request or retried with a fresh switch ID.
+    pub(crate) async fn gpu_switch_settle_create(
+        &self,
+        request: NativeWorkerGpuSwitchCreateRequestV1,
+    ) -> NativeResult<NativeWorkerGpuSwitchOwnerActionResultV1> {
+        validate_gpu_switch_create_request(&request)?;
+        let switch_id = parse_studio_uuid(&request.switch_id, "gpu_switch_not_found")?;
+        let pin = self.session.pin().await?;
+        ensure_pin_matches_pod(&pin, &request.old_pod_id)?;
+        let worker_token = self.worker_token()?;
+        let create_request =
+            serde_json::from_slice::<Value>(&canonical_gpu_switch_create_body(&request)?)
+                .map_err(|_| gpu_switch_worker_response_invalid())?;
+        let body = super::gpu_inventory::jcs_value(&json!({
+            "schema_version": 1,
+            "action": "cancel",
+            "create_request": create_request,
+        }))
+        .map_err(|_| gpu_switch_worker_response_invalid())?;
+        let url = pin.endpoint(&format!(
+            "/v1/internal/gpu-switches/{switch_id}/settle-create"
+        ))?;
+        let response = match self
+            .client
+            .request(Method::POST, url)
+            .header(ACCEPT, "application/json")
+            .header(AUTHORIZATION, format!("Bearer {worker_token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(_) => return Ok(NativeWorkerGpuSwitchOwnerActionResultV1::Uncertain),
+        };
+        let status = response.status();
+        let bytes = match read_bounded(response, MAX_STUDIO_RESPONSE_BYTES).await {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(NativeWorkerGpuSwitchOwnerActionResultV1::Uncertain),
+        };
+        if reject_gpu_switch_secret_reflection(&self.vault, &bytes, &worker_token).is_err() {
+            return Ok(NativeWorkerGpuSwitchOwnerActionResultV1::Uncertain);
+        }
+        if status != StatusCode::OK {
+            return parse_gpu_switch_error(status, &bytes)
+                .map(NativeWorkerGpuSwitchOwnerActionResultV1::Rejected);
+        }
+        let owner: NativeWorkerGpuSwitchOwnerLookupV1 = match strict_gpu_switch_json(&bytes) {
+            Ok(value) => value,
+            Err(_) => return Ok(NativeWorkerGpuSwitchOwnerActionResultV1::Uncertain),
+        };
+        if validate_gpu_switch_owner_lookup(&owner, &switch_id.to_string()).is_err() {
+            return Ok(NativeWorkerGpuSwitchOwnerActionResultV1::Uncertain);
+        }
+        Ok(NativeWorkerGpuSwitchOwnerActionResultV1::Owner(owner))
+    }
+
     pub async fn create_batch(&self, input: CreateBatchInput) -> NativeResult<WorkerHttpResponse> {
         validate_create_batch(&input)?;
         self.request_json(
@@ -384,6 +1229,23 @@ impl WorkerApi {
         self.request_json(
             Method::GET,
             &format!("/v1/batches/{batch_id}"),
+            None,
+            true,
+            WorkerOperation::Manifest,
+        )
+        .await
+    }
+
+    /// Owner-only exact submission lookup. The ID is validated before it ever
+    /// becomes a URL segment, and the worker's generic 404 projection keeps a
+    /// foreign caller from learning whether another user's key exists.
+    pub async fn get_submission(
+        &self,
+        client_submission_id: Uuid,
+    ) -> NativeResult<WorkerHttpResponse> {
+        self.request_json(
+            Method::GET,
+            &format!("/v1/submissions/{client_submission_id}"),
             None,
             true,
             WorkerOperation::Manifest,
@@ -695,7 +1557,7 @@ impl WorkerApi {
         } else if operation.is_studio() {
             project_studio_error(status, &body)?
         } else {
-            project_worker_error(&body)?
+            project_worker_error(status, &body)?
         };
         Ok(WorkerHttpResponse {
             status: status.as_u16(),
@@ -718,6 +1580,8 @@ struct StudioStateProjection {
     sessions: Vec<StudioSessionProjection>,
     active_batch: Option<StudioActiveBatchProjection>,
     stop_request: Option<StudioStopRequestProjection>,
+    gpu_switch_request: Option<NativeWorkerGpuSwitchRequestViewV1>,
+    gpu_switch_can_respond: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -826,6 +1690,22 @@ fn parse_studio_uuid(value: &str, code: &'static str) -> NativeResult<Uuid> {
     Ok(parsed)
 }
 
+pub(crate) fn parse_submission_uuid(value: &str) -> NativeResult<Uuid> {
+    let parsed = Uuid::parse_str(value).map_err(|_| {
+        NativeError::new(
+            "client_submission_id_invalid",
+            "The batch submission identifier is invalid.",
+        )
+    })?;
+    if parsed.get_version() != Some(uuid::Version::Random) || parsed.to_string() != value {
+        return Err(NativeError::new(
+            "client_submission_id_invalid",
+            "The batch submission identifier is invalid.",
+        ));
+    }
+    Ok(parsed)
+}
+
 fn studio_session_path(session_id: Uuid) -> String {
     format!("/v1/studio/sessions/{session_id}")
 }
@@ -909,6 +1789,29 @@ fn studio_stop_response_plan(
         operation: WorkerOperation::StudioStopResponse,
         binding: StudioResponseBinding::RespondToStop {
             request_id,
+            session_id,
+        },
+        expected_pod_id: None,
+    }
+}
+
+fn studio_gpu_switch_response_plan(
+    switch_id: Uuid,
+    session_id: Uuid,
+    decision: StudioStopDecision,
+) -> StudioRequestPlan {
+    StudioRequestPlan {
+        method: Method::POST,
+        path: format!("/v1/studio/gpu-switches/{switch_id}/responses"),
+        body: Some(json!({
+            "schema_version": 1,
+            "session_id": session_id,
+            "decision": decision,
+        })),
+        authenticated: true,
+        operation: WorkerOperation::StudioGpuSwitchResponse,
+        binding: StudioResponseBinding::RespondToGpuSwitch {
+            switch_id,
             session_id,
         },
         expected_pod_id: None,
@@ -1101,6 +2004,8 @@ fn validate_studio_state_shape(body: &Value) -> NativeResult<()> {
             "sessions",
             "active_batch",
             "stop_request",
+            "gpu_switch_request",
+            "gpu_switch_can_respond",
         ],
     )?;
     require_exact_keys(
@@ -1172,6 +2077,61 @@ fn validate_studio_state_shape(body: &Value) -> NativeResult<()> {
         )?;
         for key in ["waiting_for", "approved_by", "denied_by"] {
             for participant in stop
+                .get(key)
+                .and_then(Value::as_array)
+                .ok_or_else(worker_response_invalid)?
+            {
+                require_exact_keys(participant, &["session_id", "display_name"])?;
+            }
+        }
+    }
+    if let Some(gpu_switch) = body
+        .get("gpu_switch_request")
+        .filter(|value| !value.is_null())
+    {
+        require_exact_keys(
+            gpu_switch,
+            &[
+                "schema_version",
+                "switch_id",
+                "old_pod_id",
+                "old_gpu_id",
+                "old_gpu_display_name",
+                "initial_target_gpu_id",
+                "initial_target_gpu_display_name",
+                "initial_replacement_attempt_id",
+                "requester",
+                "state",
+                "reason",
+                "requested_at",
+                "response_deadline",
+                "ready_to_delete_at",
+                "waiting_for",
+                "approved_by",
+                "denied_by",
+                "batch_id",
+                "batch_owner",
+                "batch_state_at_finalization",
+                "replacement_attempt_id",
+                "replacement_attempt_revision",
+                "replacement_pod_id",
+                "actual_target_gpu_id",
+            ],
+        )?;
+        require_exact_keys(
+            gpu_switch
+                .get("requester")
+                .ok_or_else(worker_response_invalid)?,
+            &["session_id", "display_name"],
+        )?;
+        if let Some(batch_owner) = gpu_switch
+            .get("batch_owner")
+            .filter(|value| !value.is_null())
+        {
+            require_exact_keys(batch_owner, &["display_name"])?;
+        }
+        for key in ["waiting_for", "approved_by", "denied_by"] {
+            for participant in gpu_switch
                 .get(key)
                 .and_then(Value::as_array)
                 .ok_or_else(worker_response_invalid)?
@@ -1377,6 +2337,29 @@ fn project_studio_state(body: &Value) -> NativeResult<Value> {
     if let Some(stop) = projection.stop_request.as_mut() {
         validate_studio_stop_request(stop, &current_session_id)?;
     }
+    if let Some(gpu_switch) = projection.gpu_switch_request.as_ref() {
+        validate_gpu_switch_request_view(gpu_switch)?;
+        if gpu_switch
+            .waiting_for
+            .iter()
+            .any(|participant| participant.session_id == current_session_id)
+            && !projection.gpu_switch_can_respond
+        {
+            return Err(worker_response_invalid());
+        }
+    }
+    if projection.gpu_switch_can_respond
+        && (projection
+            .gpu_switch_request
+            .as_ref()
+            .is_none_or(|request| {
+                request.state != NativeWorkerGpuSwitchStateV1::Pending
+                    || projection.current_session.availability != StudioAvailability::Foreground
+                    || request.requester.session_id == current_session_id
+            }))
+    {
+        return Err(worker_response_invalid());
+    }
     serde_json::to_value(projection).map_err(|_| worker_response_invalid())
 }
 
@@ -1402,6 +2385,7 @@ fn validate_studio_response_binding(
         | StudioResponseBinding::Status { session_id }
         | StudioResponseBinding::CreateStop { session_id, .. }
         | StudioResponseBinding::RespondToStop { session_id, .. }
+        | StudioResponseBinding::RespondToGpuSwitch { session_id, .. }
         | StudioResponseBinding::FinalizeStop { session_id, .. }
         | StudioResponseBinding::CancelStop { session_id, .. } => session_id.to_string(),
     };
@@ -1441,6 +2425,19 @@ fn validate_studio_response_binding(
                 .as_ref()
                 .ok_or_else(studio_response_mismatch)?;
             if stop.request_id != request_id.to_string() {
+                return Err(studio_response_mismatch());
+            }
+        }
+        StudioResponseBinding::RespondToGpuSwitch { switch_id, .. } => {
+            // Do not compare `waiting_for` here. The worker resolves peer
+            // eligibility by authenticated principal, so another foreground
+            // session for the same peer principal is valid and must retain
+            // its exact responding session in `approved_by`/`denied_by`.
+            let request = state
+                .gpu_switch_request
+                .as_ref()
+                .ok_or_else(studio_response_mismatch)?;
+            if request.switch_id != switch_id.to_string() {
                 return Err(studio_response_mismatch());
             }
         }
@@ -1500,16 +2497,1023 @@ fn studio_response_mismatch() -> NativeError {
     )
 }
 
+/// A normal Stop can only become provider-delete authority when the worker has
+/// no live Switch marker. Pending/approved consent is a request-level veto;
+/// every later nonterminal Switch state is a durable mutation veto.
+fn normal_stop_worker_switch_veto(projection: &StudioStateProjection) -> NativeResult<()> {
+    let Some(request) = projection.gpu_switch_request.as_ref() else {
+        return Ok(());
+    };
+    match request.state {
+        NativeWorkerGpuSwitchStateV1::Denied
+        | NativeWorkerGpuSwitchStateV1::Expired
+        | NativeWorkerGpuSwitchStateV1::Cancelled
+        | NativeWorkerGpuSwitchStateV1::Completed => Ok(()),
+        NativeWorkerGpuSwitchStateV1::Pending | NativeWorkerGpuSwitchStateV1::Approved => {
+            Err(NativeError::new(
+                "gpu_switch_request_in_progress",
+                "A GPU switch request is already in progress.",
+            ))
+        }
+        NativeWorkerGpuSwitchStateV1::Pausing
+        | NativeWorkerGpuSwitchStateV1::ReadyToDelete
+        | NativeWorkerGpuSwitchStateV1::DeleteIntent
+        | NativeWorkerGpuSwitchStateV1::ReplacementReady
+        | NativeWorkerGpuSwitchStateV1::NeedsAttention => Err(NativeError::new(
+            "gpu_switch_pending",
+            "A coordinated GPU switch is already in progress.",
+        )),
+    }
+}
+
+/// Validate the strict post-Finalize worker state without a transport. Keeping
+/// this pure makes the native DELETE boundary directly testable: every private
+/// plan field and any concurrent Switch marker must still agree immediately
+/// before the provider authority is minted.
+fn validate_native_normal_stop_finalizing_projection(
+    plan: &NativeWorkerNormalStopFinalizePlanV1,
+    projection: &StudioStateProjection,
+) -> NativeResult<()> {
+    if projection.server_instance_id != plan.expected_server_instance_id {
+        return Err(NativeError::new(
+            "stop_request_in_progress",
+            "The ImageForge worker changed before the GPU could be deleted.",
+        ));
+    }
+    normal_stop_worker_switch_veto(projection)?;
+    let stop = projection.stop_request.as_ref().ok_or_else(|| {
+        NativeError::new(
+            "stop_request_in_progress",
+            "The GPU Stop request is no longer ready for deletion.",
+        )
+    })?;
+    if stop.request_id != plan.request_id
+        || stop.requester.session_id != plan.session_id
+        || stop.pod_id != plan.pod_id
+        || stop.state != StudioStopRequestState::Finalizing
+        || stop.finalization_id.as_deref() != Some(plan.finalization_id.as_str())
+        || stop.finalization_expires_at.is_none()
+    {
+        return Err(NativeError::new(
+            "stop_request_in_progress",
+            "The GPU Stop request is no longer ready for deletion.",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeWorkerGpuSwitchErrorEnvelopeWireV1 {
+    schema_version: u8,
+    error: NativeWorkerGpuSwitchErrorWireV1,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeWorkerGpuSwitchErrorWireV1 {
+    code: String,
+    message: String,
+    details: Value,
+}
+
+fn validate_gpu_switch_create_request(
+    request: &NativeWorkerGpuSwitchCreateRequestV1,
+) -> NativeResult<()> {
+    parse_studio_uuid(&request.switch_id, "gpu_switch_not_found")?;
+    parse_studio_uuid(&request.session_id, "studio_session_id_invalid")?;
+    parse_studio_uuid(
+        &request.initial_replacement_attempt_id,
+        "gpu_switch_transition_invalid",
+    )?;
+    if let Some(batch_id) = request.expected_batch_id.as_deref() {
+        parse_studio_uuid(batch_id, "gpu_switch_transition_invalid")?;
+    }
+    validate_pod_id(&request.old_pod_id)?;
+    for value in [
+        &request.old_gpu_id,
+        &request.old_gpu_display_name,
+        &request.initial_target_gpu_id,
+        &request.initial_target_gpu_display_name,
+    ] {
+        validate_gpu_switch_identity(value)?;
+    }
+    if request.old_gpu_id == request.initial_target_gpu_id {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    validate_studio_timestamp(&request.inventory_observed_at)
+        .map_err(|_| gpu_switch_worker_response_invalid())
+}
+
+fn canonical_gpu_switch_create_body(
+    request: &NativeWorkerGpuSwitchCreateRequestV1,
+) -> NativeResult<Vec<u8>> {
+    let value = json!({
+        "schema_version": 1,
+        "switch_id": request.switch_id,
+        "session_id": request.session_id,
+        "old_pod_id": request.old_pod_id,
+        "old_gpu_id": request.old_gpu_id,
+        "old_gpu_display_name": request.old_gpu_display_name,
+        "initial_target_gpu_id": request.initial_target_gpu_id,
+        "initial_target_gpu_display_name": request.initial_target_gpu_display_name,
+        "initial_replacement_attempt_id": request.initial_replacement_attempt_id,
+        "expected_batch_id": request.expected_batch_id,
+        "inventory_observed_at": request.inventory_observed_at,
+    });
+    super::gpu_inventory::jcs_value(&value)
+        .map(|body| body.into_bytes())
+        .map_err(|_| gpu_switch_worker_response_invalid())
+}
+
+fn gpu_switch_owner_action_payload(
+    session_id: &Uuid,
+    action: &NativeWorkerGpuSwitchOwnerActionV1,
+) -> NativeResult<(&'static str, Value)> {
+    let session_id = session_id.to_string();
+    let parse_finalization = |value: &str| {
+        parse_studio_uuid(value, "gpu_switch_finalization_mismatch").map(|value| value.to_string())
+    };
+    match action {
+        NativeWorkerGpuSwitchOwnerActionV1::Finalize { finalization_id } => Ok((
+            "finalize",
+            json!({
+                "schema_version": 1,
+                "session_id": session_id,
+                "finalization_id": parse_finalization(finalization_id)?,
+            }),
+        )),
+        NativeWorkerGpuSwitchOwnerActionV1::DeleteIntent { finalization_id } => Ok((
+            "delete-intent",
+            json!({
+                "schema_version": 1,
+                "session_id": session_id,
+                "finalization_id": parse_finalization(finalization_id)?,
+            }),
+        )),
+        NativeWorkerGpuSwitchOwnerActionV1::Adopt {
+            finalization_id,
+            replacement_attempt_id,
+            replacement_attempt_revision,
+            replacement_pod_id,
+            target_gpu_id,
+            create_marker_sha256,
+            create_intent_sha256,
+            create_wire_body_sha256,
+        } => {
+            let replacement_attempt_id =
+                parse_studio_uuid(replacement_attempt_id, "gpu_switch_adoption_mismatch")?
+                    .to_string();
+            if *replacement_attempt_revision == 0
+                || *replacement_attempt_revision > MAX_JSON_SAFE_INTEGER
+                || validate_pod_id(replacement_pod_id).is_err()
+                || !valid_gpu_switch_identity(target_gpu_id)
+                || !valid_lower_sha256(create_marker_sha256)
+                || !valid_lower_sha256(create_intent_sha256)
+                || !valid_lower_sha256(create_wire_body_sha256)
+            {
+                return Err(gpu_switch_worker_response_invalid());
+            }
+            Ok((
+                "adopt",
+                json!({
+                    "schema_version": 1,
+                    "session_id": session_id,
+                    "finalization_id": parse_finalization(finalization_id)?,
+                    "replacement_attempt_id": replacement_attempt_id,
+                    "replacement_attempt_revision": replacement_attempt_revision,
+                    "replacement_pod_id": replacement_pod_id,
+                    "target_gpu_id": target_gpu_id,
+                    "create_contract_revision": 1,
+                    "create_marker_sha256": create_marker_sha256,
+                    "create_intent_sha256": create_intent_sha256,
+                    "create_wire_body_sha256": create_wire_body_sha256,
+                }),
+            ))
+        }
+        NativeWorkerGpuSwitchOwnerActionV1::Complete {
+            finalization_id,
+            replacement_attempt_id,
+            replacement_attempt_revision,
+            replacement_pod_id,
+        } => {
+            let replacement_attempt_id =
+                parse_studio_uuid(replacement_attempt_id, "gpu_switch_completion_not_ready")?
+                    .to_string();
+            if *replacement_attempt_revision == 0
+                || *replacement_attempt_revision > MAX_JSON_SAFE_INTEGER
+                || validate_pod_id(replacement_pod_id).is_err()
+            {
+                return Err(gpu_switch_worker_response_invalid());
+            }
+            Ok((
+                "complete",
+                json!({
+                    "schema_version": 1,
+                    "session_id": session_id,
+                    "finalization_id": parse_finalization(finalization_id)?,
+                    "replacement_attempt_id": replacement_attempt_id,
+                    "replacement_attempt_revision": replacement_attempt_revision,
+                    "replacement_pod_id": replacement_pod_id,
+                }),
+            ))
+        }
+        NativeWorkerGpuSwitchOwnerActionV1::Cancel { finalization_id } => {
+            let finalization_id = finalization_id
+                .as_deref()
+                .map(parse_finalization)
+                .transpose()?;
+            Ok((
+                "cancel",
+                json!({
+                    "schema_version": 1,
+                    "session_id": session_id,
+                    "finalization_id": finalization_id,
+                }),
+            ))
+        }
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn sha256_text_with_domain(domain: &str, value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(domain.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(value.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn strict_gpu_switch_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ()> {
+    if bytes.is_empty() || bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+        return Err(());
+    }
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let decoded = T::deserialize(&mut deserializer).map_err(|_| ())?;
+    deserializer.end().map_err(|_| ())?;
+    Ok(decoded)
+}
+
+fn reject_gpu_switch_secret_reflection(
+    vault: &Arc<dyn CredentialVault>,
+    bytes: &[u8],
+    worker_token: &str,
+) -> NativeResult<()> {
+    let body =
+        serde_json::from_slice::<Value>(bytes).map_err(|_| gpu_switch_worker_response_invalid())?;
+    let runpod_key = vault.load(CredentialKind::RunpodApiKey).ok();
+    reject_secret_reflection(&body, Some(worker_token), runpod_key.as_deref())
+        .map_err(|_| gpu_switch_worker_response_invalid())
+}
+
+fn parse_gpu_switch_error(
+    status: StatusCode,
+    bytes: &[u8],
+) -> NativeResult<NativeWorkerGpuSwitchErrorV1> {
+    let envelope: NativeWorkerGpuSwitchErrorEnvelopeWireV1 =
+        strict_gpu_switch_json(bytes).map_err(|_| gpu_switch_worker_response_invalid())?;
+    if envelope.schema_version != 1 || envelope.error.details != Value::Null {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    let Some((expected_status, expected_message)) = gpu_switch_error_spec(&envelope.error.code)
+    else {
+        return Err(gpu_switch_worker_response_invalid());
+    };
+    if status != expected_status || envelope.error.message != expected_message {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    Ok(NativeWorkerGpuSwitchErrorV1 {
+        code: envelope.error.code,
+        message: envelope.error.message,
+    })
+}
+
+/// Parse one complete runtime-identity response after the transport has
+/// finished reading it.  Keeping this seam pure lets the native tests model
+/// a fake worker's success, typed rejection, malformed/mismatched response,
+/// and response-loss outcomes without weakening the pinned HTTP client.
+fn map_gpu_switch_runtime_identity_response(
+    status: StatusCode,
+    bytes: &[u8],
+    expected_switch_id: &str,
+) -> NativeResult<NativeWorkerGpuSwitchRuntimeIdentityResultV1> {
+    if status == StatusCode::OK {
+        let identity: NativeWorkerGpuSwitchRuntimeIdentityV1 = strict_gpu_switch_json(bytes)
+            .map_err(|_| worker_gpu_switch_runtime_identity_unavailable())?;
+        validate_gpu_switch_runtime_identity(&identity, expected_switch_id)?;
+        return Ok(NativeWorkerGpuSwitchRuntimeIdentityResultV1::Found(identity));
+    }
+    let error = parse_gpu_switch_error(status, bytes)
+        .map_err(|_| worker_gpu_switch_runtime_identity_unavailable())?;
+    Ok(NativeWorkerGpuSwitchRuntimeIdentityResultV1::Rejected(error))
+}
+
+fn gpu_switch_error_spec(code: &str) -> Option<(StatusCode, &'static str)> {
+    Some(match code {
+        "gpu_switch_request_not_found" => (
+            StatusCode::NOT_FOUND,
+            "The GPU switch request does not exist.",
+        ),
+        "gpu_switch_request_in_progress" => (
+            StatusCode::CONFLICT,
+            "Another GPU switch request is already in progress.",
+        ),
+        "gpu_switch_identity_mismatch" => (
+            StatusCode::CONFLICT,
+            "The GPU switch ID cannot be used for different request details.",
+        ),
+        "gpu_switch_response_conflict" => (
+            StatusCode::CONFLICT,
+            "This user already sent a different GPU switch response.",
+        ),
+        "gpu_switch_response_not_allowed" => (
+            StatusCode::CONFLICT,
+            "This user cannot respond to the GPU switch request.",
+        ),
+        "gpu_switch_approval_pending" => (
+            StatusCode::CONFLICT,
+            "GPU switch approval is still pending.",
+        ),
+        "gpu_switch_not_approved" => (
+            StatusCode::CONFLICT,
+            "The GPU switch request is not approved for finalization.",
+        ),
+        "gpu_switch_finalization_mismatch" => (
+            StatusCode::CONFLICT,
+            "The GPU switch finalization identity does not match.",
+        ),
+        "gpu_switch_cancel_not_allowed" => (
+            StatusCode::CONFLICT,
+            "The GPU switch cannot be cancelled after delete intent.",
+        ),
+        "gpu_switch_adoption_mismatch" => (
+            StatusCode::CONFLICT,
+            "The replacement worker identity does not match the GPU switch.",
+        ),
+        "gpu_switch_batch_changed" => (
+            StatusCode::CONFLICT,
+            "The active batch no longer matches the GPU switch preflight.",
+        ),
+        "gpu_switch_completion_not_ready" => (
+            StatusCode::CONFLICT,
+            "The replacement worker is not ready to complete the GPU switch.",
+        ),
+        "gpu_switch_current_pod_unverified" => (
+            StatusCode::CONFLICT,
+            "The current worker Pod identity is not authoritative.",
+        ),
+        "gpu_switch_local_receipts_pending" => (
+            StatusCode::CONFLICT,
+            "Local image receipts must settle before changing compute.",
+        ),
+        "stop_request_in_progress" => (
+            StatusCode::CONFLICT,
+            "A coordinated GPU Stop request is already in progress.",
+        ),
+        "gpu_switch_requester_not_foreground" => (
+            StatusCode::LOCKED,
+            "The GPU switch requester must remain foreground.",
+        ),
+        "switch_owner_unavailable" => (
+            StatusCode::LOCKED,
+            "The active batch owner is not available to approve this GPU switch.",
+        ),
+        "gpu_switch_queue_dispatch_uncertain" => (
+            StatusCode::LOCKED,
+            "The local queue submission must be reconciled before changing compute.",
+        ),
+        "gpu_stop_pending" => (
+            StatusCode::LOCKED,
+            "GPU Stop is finalizing; a GPU switch is temporarily blocked.",
+        ),
+        "gpu_switch_pending" => (
+            StatusCode::LOCKED,
+            "A finalized GPU switch blocks this worker operation.",
+        ),
+        "queue_switch_pending" => (
+            StatusCode::LOCKED,
+            "A GPU switch is awaiting consent; the local queue remains parked.",
+        ),
+        "gpu_switch_store_corrupt" => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Worker GPU switch history is unavailable. Repair the shared volume before changing compute.",
+        ),
+        "gpu_switch_runtime_identity_unavailable" => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Worker runtime identity is unavailable. Repair the ImageForge template before changing compute.",
+        ),
+        "gpu_control_guard_conflict" => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Worker GPU control history conflicts. Repair the shared volume before changing compute.",
+        ),
+        _ => return None,
+    })
+}
+
+fn validate_gpu_switch_create_response(
+    response: &NativeWorkerGpuSwitchCreateResponseV1,
+    request: &NativeWorkerGpuSwitchCreateRequestV1,
+) -> NativeResult<()> {
+    if response.schema_version != 1 {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    validate_gpu_switch_user_id(&response.requester_user_id)?;
+    parse_studio_uuid(
+        &response.principal_binding_id,
+        "gpu_switch_worker_response_invalid",
+    )?;
+    validate_gpu_switch_request_view(&response.request)?;
+    let view = &response.request;
+    if view.switch_id != request.switch_id
+        || view.requester.session_id != request.session_id
+        || view.old_pod_id != request.old_pod_id
+        || view.old_gpu_id != request.old_gpu_id
+        || view.old_gpu_display_name != request.old_gpu_display_name
+        || view.initial_target_gpu_id != request.initial_target_gpu_id
+        || view.initial_target_gpu_display_name != request.initial_target_gpu_display_name
+        || view.initial_replacement_attempt_id != request.initial_replacement_attempt_id
+    {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    Ok(())
+}
+
+fn validate_gpu_switch_request_view(view: &NativeWorkerGpuSwitchRequestViewV1) -> NativeResult<()> {
+    if view.schema_version != 1 {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    for identifier in [&view.switch_id, &view.initial_replacement_attempt_id] {
+        parse_studio_uuid(identifier, "gpu_switch_worker_response_invalid")?;
+    }
+    validate_pod_id(&view.old_pod_id).map_err(|_| gpu_switch_worker_response_invalid())?;
+    for identity in [
+        &view.old_gpu_id,
+        &view.old_gpu_display_name,
+        &view.initial_target_gpu_id,
+        &view.initial_target_gpu_display_name,
+    ] {
+        validate_gpu_switch_identity(identity)?;
+    }
+    if view.old_gpu_id == view.initial_target_gpu_id {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    validate_gpu_switch_participant(&view.requester)?;
+    validate_studio_timestamp(&view.requested_at)?;
+    validate_studio_timestamp(&view.response_deadline)?;
+    if let Some(timestamp) = view.ready_to_delete_at.as_deref() {
+        validate_studio_timestamp(timestamp)?;
+    }
+    for participants in [&view.waiting_for, &view.approved_by, &view.denied_by] {
+        validate_gpu_switch_participants(participants)?;
+    }
+    if let Some(batch_id) = view.batch_id.as_deref() {
+        parse_studio_uuid(batch_id, "gpu_switch_worker_response_invalid")?;
+    }
+    if view
+        .batch_owner
+        .as_ref()
+        .is_some_and(|owner| !valid_studio_display_name(&owner.display_name))
+        || (view.batch_id.is_some() != view.batch_owner.is_some())
+    {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    let replacement = (
+        view.replacement_attempt_id.as_deref(),
+        view.replacement_attempt_revision,
+        view.replacement_pod_id.as_deref(),
+        view.actual_target_gpu_id.as_deref(),
+    );
+    let replacement_complete = replacement.0.is_some()
+        && replacement.1.is_some()
+        && replacement.2.is_some()
+        && replacement.3.is_some();
+    if replacement_complete
+        != (replacement.0.is_some()
+            || replacement.1.is_some()
+            || replacement.2.is_some()
+            || replacement.3.is_some())
+    {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    if let Some(attempt_id) = replacement.0 {
+        parse_studio_uuid(attempt_id, "gpu_switch_worker_response_invalid")?;
+    }
+    if replacement
+        .1
+        .is_some_and(|revision| revision == 0 || revision > MAX_JSON_SAFE_INTEGER)
+        || replacement
+            .2
+            .is_some_and(|pod_id| validate_pod_id(pod_id).is_err())
+        || replacement
+            .3
+            .is_some_and(|gpu_id| !valid_gpu_switch_identity(gpu_id))
+    {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    let finalized = matches!(
+        view.state,
+        NativeWorkerGpuSwitchStateV1::Pausing
+            | NativeWorkerGpuSwitchStateV1::ReadyToDelete
+            | NativeWorkerGpuSwitchStateV1::DeleteIntent
+            | NativeWorkerGpuSwitchStateV1::ReplacementReady
+            | NativeWorkerGpuSwitchStateV1::NeedsAttention
+    );
+    if view.batch_id.is_none() && view.batch_state_at_finalization.is_some()
+        || (finalized && view.batch_id.is_some() && view.batch_state_at_finalization.is_none())
+        || (!finalized && view.batch_state_at_finalization.is_some())
+        || matches!(
+            view.state,
+            NativeWorkerGpuSwitchStateV1::Denied
+                | NativeWorkerGpuSwitchStateV1::Expired
+                | NativeWorkerGpuSwitchStateV1::Cancelled
+                | NativeWorkerGpuSwitchStateV1::Completed
+        )
+    {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    let expected_reason = match view.state {
+        NativeWorkerGpuSwitchStateV1::Pending | NativeWorkerGpuSwitchStateV1::Approved => None,
+        NativeWorkerGpuSwitchStateV1::Pausing => {
+            if matches!(
+                view.reason,
+                None | Some(NativeWorkerGpuSwitchReasonV1::RequesterCancelled)
+            ) {
+                view.reason
+            } else {
+                return Err(gpu_switch_worker_response_invalid());
+            }
+        }
+        NativeWorkerGpuSwitchStateV1::ReadyToDelete
+        | NativeWorkerGpuSwitchStateV1::DeleteIntent
+        | NativeWorkerGpuSwitchStateV1::ReplacementReady => None,
+        NativeWorkerGpuSwitchStateV1::NeedsAttention => {
+            Some(NativeWorkerGpuSwitchReasonV1::PauseFailed)
+        }
+        NativeWorkerGpuSwitchStateV1::Denied
+        | NativeWorkerGpuSwitchStateV1::Expired
+        | NativeWorkerGpuSwitchStateV1::Cancelled
+        | NativeWorkerGpuSwitchStateV1::Completed => {
+            return Err(gpu_switch_worker_response_invalid())
+        }
+    };
+    if view.reason != expected_reason {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    let fixed_point = matches!(
+        view.state,
+        NativeWorkerGpuSwitchStateV1::ReadyToDelete
+            | NativeWorkerGpuSwitchStateV1::DeleteIntent
+            | NativeWorkerGpuSwitchStateV1::ReplacementReady
+    );
+    if fixed_point != view.ready_to_delete_at.is_some()
+        || replacement_complete != (view.state == NativeWorkerGpuSwitchStateV1::ReplacementReady)
+    {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    if view.state == NativeWorkerGpuSwitchStateV1::NeedsAttention
+        && (view.batch_id.is_none()
+            || view.batch_owner.is_none()
+            || view.batch_state_at_finalization != Some(NativeWorkerGpuSwitchBatchStateV1::Running))
+    {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    if view.state == NativeWorkerGpuSwitchStateV1::Pausing
+        && view.reason == Some(NativeWorkerGpuSwitchReasonV1::RequesterCancelled)
+        && (view.batch_id.is_none()
+            || view.batch_state_at_finalization != Some(NativeWorkerGpuSwitchBatchStateV1::Running))
+    {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    Ok(())
+}
+
+fn validate_gpu_switch_public_lookup(
+    lookup: &NativeWorkerGpuSwitchPublicLookupV1,
+    expected_switch_id: &str,
+) -> NativeResult<()> {
+    if lookup.schema_version != 1 || lookup.switch_id != expected_switch_id {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    parse_studio_uuid(&lookup.switch_id, "gpu_switch_worker_response_invalid")?;
+    validate_gpu_switch_lookup_identity(
+        lookup.state,
+        lookup.replacement_attempt_id.as_deref(),
+        lookup.replacement_attempt_revision,
+        lookup.replacement_pod_id.as_deref(),
+        lookup.actual_target_gpu_id.as_deref(),
+        None,
+        None,
+        false,
+    )
+}
+
+fn validate_gpu_switch_owner_lookup(
+    lookup: &NativeWorkerGpuSwitchOwnerLookupV1,
+    expected_switch_id: &str,
+) -> NativeResult<()> {
+    if lookup.schema_version != 1 || lookup.switch_id != expected_switch_id {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    parse_studio_uuid(&lookup.switch_id, "gpu_switch_worker_response_invalid")?;
+    validate_gpu_switch_user_id(&lookup.requester_user_id)?;
+    parse_studio_uuid(
+        &lookup.principal_binding_id,
+        "gpu_switch_worker_response_invalid",
+    )?;
+    if let Some(finalization_id) = lookup.finalization_id.as_deref() {
+        parse_studio_uuid(finalization_id, "gpu_switch_worker_response_invalid")?;
+    }
+    if lookup
+        .terminal_tombstone_sha256
+        .as_deref()
+        .is_some_and(|value| !valid_lower_sha256(value))
+    {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    let terminal = matches!(
+        lookup.state,
+        NativeWorkerGpuSwitchStateV1::Denied
+            | NativeWorkerGpuSwitchStateV1::Expired
+            | NativeWorkerGpuSwitchStateV1::Cancelled
+            | NativeWorkerGpuSwitchStateV1::Completed
+    );
+    if terminal != lookup.terminal_tombstone_sha256.is_some() {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    validate_gpu_switch_lookup_identity(
+        lookup.state,
+        lookup.replacement_attempt_id.as_deref(),
+        lookup.replacement_attempt_revision,
+        lookup.replacement_pod_id.as_deref(),
+        lookup.actual_target_gpu_id.as_deref(),
+        lookup.finalization_id.as_deref(),
+        lookup.terminal_tombstone_sha256.as_deref(),
+        true,
+    )
+}
+
+fn validate_gpu_switch_lookup_identity(
+    state: NativeWorkerGpuSwitchStateV1,
+    replacement_attempt_id: Option<&str>,
+    replacement_attempt_revision: Option<u64>,
+    replacement_pod_id: Option<&str>,
+    actual_target_gpu_id: Option<&str>,
+    finalization_id: Option<&str>,
+    terminal_tombstone_sha256: Option<&str>,
+    require_private_proofs: bool,
+) -> NativeResult<()> {
+    let replacement = (
+        replacement_attempt_id,
+        replacement_attempt_revision,
+        replacement_pod_id,
+        actual_target_gpu_id,
+    );
+    let complete = replacement.0.is_some()
+        && replacement.1.is_some()
+        && replacement.2.is_some()
+        && replacement.3.is_some();
+    if complete
+        != (replacement.0.is_some()
+            || replacement.1.is_some()
+            || replacement.2.is_some()
+            || replacement.3.is_some())
+    {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    if let Some(value) = replacement.0 {
+        parse_studio_uuid(value, "gpu_switch_worker_response_invalid")?;
+    }
+    if replacement
+        .1
+        .is_some_and(|revision| revision == 0 || revision > MAX_JSON_SAFE_INTEGER)
+        || replacement
+            .2
+            .is_some_and(|value| validate_pod_id(value).is_err())
+        || replacement
+            .3
+            .is_some_and(|value| !valid_gpu_switch_identity(value))
+    {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    let terminal = matches!(
+        state,
+        NativeWorkerGpuSwitchStateV1::Denied
+            | NativeWorkerGpuSwitchStateV1::Expired
+            | NativeWorkerGpuSwitchStateV1::Cancelled
+            | NativeWorkerGpuSwitchStateV1::Completed
+    );
+    if terminal_tombstone_sha256.is_some_and(|value| !valid_lower_sha256(value))
+        || (terminal_tombstone_sha256.is_some() && !terminal)
+        || (require_private_proofs
+            && ((finalization_id.is_some()
+                && matches!(
+                    state,
+                    NativeWorkerGpuSwitchStateV1::Pending
+                        | NativeWorkerGpuSwitchStateV1::Approved
+                        | NativeWorkerGpuSwitchStateV1::Denied
+                        | NativeWorkerGpuSwitchStateV1::Expired
+                        | NativeWorkerGpuSwitchStateV1::Cancelled
+                ))
+                || (finalization_id.is_none()
+                    && matches!(
+                        state,
+                        NativeWorkerGpuSwitchStateV1::Pausing
+                            | NativeWorkerGpuSwitchStateV1::ReadyToDelete
+                            | NativeWorkerGpuSwitchStateV1::DeleteIntent
+                            | NativeWorkerGpuSwitchStateV1::ReplacementReady
+                            | NativeWorkerGpuSwitchStateV1::Completed
+                    ))))
+        || matches!(
+            state,
+            NativeWorkerGpuSwitchStateV1::ReplacementReady
+                | NativeWorkerGpuSwitchStateV1::Completed
+        ) != complete
+        || matches!(
+            state,
+            NativeWorkerGpuSwitchStateV1::Denied
+                | NativeWorkerGpuSwitchStateV1::Expired
+                | NativeWorkerGpuSwitchStateV1::Cancelled
+        ) && complete
+    {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    if let Some(finalization_id) = finalization_id {
+        parse_studio_uuid(finalization_id, "gpu_switch_worker_response_invalid")?;
+    }
+    Ok(())
+}
+
+fn validate_gpu_switch_participant(
+    participant: &NativeWorkerGpuSwitchParticipantV1,
+) -> NativeResult<()> {
+    parse_studio_uuid(
+        &participant.session_id,
+        "gpu_switch_worker_response_invalid",
+    )?;
+    if !valid_studio_display_name(&participant.display_name) {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    Ok(())
+}
+
+fn validate_gpu_switch_participants(
+    participants: &[NativeWorkerGpuSwitchParticipantV1],
+) -> NativeResult<()> {
+    if participants.len() > MAX_STUDIO_PARTICIPANTS {
+        return Err(gpu_switch_worker_response_invalid());
+    }
+    let mut previous: Option<(&str, &str)> = None;
+    let mut ids = std::collections::HashSet::new();
+    for participant in participants {
+        validate_gpu_switch_participant(participant)?;
+        let key = (
+            participant.display_name.as_str(),
+            participant.session_id.as_str(),
+        );
+        if previous.is_some_and(|prior| prior >= key)
+            || !ids.insert(participant.session_id.as_str())
+        {
+            return Err(gpu_switch_worker_response_invalid());
+        }
+        previous = Some(key);
+    }
+    Ok(())
+}
+
+fn valid_studio_display_name(value: &str) -> bool {
+    value.trim() == value
+        && !value.is_empty()
+        && value.chars().count() <= MAX_STUDIO_DISPLAY_NAME_CHARS
+        && !value.chars().any(char::is_control)
+}
+
+fn validate_gpu_switch_identity(value: &str) -> NativeResult<()> {
+    if valid_gpu_switch_identity(value) {
+        Ok(())
+    } else {
+        Err(gpu_switch_worker_response_invalid())
+    }
+}
+
+fn valid_gpu_switch_identity(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    (1..=128).contains(&bytes.len())
+        && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b' ' | b'.' | b'_' | b'(' | b')' | b'+' | b':' | b'-')
+        })
+}
+
+fn valid_lower_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_nvml_uuid(value: &str) -> bool {
+    value.len() == 40
+        && value.starts_with("GPU-")
+        && value[4..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+}
+
+fn valid_pci_device_id(value: &str) -> bool {
+    value.len() == 6
+        && value.starts_with("0x")
+        && value[2..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validate_gpu_switch_runtime_identity(
+    identity: &NativeWorkerGpuSwitchRuntimeIdentityV1,
+    expected_switch_id: &str,
+) -> NativeResult<()> {
+    let invalid = worker_gpu_switch_runtime_identity_unavailable;
+    if identity.schema_version != 1
+        || identity.switch_id != expected_switch_id
+        || parse_studio_uuid(
+            &identity.switch_id,
+            "gpu_switch_runtime_identity_unavailable",
+        )
+        .is_err()
+        || parse_studio_uuid(
+            &identity.principal_binding_id,
+            "gpu_switch_runtime_identity_unavailable",
+        )
+        .is_err()
+        || parse_studio_uuid(
+            &identity.server_instance_id,
+            "gpu_switch_runtime_identity_unavailable",
+        )
+        .is_err()
+        || validate_pod_id(&identity.runtime_pod_id).is_err()
+        || identity.runtime_volume_id.is_empty()
+        || identity.runtime_volume_id.as_bytes().len() > 128
+        || identity
+            .runtime_volume_id
+            .bytes()
+            .any(|byte| byte < 0x21 || byte > 0x7e)
+        || identity.runtime_data_center_id != "EU-RO-1"
+        || !valid_lower_sha256(&identity.data_root_binding_sha256)
+        || validate_gpu_display_name(&identity.expected_provider_gpu_id).is_err()
+        || identity.device_count != 1
+        || identity.cuda_device.device_index != 0
+        || !valid_nvml_uuid(&identity.cuda_device.nvml_uuid)
+        || !valid_pci_device_id(&identity.cuda_device.pci_device_id)
+        || validate_gpu_display_name(&identity.cuda_device.cuda_name).is_err()
+        || identity.cuda_device.total_memory_bytes == 0
+        || identity.cuda_device.total_memory_bytes > MAX_JSON_SAFE_INTEGER
+        || !(1..=99).contains(&identity.cuda_device.compute_capability_major)
+        || identity.cuda_device.compute_capability_minor > 99
+        || identity.image_digest != IMAGEFORGE_WORKER_IMAGE_DIGEST
+        || identity.model_id != IMAGEFORGE_MODEL_ID
+        || identity.model_revision != IMAGEFORGE_MODEL_REVISION
+        || identity.create_contract_revision != 1
+        || !valid_lower_sha256(&identity.create_marker_sha256)
+        || parse_studio_uuid(
+            &identity.replacement_attempt_id,
+            "gpu_switch_runtime_identity_unavailable",
+        )
+        .is_err()
+        || identity.replacement_attempt_revision == 0
+        || identity.replacement_attempt_revision > MAX_JSON_SAFE_INTEGER
+    {
+        return Err(invalid());
+    }
+
+    let contract: NativeGpuRuntimeIdentityContractV1 = serde_json::from_str(include_str!(
+        "../../../contracts/gpu-runtime-identities-v1.json"
+    ))
+    .map_err(|_| invalid())?;
+    if contract.schema_version != 1 || !(1..=32).contains(&contract.identities.len()) {
+        return Err(invalid());
+    }
+    for (index, record) in contract.identities.iter().enumerate() {
+        if validate_gpu_display_name(&record.provider_gpu_id).is_err()
+            || !(1..=16).contains(&record.cuda_names.len())
+            || !(1..=16).contains(&record.pci_device_ids.len())
+            || record.minimum_memory_bytes == 0
+            || record.minimum_memory_bytes > MAX_JSON_SAFE_INTEGER
+            || !(1..=99).contains(&record.minimum_compute_capability.major)
+            || record.minimum_compute_capability.minor > 99
+            || contract.identities[..index]
+                .iter()
+                .any(|prior| prior.provider_gpu_id == record.provider_gpu_id)
+            || record
+                .cuda_names
+                .iter()
+                .enumerate()
+                .any(|(name_index, name)| {
+                    validate_gpu_display_name(name).is_err()
+                        || record.cuda_names[..name_index].contains(name)
+                })
+            || record
+                .pci_device_ids
+                .iter()
+                .enumerate()
+                .any(|(pci_index, pci)| {
+                    !valid_pci_device_id(pci) || record.pci_device_ids[..pci_index].contains(pci)
+                })
+        {
+            return Err(invalid());
+        }
+    }
+    let mapping = contract
+        .identities
+        .iter()
+        .find(|record| record.provider_gpu_id == identity.expected_provider_gpu_id)
+        .ok_or_else(invalid)?;
+    let actual_capability = (
+        identity.cuda_device.compute_capability_major,
+        identity.cuda_device.compute_capability_minor,
+    );
+    let minimum_capability = (
+        mapping.minimum_compute_capability.major,
+        mapping.minimum_compute_capability.minor,
+    );
+    if !mapping.cuda_names.contains(&identity.cuda_device.cuda_name)
+        || !mapping
+            .pci_device_ids
+            .contains(&identity.cuda_device.pci_device_id)
+        || identity.cuda_device.total_memory_bytes < mapping.minimum_memory_bytes
+        || actual_capability < minimum_capability
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+pub(crate) fn gpu_switch_runtime_identity_sha256(
+    identity: &NativeWorkerGpuSwitchRuntimeIdentityV1,
+) -> NativeResult<String> {
+    let value = serde_json::to_value(identity)
+        .map_err(|_| worker_gpu_switch_runtime_identity_unavailable())?;
+    let canonical = super::gpu_inventory::jcs_value(&value)
+        .map_err(|_| worker_gpu_switch_runtime_identity_unavailable())?;
+    Ok(hex::encode(Sha256::digest(canonical.as_bytes())))
+}
+
+fn validate_gpu_switch_user_id(value: &str) -> NativeResult<()> {
+    let bytes = value.as_bytes();
+    if (1..=64).contains(&bytes.len())
+        && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        Ok(())
+    } else {
+        Err(gpu_switch_worker_response_invalid())
+    }
+}
+
+fn gpu_switch_worker_response_invalid() -> NativeError {
+    NativeError::new(
+        "gpu_switch_worker_response_invalid",
+        "The worker returned an invalid GPU switch coordination response.",
+    )
+}
+
+fn worker_gpu_switch_create_uncertain() -> NativeError {
+    NativeError::new(
+        "gpu_switch_worker_create_uncertain",
+        "The GPU switch request may have reached the worker. Resume switch to reconcile it.",
+    )
+}
+
+fn worker_gpu_switch_lookup_unavailable() -> NativeError {
+    NativeError::new(
+        "gpu_switch_worker_response_invalid",
+        "The worker could not provide a valid GPU switch recovery response.",
+    )
+}
+
+fn worker_gpu_switch_runtime_identity_unavailable() -> NativeError {
+    NativeError::new(
+        "gpu_switch_runtime_identity_unavailable",
+        "Worker runtime identity is unavailable. Repair the ImageForge template before changing compute.",
+    )
+}
+
 fn validate_create_batch(input: &CreateBatchInput) -> NativeResult<()> {
     if input.prompts.is_empty()
         || input.base_seed
-            > (i64::MAX as u64).saturating_sub(input.prompts.len().saturating_sub(1) as u64)
+            > MAX_JSON_SAFE_INTEGER.saturating_sub(input.prompts.len().saturating_sub(1) as u64)
     {
         return Err(NativeError::new(
             "batch_invalid",
             "A batch must contain at least one prompt and a valid base seed.",
         ));
     }
+    parse_submission_uuid(&input.client_submission_id)?;
     if input
         .prompts
         .iter()
@@ -1566,6 +3570,8 @@ fn create_batch_payload(input: &CreateBatchInput) -> Value {
         "base_seed": input.base_seed,
         "aspect_ratio": input.aspect_ratio,
         "references": references,
+        "client_submission_id": input.client_submission_id,
+        "admission_mode": input.admission_mode,
     })
 }
 
@@ -1631,18 +3637,63 @@ fn validate_worker_envelope(status: StatusCode, body: &Value) -> NativeResult<()
             "The worker API version is incompatible with this ImageForge app.",
         ));
     }
-    if !status.is_success()
-        && body
-            .get("error")
-            .and_then(Value::as_object)
-            .and_then(|error| error.get("code"))
-            .and_then(Value::as_str)
-            .is_none()
+    if !status.is_success() {
+        validate_worker_error_envelope_shape(body)?;
+    }
+    Ok(())
+}
+
+/// Error responses are a contract boundary too: never pass an arbitrary
+/// worker object through merely because it happens to contain a string `code`.
+/// The Python handler now always emits the exact nullable-details form, which
+/// normalizes to the renderer's strict `{error:{code,message,details}}`
+/// projection below. Submission errors are deliberately stricter because
+/// their null details protect key/owner existence from becoming an oracle.
+fn validate_worker_error_envelope_shape(body: &Value) -> NativeResult<()> {
+    require_exact_keys(body, &["schema_version", "error"])?;
+    if body.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        return Err(worker_response_invalid());
+    }
+    let error = body
+        .get("error")
+        .and_then(Value::as_object)
+        .ok_or_else(worker_response_invalid)?;
+    if error.len() != 3
+        || !error.contains_key("code")
+        || !error.contains_key("message")
+        || !error.contains_key("details")
     {
-        return Err(NativeError::new(
-            "worker_response_invalid",
-            "The worker returned an invalid error response.",
-        ));
+        return Err(worker_response_invalid());
+    }
+    let code = error
+        .get("code")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 100
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        })
+        .ok_or_else(worker_response_invalid)?;
+    error
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            !value.is_empty() && value.len() <= 500 && !value.chars().any(char::is_control)
+        })
+        .ok_or_else(worker_response_invalid)?;
+    if let Some(details) = error.get("details") {
+        if !details.is_null() && !details.is_object() {
+            return Err(worker_response_invalid());
+        }
+    }
+    if matches!(
+        code,
+        "submission_conflict" | "submission_not_found" | "submission_store_corrupt"
+    ) && error.get("details") != Some(&Value::Null)
+    {
+        return Err(worker_response_invalid());
     }
     Ok(())
 }
@@ -1657,6 +3708,7 @@ fn project_worker_success(operation: WorkerOperation, body: &Value) -> NativeRes
         | WorkerOperation::StudioStatus
         | WorkerOperation::StudioCreateStopRequest
         | WorkerOperation::StudioStopResponse
+        | WorkerOperation::StudioGpuSwitchResponse
         | WorkerOperation::StudioFinalizeStop
         | WorkerOperation::StudioCancelStop => project_studio_state(body),
     }
@@ -1691,6 +3743,7 @@ fn project_health(body: &Value) -> NativeResult<Value> {
 }
 
 fn project_status(body: &Value) -> NativeResult<Value> {
+    validate_status_shape(body)?;
     let mut projected = project_object(
         body,
         &["schema_version", "ready", "active_batch", "permissions"],
@@ -1698,7 +3751,12 @@ fn project_status(body: &Value) -> NativeResult<Value> {
     project_nested(
         &mut projected,
         "permissions",
-        &["can_create", "can_manage_active", "is_owner"],
+        &[
+            "can_create",
+            "can_manage_active",
+            "is_owner",
+            "create_block_reason",
+        ],
     )?;
     if !projected.get("active_batch").is_some_and(Value::is_null) {
         let mut active = project_object(
@@ -1733,6 +3791,114 @@ fn project_status(body: &Value) -> NativeResult<Value> {
     Ok(Value::Object(projected))
 }
 
+/// `/v1/status` controls whether the local queue may attempt admission, so it
+/// is intentionally parsed as a closed shape rather than a permissive subset.
+/// In particular, `create_block_reason` distinguishes an actionable shared
+/// Stop finalization from a non-retryable corrupt submission history.
+fn validate_status_shape(body: &Value) -> NativeResult<()> {
+    require_exact_keys(
+        body,
+        &["schema_version", "ready", "active_batch", "permissions"],
+    )?;
+    if body.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        return Err(worker_response_invalid());
+    }
+    if !body.get("ready").is_some_and(Value::is_boolean) {
+        return Err(worker_response_invalid());
+    }
+    let permissions = body
+        .get("permissions")
+        .ok_or_else(worker_response_invalid)?;
+    require_exact_keys(
+        permissions,
+        &[
+            "can_create",
+            "can_manage_active",
+            "is_owner",
+            "create_block_reason",
+        ],
+    )?;
+    let permissions = permissions
+        .as_object()
+        .ok_or_else(worker_response_invalid)?;
+    for key in ["can_create", "can_manage_active", "is_owner"] {
+        if !permissions.get(key).is_some_and(Value::is_boolean) {
+            return Err(worker_response_invalid());
+        }
+    }
+    let block_reason = permissions
+        .get("create_block_reason")
+        .ok_or_else(worker_response_invalid)?;
+    if !block_reason.is_null()
+        && !matches!(
+            block_reason.as_str(),
+            Some("gpu_stop_pending" | "submission_store_corrupt")
+        )
+    {
+        return Err(worker_response_invalid());
+    }
+    let can_create = permissions
+        .get("can_create")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let can_manage_active = permissions
+        .get("can_manage_active")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let is_owner = permissions
+        .get("is_owner")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if can_create && !block_reason.is_null() {
+        return Err(worker_response_invalid());
+    }
+    let active = body.get("active_batch").filter(|value| !value.is_null());
+    if let Some(active) = active {
+        require_exact_keys(
+            active,
+            &[
+                "batch_id",
+                "owner",
+                "state",
+                "progress",
+                "pause_requested",
+                "cancel_requested",
+            ],
+        )?;
+        require_exact_keys(
+            active.get("owner").ok_or_else(worker_response_invalid)?,
+            &["user_id", "display_name"],
+        )?;
+        require_exact_keys(
+            active.get("progress").ok_or_else(worker_response_invalid)?,
+            &[
+                "total",
+                "completed",
+                "downloaded",
+                "failed",
+                "cancelled",
+                "processed",
+                "current_index",
+            ],
+        )?;
+        let active: StudioActiveBatchProjection =
+            serde_json::from_value(active.clone()).map_err(|_| worker_response_invalid())?;
+        validate_studio_active_batch(&active)?;
+    }
+    let status_semantically_invalid = (active.is_some() && can_create)
+        || (is_owner && active.is_none())
+        || (can_manage_active && !is_owner)
+        || (body.get("ready").and_then(Value::as_bool) == Some(true)
+            && active.is_none()
+            && !can_create
+            && block_reason.is_null())
+        || (active.is_some() && block_reason.as_str() == Some("gpu_stop_pending"));
+    if status_semantically_invalid {
+        return Err(worker_response_invalid());
+    }
+    Ok(())
+}
+
 fn project_manifest(body: &Value) -> NativeResult<Value> {
     let mut projected = project_object(
         body,
@@ -1752,6 +3918,19 @@ fn project_manifest(body: &Value) -> NativeResult<Value> {
             "progress",
         ],
     )?;
+    // Version-1 manifests predate durable client submission IDs. Preserve the
+    // field on the desktop wire as nullable for those legacy records while
+    // validating every new value. The private fingerprint/envelope fields are
+    // intentionally never selected into this projection.
+    let client_submission_id = match body.get("client_submission_id") {
+        None | Some(Value::Null) => Value::Null,
+        Some(Value::String(value)) => {
+            parse_submission_uuid(value).map_err(|_| worker_response_invalid())?;
+            Value::String(value.clone())
+        }
+        Some(_) => return Err(worker_response_invalid()),
+    };
+    projected.insert("client_submission_id".into(), client_submission_id);
     project_nested(&mut projected, "owner", &["user_id", "display_name"])?;
     project_nested(
         &mut projected,
@@ -1824,7 +4003,8 @@ fn project_image(value: &Value) -> NativeResult<Value> {
     Ok(Value::Object(image))
 }
 
-fn project_worker_error(body: &Value) -> NativeResult<Value> {
+fn project_worker_error(status: StatusCode, body: &Value) -> NativeResult<Value> {
+    validate_worker_error_envelope_shape(body)?;
     let error = body
         .get("error")
         .and_then(Value::as_object)
@@ -1839,7 +4019,65 @@ fn project_worker_error(body: &Value) -> NativeResult<Value> {
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty() && value.len() <= 500)
         .ok_or_else(worker_response_invalid)?;
-    Ok(json!({"error": {"code": code, "message": message, "details": null}}))
+    let expected_status = match code {
+        "submission_store_corrupt" => Some(StatusCode::SERVICE_UNAVAILABLE),
+        "submission_conflict" => Some(StatusCode::CONFLICT),
+        "submission_not_found" => Some(StatusCode::NOT_FOUND),
+        "queue_stop_pending" | "batch_busy" | "gpu_stop_pending" => Some(StatusCode::LOCKED),
+        _ => None,
+    };
+    if expected_status.is_some_and(|expected| expected != status) {
+        return Err(worker_response_invalid());
+    }
+    let details = match code {
+        "queue_stop_pending" => {
+            let details = error.get("details").ok_or_else(worker_response_invalid)?;
+            require_exact_keys(details, &["request_id", "requester", "state", "expires_at"])?;
+            let request_id = details
+                .get("request_id")
+                .and_then(Value::as_str)
+                .ok_or_else(worker_response_invalid)?;
+            parse_studio_uuid(request_id, "worker_response_invalid")?;
+            let requester = details
+                .get("requester")
+                .and_then(Value::as_str)
+                .ok_or_else(worker_response_invalid)?;
+            validate_studio_display_name(requester)?;
+            let state = details
+                .get("state")
+                .and_then(Value::as_str)
+                .filter(|state| matches!(*state, "pending" | "approved"))
+                .ok_or_else(worker_response_invalid)?;
+            let expires_at = details
+                .get("expires_at")
+                .and_then(Value::as_str)
+                .ok_or_else(worker_response_invalid)?;
+            validate_studio_timestamp(expires_at)?;
+            json!({
+                "request_id": request_id,
+                "requester": requester,
+                "state": state,
+                "expires_at": expires_at,
+            })
+        }
+        "submission_store_corrupt" => {
+            if error.get("details") != Some(&Value::Null)
+                || message
+                    != "Worker submission history is unavailable. Repair the shared volume before starting generation."
+            {
+                return Err(worker_response_invalid());
+            }
+            Value::Null
+        }
+        "submission_conflict" | "submission_not_found" => {
+            if error.get("details") != Some(&Value::Null) {
+                return Err(worker_response_invalid());
+            }
+            Value::Null
+        }
+        _ => Value::Null,
+    };
+    Ok(json!({"error": {"code": code, "message": message, "details": details}}))
 }
 
 fn project_studio_error(status: StatusCode, body: &Value) -> NativeResult<Value> {
@@ -1851,13 +4089,16 @@ fn project_studio_error(status: StatusCode, body: &Value) -> NativeResult<Value>
     let error = error_value
         .as_object()
         .ok_or_else(worker_response_invalid)?;
-    if error.len() < 2
-        || error.len() > 3
+    if error.len() != 3
         || !error.contains_key("code")
         || !error.contains_key("message")
-        || error
-            .keys()
-            .any(|key| !matches!(key.as_str(), "code" | "message" | "details"))
+        || !error.contains_key("details")
+    {
+        return Err(worker_response_invalid());
+    }
+    if !error
+        .get("details")
+        .is_some_and(|details| details.is_null() || details.is_object())
     {
         return Err(worker_response_invalid());
     }
@@ -2159,6 +4400,8 @@ mod tests {
                 }
             ],
             "active_batch": null,
+            "gpu_switch_request": null,
+            "gpu_switch_can_respond": false,
             "stop_request": {
                 "request_id": "55555555-5555-4555-8555-555555555555",
                 "pod_id": "shared-pod-1",
@@ -2183,8 +4426,81 @@ mod tests {
         })
     }
 
+    fn pending_gpu_switch_fixture() -> Value {
+        let mut state = studio_state_fixture();
+        state["sessions"] = json!([
+            state["sessions"][0].clone(),
+            state["sessions"][1].clone(),
+            {
+                "session_id": "44444444-4444-4444-8444-444444444444",
+                "display_name": "Sujal mobile",
+                "availability": "foreground",
+                "expires_at": "2026-08-03T10:20:45.123Z"
+            }
+        ]);
+        state["current_session"] = state["sessions"][2].clone();
+        state["gpu_switch_request"] = json!({
+            "schema_version": 1,
+            "switch_id": "77777777-7777-4777-8777-777777777777",
+            "old_pod_id": "shared-pod-1",
+            "old_gpu_id": "NVIDIA RTX 4090",
+            "old_gpu_display_name": "RTX 4090",
+            "initial_target_gpu_id": "NVIDIA L4",
+            "initial_target_gpu_display_name": "NVIDIA L4",
+            "initial_replacement_attempt_id": "88888888-8888-4888-8888-888888888888",
+            "requester": {
+                "session_id": "22222222-2222-4222-8222-222222222222",
+                "display_name": "Lakshman"
+            },
+            "state": "pending",
+            "reason": null,
+            "requested_at": "2026-08-03T10:20:30.123Z",
+            "response_deadline": "2026-08-03T10:21:00.123Z",
+            "ready_to_delete_at": null,
+            "waiting_for": [{
+                "session_id": "33333333-3333-4333-8333-333333333333",
+                "display_name": "Sujal"
+            }],
+            "approved_by": [],
+            "denied_by": [],
+            "batch_id": null,
+            "batch_owner": null,
+            "batch_state_at_finalization": null,
+            "replacement_attempt_id": null,
+            "replacement_attempt_revision": null,
+            "replacement_pod_id": null,
+            "actual_target_gpu_id": null
+        });
+        state["gpu_switch_can_respond"] = json!(true);
+        state
+    }
+
     fn uuid4(value: &str) -> Uuid {
         parse_studio_uuid(value, "test_uuid_invalid").unwrap()
+    }
+
+    fn normal_stop_finalization_plan() -> NativeWorkerNormalStopFinalizePlanV1 {
+        NativeWorkerNormalStopFinalizePlanV1 {
+            operation_id: "44444444-4444-4444-8444-444444444444".to_owned(),
+            request_id: "55555555-5555-4555-8555-555555555555".to_owned(),
+            session_id: "22222222-2222-4222-8222-222222222222".to_owned(),
+            pod_id: "shared-pod-1".to_owned(),
+            finalization_id: "66666666-6666-4666-8666-666666666666".to_owned(),
+            expected_server_instance_id: "11111111-1111-4111-8111-111111111111".to_owned(),
+        }
+    }
+
+    fn finalizing_stop_projection() -> StudioStateProjection {
+        let mut state = studio_state_fixture();
+        state["stop_request"]["state"] = json!("finalizing");
+        state["stop_request"]["waiting_for"] = json!([]);
+        state["stop_request"]["approved_by"] = json!([{
+            "session_id": "33333333-3333-4333-8333-333333333333",
+            "display_name": "Sujal"
+        }]);
+        state["stop_request"]["finalization_expires_at"] = json!("2026-08-03T10:20:45.123Z");
+        state["stop_request"]["finalization_id"] = json!("66666666-6666-4666-8666-666666666666");
+        serde_json::from_value(state).expect("finalizing Stop fixture must deserialize")
     }
 
     fn bind_fixture(
@@ -2229,6 +4545,8 @@ mod tests {
             base_seed: 42,
             references: vec![],
             aspect_ratio: "16:9".into(),
+            client_submission_id: "00000000-0000-4000-8000-000000000001".into(),
+            admission_mode: AdmissionMode::Foreground,
         })
         .is_ok());
         let long_prompt = format!("DO-NOT-ECHO-THIS-{}", "x".repeat(5_000));
@@ -2237,6 +4555,8 @@ mod tests {
             base_seed: 0,
             references: vec![],
             aspect_ratio: "16:9".into(),
+            client_submission_id: "00000000-0000-4000-8000-000000000001".into(),
+            admission_mode: AdmissionMode::Foreground,
         })
         .is_ok());
         for prompts in [vec![], vec![" ".into()], vec!["contains\0null".into()]] {
@@ -2245,6 +4565,8 @@ mod tests {
                 base_seed: 0,
                 references: vec![],
                 aspect_ratio: "16:9".into(),
+                client_submission_id: "00000000-0000-4000-8000-000000000001".into(),
+                admission_mode: AdmissionMode::Foreground,
             })
             .unwrap_err();
             assert_eq!(error.code, "batch_invalid");
@@ -2319,6 +4641,8 @@ mod tests {
                 bytes: vec![0x89, 0x50, 0x4e, 0x47],
             }],
             aspect_ratio: "1:1".into(),
+            client_submission_id: "00000000-0000-4000-8000-000000000001".into(),
+            admission_mode: AdmissionMode::Queue,
         });
         assert_eq!(payload["prompts"][0], "guided frame");
         assert_eq!(payload["base_seed"], 17);
@@ -2327,6 +4651,11 @@ mod tests {
         assert_eq!(payload["references"][0]["mime_type"], "image/png");
         assert_eq!(payload["references"][0]["data_hex"], "89504e47");
         assert!(payload["references"][0].get("bytes").is_none());
+        assert_eq!(
+            payload["client_submission_id"],
+            "00000000-0000-4000-8000-000000000001"
+        );
+        assert_eq!(payload["admission_mode"], "queue");
     }
 
     #[test]
@@ -2386,19 +4715,52 @@ mod tests {
         assert!(image.get("attempt_history").is_none());
         assert!(image["receipt"].get("user_id").is_none());
         assert_eq!(projected["settings"], json!({"width": 720, "height": 1280}));
+        assert!(projected["client_submission_id"].is_null());
         assert!(projected.get("cleanup_tombstones").is_none());
+
+        let mut owner_manifest = manifest.clone();
+        owner_manifest["client_submission_id"] = json!("00000000-0000-4000-8000-000000000002");
+        owner_manifest["request_fingerprint"] = json!("must-not-cross");
+        owner_manifest["private_envelope"] = json!({"owner_user_id": "must-not-cross"});
+        let owner_projection =
+            project_worker_success(WorkerOperation::Manifest, &owner_manifest).unwrap();
+        assert_eq!(
+            owner_projection["client_submission_id"],
+            "00000000-0000-4000-8000-000000000002"
+        );
+        assert!(owner_projection.get("request_fingerprint").is_none());
+        assert!(owner_projection.get("private_envelope").is_none());
     }
 
     #[test]
     fn worker_errors_are_sanitized_and_saved_secret_reflection_is_rejected() {
         let error = json!({
             "schema_version": 1,
-            "error": {"code": "batch_busy", "message": "Another batch is active.", "details": {"owner": "Owner"}, "traceback": "raw"}
+            "error": {"code": "batch_busy", "message": "Another batch is active.", "details": {"owner": "Owner"}}
         });
         validate_worker_envelope(StatusCode::LOCKED, &error).unwrap();
         assert_eq!(
-            project_worker_error(&error).unwrap(),
+            project_worker_error(StatusCode::LOCKED, &error).unwrap(),
             json!({"error": {"code": "batch_busy", "message": "Another batch is active.", "details": null}})
+        );
+        let mut injected = error.clone();
+        injected["error"]["traceback"] = json!("must not cross");
+        assert_eq!(
+            validate_worker_envelope(StatusCode::LOCKED, &injected)
+                .unwrap_err()
+                .code,
+            "worker_response_invalid"
+        );
+        let mut missing_details = error.clone();
+        missing_details["error"]
+            .as_object_mut()
+            .unwrap()
+            .remove("details");
+        assert_eq!(
+            validate_worker_envelope(StatusCode::LOCKED, &missing_details)
+                .unwrap_err()
+                .code,
+            "worker_response_invalid"
         );
         let secret = "worker-secret-exact";
         assert_eq!(
@@ -2416,6 +4778,85 @@ mod tests {
             .unwrap_err()
             .code,
             "worker_secret_reflection"
+        );
+    }
+
+    #[test]
+    fn status_and_submission_corruption_envelopes_match_the_python_queue_contract() {
+        // This is the exact Python `StatusResponse`/WorkerError wire shape
+        // used when a v2 submission envelope cannot be trusted. Keep the
+        // native projection strict so a corrupt poll never turns into a
+        // retryable busy response in the TypeScript scheduler.
+        let status = json!({
+            "schema_version": 1,
+            "ready": true,
+            "active_batch": null,
+            "permissions": {
+                "can_create": false,
+                "can_manage_active": false,
+                "is_owner": false,
+                "create_block_reason": "submission_store_corrupt"
+            }
+        });
+        validate_worker_envelope(StatusCode::OK, &status).unwrap();
+        assert_eq!(
+            project_worker_success(WorkerOperation::Status, &status).unwrap(),
+            status
+        );
+
+        let mut finalizing_stop = status.clone();
+        finalizing_stop["permissions"]["create_block_reason"] = json!("gpu_stop_pending");
+        assert_eq!(
+            project_worker_success(WorkerOperation::Status, &finalizing_stop).unwrap(),
+            finalizing_stop
+        );
+
+        let mut unexpected_reason = status.clone();
+        unexpected_reason["permissions"]["create_block_reason"] = json!("batch_busy");
+        assert_eq!(
+            project_worker_success(WorkerOperation::Status, &unexpected_reason)
+                .unwrap_err()
+                .code,
+            "worker_response_invalid"
+        );
+        let mut missing_reason = status.clone();
+        missing_reason["permissions"]
+            .as_object_mut()
+            .unwrap()
+            .remove("create_block_reason");
+        assert_eq!(
+            project_worker_success(WorkerOperation::Status, &missing_reason)
+                .unwrap_err()
+                .code,
+            "worker_response_invalid"
+        );
+
+        let corruption = json!({
+            "schema_version": 1,
+            "error": {
+                "code": "submission_store_corrupt",
+                "message": "Worker submission history is unavailable. Repair the shared volume before starting generation.",
+                "details": null
+            }
+        });
+        validate_worker_envelope(StatusCode::SERVICE_UNAVAILABLE, &corruption).unwrap();
+        assert_eq!(
+            project_worker_error(StatusCode::SERVICE_UNAVAILABLE, &corruption).unwrap(),
+            json!({
+                "error": {
+                    "code": "submission_store_corrupt",
+                    "message": "Worker submission history is unavailable. Repair the shared volume before starting generation.",
+                    "details": null
+                }
+            })
+        );
+        let mut leaked_details = corruption.clone();
+        leaked_details["error"]["details"] = json!({"path": "/shared/private"});
+        assert_eq!(
+            validate_worker_envelope(StatusCode::SERVICE_UNAVAILABLE, &leaked_details)
+                .unwrap_err()
+                .code,
+            "worker_response_invalid"
         );
     }
 
@@ -2476,7 +4917,7 @@ mod tests {
     }
 
     #[test]
-    fn all_six_studio_transport_plans_have_exact_method_path_auth_and_body() {
+    fn all_seven_studio_transport_plans_have_exact_method_path_auth_and_body() {
         let session_id = uuid4("22222222-2222-4222-8222-222222222222");
         let request_id = uuid4("55555555-5555-4555-8555-555555555555");
         let finalization_id = uuid4("66666666-6666-4666-8666-666666666666");
@@ -2575,6 +5016,245 @@ mod tests {
             .body
             .as_ref()
             .is_some_and(|body| body.get("pod_id").is_none()));
+
+        let gpu_switch = uuid4("77777777-7777-4777-8777-777777777777");
+        let switch_response =
+            studio_gpu_switch_response_plan(gpu_switch, session_id, StudioStopDecision::Approve);
+        assert_studio_plan(
+            &switch_response,
+            Method::POST,
+            "/v1/studio/gpu-switches/77777777-7777-4777-8777-777777777777/responses",
+            Some(json!({
+                "schema_version": 1,
+                "session_id": session_id,
+                "decision": "approve",
+            })),
+            WorkerOperation::StudioGpuSwitchResponse,
+            None,
+        );
+    }
+
+    #[test]
+    fn gpu_switch_peer_response_uses_worker_capability_not_waiting_session_identity() {
+        let alternate_peer_session = uuid4("44444444-4444-4444-8444-444444444444");
+        let switch_id = uuid4("77777777-7777-4777-8777-777777777777");
+        let alternate_peer = pending_gpu_switch_fixture();
+        let projected = project_studio_state(&alternate_peer)
+            .expect("worker-computed alternate peer capability must project");
+        assert_eq!(projected["gpu_switch_can_respond"], Value::Bool(true));
+        assert!(bind_studio_response(
+            WorkerHttpResponse {
+                status: 200,
+                body: projected,
+            },
+            StudioResponseBinding::RespondToGpuSwitch {
+                switch_id,
+                session_id: alternate_peer_session,
+            },
+        )
+        .is_ok());
+
+        let mut requester = pending_gpu_switch_fixture();
+        requester["current_session"] = requester["sessions"][0].clone();
+        requester["gpu_switch_can_respond"] = json!(true);
+        assert_eq!(
+            project_studio_state(&requester).unwrap_err().code,
+            "worker_response_invalid"
+        );
+
+        let mut approved = pending_gpu_switch_fixture();
+        approved["gpu_switch_request"]["state"] = json!("approved");
+        approved["gpu_switch_request"]["waiting_for"] = json!([]);
+        approved["gpu_switch_request"]["approved_by"] = json!([{
+            "session_id": "44444444-4444-4444-8444-444444444444",
+            "display_name": "Sujal mobile"
+        }]);
+        approved["gpu_switch_can_respond"] = json!(false);
+        assert!(project_studio_state(&approved).is_ok());
+        approved["gpu_switch_can_respond"] = json!(true);
+        assert_eq!(
+            project_studio_state(&approved).unwrap_err().code,
+            "worker_response_invalid"
+        );
+    }
+
+    #[test]
+    fn public_gpu_switch_lookup_accepts_live_pausing_without_private_finalization_proof() {
+        let switch_id = "77777777-7777-4777-8777-777777777777";
+        let pausing = NativeWorkerGpuSwitchPublicLookupV1 {
+            schema_version: 1,
+            switch_id: switch_id.to_owned(),
+            state: NativeWorkerGpuSwitchStateV1::Pausing,
+            replacement_attempt_id: None,
+            replacement_attempt_revision: None,
+            replacement_pod_id: None,
+            actual_target_gpu_id: None,
+        };
+        assert!(validate_gpu_switch_public_lookup(&pausing, switch_id).is_ok());
+
+        let mut partial = pausing;
+        partial.state = NativeWorkerGpuSwitchStateV1::ReplacementReady;
+        partial.replacement_attempt_id = Some("88888888-8888-4888-8888-888888888888".to_owned());
+        assert_eq!(
+            validate_gpu_switch_public_lookup(&partial, switch_id)
+                .unwrap_err()
+                .code,
+            "gpu_switch_worker_response_invalid"
+        );
+    }
+
+    fn runtime_identity_fixture(switch_id: &str) -> NativeWorkerGpuSwitchRuntimeIdentityV1 {
+        NativeWorkerGpuSwitchRuntimeIdentityV1 {
+            schema_version: 1,
+            switch_id: switch_id.to_owned(),
+            principal_binding_id: "88888888-8888-4888-8888-888888888888".to_owned(),
+            server_instance_id: "99999999-9999-4999-8999-999999999999".to_owned(),
+            runtime_pod_id: "replacement-pod-1".to_owned(),
+            runtime_volume_id: "ukh207b26r".to_owned(),
+            runtime_data_center_id: "EU-RO-1".to_owned(),
+            data_root_binding_sha256: "1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
+            expected_provider_gpu_id: "NVIDIA GeForce RTX 4090".to_owned(),
+            device_count: 1,
+            cuda_device: NativeWorkerCudaDeviceIdentityV1 {
+                device_index: 0,
+                nvml_uuid: "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_owned(),
+                pci_device_id: "0x2684".to_owned(),
+                cuda_name: "NVIDIA GeForce RTX 4090".to_owned(),
+                total_memory_bytes: 24_000_000_000,
+                compute_capability_major: 8,
+                compute_capability_minor: 9,
+            },
+            image_digest: IMAGEFORGE_WORKER_IMAGE_DIGEST.to_owned(),
+            model_id: IMAGEFORGE_MODEL_ID.to_owned(),
+            model_revision: IMAGEFORGE_MODEL_REVISION.to_owned(),
+            create_contract_revision: 1,
+            create_marker_sha256: "2222222222222222222222222222222222222222222222222222222222222222".to_owned(),
+            replacement_attempt_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            replacement_attempt_revision: 1,
+        }
+    }
+
+    #[test]
+    fn runtime_identity_fake_transport_covers_success_loss_rejection_and_mismatch() {
+        let switch_id = "77777777-7777-4777-8777-777777777777";
+        let identity = runtime_identity_fixture(switch_id);
+        let body = serde_json::to_vec(&identity).unwrap();
+
+        assert!(matches!(
+            map_gpu_switch_runtime_identity_response(StatusCode::OK, &body, switch_id),
+            Ok(NativeWorkerGpuSwitchRuntimeIdentityResultV1::Found(found)) if found == identity
+        ));
+
+        let malformed = br#"{"schema_version":1,"switch_id":"broken"}"#;
+        assert_eq!(
+            map_gpu_switch_runtime_identity_response(StatusCode::OK, malformed, switch_id)
+                .unwrap_err()
+                .code,
+            "gpu_switch_runtime_identity_unavailable"
+        );
+
+        let mut mismatch = identity.clone();
+        mismatch.switch_id = "88888888-8888-4888-8888-888888888888".to_owned();
+        assert_eq!(
+            map_gpu_switch_runtime_identity_response(
+                StatusCode::OK,
+                &serde_json::to_vec(&mismatch).unwrap(),
+                switch_id,
+            )
+            .unwrap_err()
+            .code,
+            "gpu_switch_runtime_identity_unavailable"
+        );
+
+        let rejected = json!({
+            "schema_version": 1,
+            "error": {
+                "code": "gpu_switch_request_not_found",
+                "message": "The GPU switch request does not exist.",
+                "details": null
+            }
+        });
+        assert!(matches!(
+            map_gpu_switch_runtime_identity_response(
+                StatusCode::NOT_FOUND,
+                &serde_json::to_vec(&rejected).unwrap(),
+                switch_id,
+            ),
+            Ok(NativeWorkerGpuSwitchRuntimeIdentityResultV1::Rejected(error))
+                if error.code == "gpu_switch_request_not_found"
+        ));
+
+        let loss = worker_transport_error(WorkerTransportFailure::Response);
+        assert_eq!(loss.code, "worker_network_error");
+        assert!(loss.retryable);
+    }
+
+    #[test]
+    fn runtime_identity_is_strictly_mapped_and_uses_mixed_wire_naming() {
+        let switch_id = "77777777-7777-4777-8777-777777777777";
+        let identity = NativeWorkerGpuSwitchRuntimeIdentityV1 {
+            schema_version: 1,
+            switch_id: switch_id.to_owned(),
+            principal_binding_id: "88888888-8888-4888-8888-888888888888".to_owned(),
+            server_instance_id: "99999999-9999-4999-8999-999999999999".to_owned(),
+            runtime_pod_id: "replacement-pod-1".to_owned(),
+            runtime_volume_id: "ukh207b26r".to_owned(),
+            runtime_data_center_id: "EU-RO-1".to_owned(),
+            data_root_binding_sha256:
+                "1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
+            expected_provider_gpu_id: "NVIDIA GeForce RTX 4090".to_owned(),
+            device_count: 1,
+            cuda_device: NativeWorkerCudaDeviceIdentityV1 {
+                device_index: 0,
+                nvml_uuid: "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_owned(),
+                pci_device_id: "0x2684".to_owned(),
+                cuda_name: "NVIDIA GeForce RTX 4090".to_owned(),
+                total_memory_bytes: 24_000_000_000,
+                compute_capability_major: 8,
+                compute_capability_minor: 9,
+            },
+            image_digest: IMAGEFORGE_WORKER_IMAGE_DIGEST.to_owned(),
+            model_id: IMAGEFORGE_MODEL_ID.to_owned(),
+            model_revision: IMAGEFORGE_MODEL_REVISION.to_owned(),
+            create_contract_revision: 1,
+            create_marker_sha256:
+                "2222222222222222222222222222222222222222222222222222222222222222".to_owned(),
+            replacement_attempt_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            replacement_attempt_revision: 1,
+        };
+        validate_gpu_switch_runtime_identity(&identity, switch_id).unwrap();
+        let wire = serde_json::to_value(&identity).unwrap();
+        assert!(wire.get("runtime_pod_id").is_some());
+        assert!(wire["cuda_device"].get("deviceIndex").is_some());
+        assert!(wire["cuda_device"].get("device_index").is_none());
+        assert!(gpu_switch_runtime_identity_sha256(&identity).is_ok());
+
+        let mut wrong_device = identity.clone();
+        wrong_device.cuda_device.pci_device_id = "0x0000".to_owned();
+        assert_eq!(
+            validate_gpu_switch_runtime_identity(&wrong_device, switch_id)
+                .unwrap_err()
+                .code,
+            "gpu_switch_runtime_identity_unavailable"
+        );
+        let mut unknown = wire;
+        unknown["cuda_device"]["unexpected"] = json!(true);
+        assert!(
+            strict_gpu_switch_json::<NativeWorkerGpuSwitchRuntimeIdentityV1>(
+                &serde_json::to_vec(&unknown).unwrap()
+            )
+            .is_err()
+        );
+
+        let contract: Value = serde_json::from_str(include_str!(
+            "../../../contracts/gpu-runtime-identities-v1.json"
+        ))
+        .unwrap();
+        let vectors: Value = serde_json::from_str(include_str!(
+            "../../../contracts/gpu-runtime-identities-v1.vectors.json"
+        ))
+        .unwrap();
+        assert_eq!(contract, vectors);
     }
 
     #[test]
@@ -2829,6 +5509,61 @@ mod tests {
         assert_eq!(
             project_studio_state(&invalid_state).unwrap_err().code,
             "worker_response_invalid"
+        );
+    }
+
+    #[test]
+    fn normal_stop_finalization_marker_accepts_only_the_exact_private_plan() {
+        let plan = normal_stop_finalization_plan();
+        let projection = finalizing_stop_projection();
+        assert!(validate_native_normal_stop_finalizing_projection(&plan, &projection).is_ok());
+
+        let mut wrong_server = projection.clone();
+        wrong_server.server_instance_id = "77777777-7777-4777-8777-777777777777".to_owned();
+        assert_eq!(
+            validate_native_normal_stop_finalizing_projection(&plan, &wrong_server)
+                .unwrap_err()
+                .code,
+            "stop_request_in_progress"
+        );
+
+        let mut wrong_finalization = projection;
+        wrong_finalization
+            .stop_request
+            .as_mut()
+            .expect("fixture has a Stop request")
+            .finalization_id = Some("88888888-8888-4888-8888-888888888888".to_owned());
+        assert_eq!(
+            validate_native_normal_stop_finalizing_projection(&plan, &wrong_finalization)
+                .unwrap_err()
+                .code,
+            "stop_request_in_progress"
+        );
+    }
+
+    #[test]
+    fn normal_stop_finalization_marker_rejects_a_concurrent_worker_switch() {
+        let plan = normal_stop_finalization_plan();
+        let mut state = studio_state_fixture();
+        state["stop_request"]["state"] = json!("finalizing");
+        state["stop_request"]["waiting_for"] = json!([]);
+        state["stop_request"]["approved_by"] = json!([{
+            "session_id": "33333333-3333-4333-8333-333333333333",
+            "display_name": "Sujal"
+        }]);
+        state["stop_request"]["finalization_expires_at"] = json!("2026-08-03T10:20:45.123Z");
+        state["stop_request"]["finalization_id"] = json!("66666666-6666-4666-8666-666666666666");
+        let switch = pending_gpu_switch_fixture();
+        state["gpu_switch_request"] = switch["gpu_switch_request"].clone();
+        state["gpu_switch_can_respond"] = json!(false);
+        let projection: StudioStateProjection =
+            serde_json::from_value(state).expect("concurrent Switch fixture must deserialize");
+
+        assert_eq!(
+            validate_native_normal_stop_finalizing_projection(&plan, &projection)
+                .unwrap_err()
+                .code,
+            "gpu_switch_request_in_progress"
         );
     }
 

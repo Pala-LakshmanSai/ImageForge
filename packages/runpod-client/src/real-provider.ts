@@ -8,6 +8,7 @@ import {
   approveCatalogGpu,
   approveManagedPodGpu,
   isDynamicGpuDisplayName,
+  isGpuIdentityV1,
   staticGpuPolicy,
 } from "./gpu-policy.js";
 import {
@@ -17,6 +18,9 @@ import {
   validateRunPodBaseUrl,
 } from "./http.js";
 import { deriveRunPodProxyUrl, validateRunPodPodId } from "./proxy.js";
+import { isLowercaseRegistryImageDigestV1 } from "./image-identity.js";
+import { parseLosslessJson } from "./lossless-json.js";
+import { parseInventorySecurePriceV1, parsePodPriceV1 } from "./price-v1.js";
 import {
   type ApprovedGpuId,
   type AvailabilityLevel,
@@ -34,7 +38,6 @@ import {
   asArray,
   asBoolean,
   asNonEmptyString,
-  asNullableFiniteNumber,
   asNullableString,
   asNumber,
   asRecord,
@@ -106,7 +109,7 @@ export class RunPodV2InventorySource implements GpuInventorySource {
       });
     }
     try {
-      const dataCenterPromise = this.#client.requestJson(
+      const dataCenterPromise = this.#client.requestLosslessJson(
         `${this.#baseUrl}/catalog/datacenters`,
         {
           method: "GET",
@@ -123,7 +126,7 @@ export class RunPodV2InventorySource implements GpuInventorySource {
           cloud: cloud.toUpperCase(),
           minCudaVersion: "13.0",
         });
-        const raw = await this.#client.requestJson(`${this.#baseUrl}/catalog/gpus?${query}`, {
+        const raw = await this.#client.requestLosslessJson(`${this.#baseUrl}/catalog/gpus?${query}`, {
           method: "GET",
           operation: "inventory",
           expectedStatuses: [200],
@@ -166,81 +169,94 @@ export class RunPodV2InventorySource implements GpuInventorySource {
     const offers: GpuOffer[] = [];
 
     gpus.forEach((entry, index) => {
-      const field = `response.gpus[${index}]`;
-      const gpu = asRecord(entry, "inventory", field);
-      const id = asNonEmptyString(gpu.id, "inventory", `${field}.id`);
-      const name = asNonEmptyString(gpu.name, "inventory", `${field}.name`);
-      const manufacturer = asNonEmptyString(
-        gpu.manufacturer,
-        "inventory",
-        `${field}.manufacturer`,
-      );
-      const memoryGb = asNumber(gpu.memory, "inventory", `${field}.memory`);
-      const laneSupported = asBoolean(gpu[cloud], "inventory", `${field}.${cloud}`);
-      const price = asRecord(gpu.price, "inventory", `${field}.price`);
-      const hourlyPriceUsd = asNumber(price[cloud], "inventory", `${field}.price.${cloud}`);
-      const maxCount = asRecord(gpu.maxCount, "inventory", `${field}.maxCount`);
-      const laneMaxCount = asNumber(
-        maxCount[cloud],
-        "inventory",
-        `${field}.maxCount.${cloud}`,
-      );
-      const dataCenters = asArray(gpu.dataCenters, "inventory", `${field}.dataCenters`);
-      let selectedDataCenterAvailability: AvailabilityLevel | null = null;
-      for (const [dataCenterIndex, dataCenterEntry] of dataCenters.entries()) {
-        const dataCenterField = `${field}.dataCenters[${dataCenterIndex}]`;
-        const dataCenter = asRecord(dataCenterEntry, "inventory", dataCenterField);
-        const dataCenterId = asNonEmptyString(
-          dataCenter.id,
+      try {
+        const field = `response.gpus[${index}]`;
+        const gpu = asRecord(entry, "inventory", field);
+        const id = asNonEmptyString(gpu.id, "inventory", `${field}.id`);
+        const name = asNonEmptyString(gpu.name, "inventory", `${field}.name`);
+        const manufacturer = asNonEmptyString(
+          gpu.manufacturer,
           "inventory",
-          `${dataCenterField}.id`,
+          `${field}.manufacturer`,
         );
-        if (dataCenterId === request.dataCenterId) {
-          if (selectedDataCenterAvailability !== null) {
-            throw new RunPodClientError({
-              code: "api_response_invalid",
-              message: "RunPod returned duplicate GPU data-center records.",
-              operation: "inventory",
-              details: { field: `${dataCenterField}.id` },
-            });
-          }
-          selectedDataCenterAvailability = parseAvailability(
-            dataCenter.availability,
-            `${dataCenterField}.availability`,
-          );
+        const memoryGb = asNumber(gpu.memory, "inventory", `${field}.memory`);
+        const laneSupported = asBoolean(gpu[cloud], "inventory", `${field}.${cloud}`);
+        const price = asRecord(gpu.price, "inventory", `${field}.price`);
+        const parsedPrice = parseInventorySecurePriceV1(price);
+        if (!parsedPrice.valid) return;
+        const hourlyPriceMicroUsd = parsedPrice.hourlyPriceMicroUsd;
+        const maxCount = asRecord(gpu.maxCount, "inventory", `${field}.maxCount`);
+        const rawLaneMaxCount = maxCount[cloud];
+        if (
+          rawLaneMaxCount !== null &&
+          (typeof rawLaneMaxCount !== "number" ||
+            !Number.isSafeInteger(rawLaneMaxCount) || rawLaneMaxCount < 0)
+        ) {
+          return;
         }
-      }
+        const laneMaxCount = rawLaneMaxCount;
+        const dataCenters = asArray(gpu.dataCenters, "inventory", `${field}.dataCenters`);
+        let selectedDataCenterAvailability: AvailabilityLevel | null = null;
+        for (const [dataCenterIndex, dataCenterEntry] of dataCenters.entries()) {
+          const dataCenterField = `${field}.dataCenters[${dataCenterIndex}]`;
+          const dataCenter = asRecord(dataCenterEntry, "inventory", dataCenterField);
+          const dataCenterId = asNonEmptyString(
+            dataCenter.id,
+            "inventory",
+            `${dataCenterField}.id`,
+          );
+          if (dataCenterId === request.dataCenterId) {
+            if (selectedDataCenterAvailability !== null) {
+              throw new RunPodClientError({
+                code: "api_response_invalid",
+                message: "RunPod returned duplicate GPU data-center records.",
+                operation: "inventory",
+                details: { field: `${dataCenterField}.id` },
+              });
+            }
+            selectedDataCenterAvailability = parseAvailability(
+              dataCenter.availability,
+              `${dataCenterField}.availability`,
+            );
+          }
+        }
 
-      const approved = approveCatalogGpu(
-        { id, name, manufacturer, memoryGb },
-        request.includeEmergencyTier,
-      );
-      if (approved === null) {
-        return;
+        const approved = approveCatalogGpu(
+          { id, name, manufacturer, memoryGb },
+          request.includeEmergencyTier,
+        );
+        if (approved === null) return;
+        const volumeCompatible =
+          dataCenterSupportsNetworkVolumes &&
+          laneSupported &&
+          laneMaxCount !== null &&
+          laneMaxCount >= request.gpuCount &&
+          selectedDataCenterAvailability !== null;
+        const availability = volumeCompatible ? (selectedDataCenterAvailability ?? "none") : "none";
+        offers.push(
+          Object.freeze({
+            gpuId: approved.gpuId,
+            policyKey: approved.policyKey,
+            coldPriority: approved.coldPriority,
+            emergency: approved.emergency,
+            displayName: name,
+            manufacturer,
+            memoryGb,
+            cloud,
+            hourlyPriceMicroUsd,
+            availability,
+            dataCenterId: request.dataCenterId,
+            volumeCompatible,
+            observedAt,
+          }),
+        );
+      } catch (error) {
+        if (
+          error instanceof RunPodClientError &&
+          error.code === "api_response_invalid" && error.operation === "inventory"
+        ) return;
+        throw error;
       }
-      const volumeCompatible =
-        dataCenterSupportsNetworkVolumes &&
-        laneSupported &&
-        laneMaxCount >= request.gpuCount &&
-        selectedDataCenterAvailability !== null;
-      const availability = volumeCompatible ? (selectedDataCenterAvailability ?? "none") : "none";
-      offers.push(
-        Object.freeze({
-          gpuId: approved.gpuId,
-          policyKey: approved.policyKey,
-          coldPriority: approved.coldPriority,
-          emergency: approved.emergency,
-          displayName: name,
-          manufacturer,
-          memoryGb,
-          cloud,
-          hourlyPriceUsd,
-          availability,
-          dataCenterId: request.dataCenterId,
-          volumeCompatible,
-          observedAt,
-        }),
-      );
     });
 
     return Object.freeze(offers);
@@ -471,7 +487,7 @@ export class RunPodRestProvider implements RunPodProvider {
         networkVolumeId: criteria.networkVolumeId,
         dataCenterId: criteria.dataCenterId,
       });
-      const raw = await this.#client.requestJson(
+      const raw = await this.#client.requestLosslessJson(
         `${this.#baseUrl}/pods?${query}`,
         {
           method: "GET",
@@ -524,8 +540,7 @@ export class RunPodRestProvider implements RunPodProvider {
       request.gpuTypePriority !== "custom" ||
       request.interruptible !== false ||
       !/^[A-Za-z0-9][A-Za-z0-9._-]{0,190}$/.test(request.templateId) ||
-      request.imageName.trim().length === 0 ||
-      request.imageName.length > 512 ||
+      !isLowercaseRegistryImageDigestV1(request.imageName) ||
       !/^[A-Za-z0-9][A-Za-z0-9._-]{0,190}$/.test(request.networkVolumeId) ||
       !isNormalizedMountPath(request.networkVolumeMountPath) ||
       cudaVersions === undefined ||
@@ -541,7 +556,7 @@ export class RunPodRestProvider implements RunPodProvider {
         (gpuId) => {
           const staticPolicy = staticPolicies.get(gpuId);
           return (
-            !/^[A-Za-z0-9][A-Za-z0-9 ._+-]{0,190}$/.test(gpuId) ||
+            !isGpuIdentityV1(gpuId) ||
             (staticPolicy === undefined
               ? !this.#catalogApprovedGpuPolicies.has(gpuId)
               : staticPolicy.emergency && !request.allowEmergencyGpuTier)
@@ -598,7 +613,7 @@ export class RunPodRestProvider implements RunPodProvider {
 
     let raw: unknown;
     try {
-      raw = await this.#client.requestJson(`${this.#baseUrl}/pods`, {
+      raw = await this.#client.requestLosslessJson(`${this.#baseUrl}/pods`, {
         method: "POST",
         operation: "create_pod",
         expectedStatuses: [201],
@@ -676,7 +691,7 @@ export class RunPodRestProvider implements RunPodProvider {
     }
     let raw: unknown;
     try {
-      raw = await response.json();
+      raw = parseLosslessJson(await response.text());
     } catch (error) {
       throw new RunPodClientError({
         code: "api_response_invalid",
@@ -850,16 +865,7 @@ export class RunPodRestProvider implements RunPodProvider {
     if (!ports.includes(`${criteria.workerPort}/http`)) {
       return null;
     }
-    const adjustedCost = asNullableFiniteNumber(
-      pod.adjustedCostPerHr,
-      operation,
-      `${field}.adjustedCostPerHr`,
-    );
-    const regularCost = asNullableFiniteNumber(
-      pod.costPerHr,
-      operation,
-      `${field}.costPerHr`,
-    );
+    const parsedPrice = parsePodPriceV1(pod);
     const createdAt = asNullableString(
       pod.createdAt ?? pod.lastStartedAt,
       operation,
@@ -879,7 +885,7 @@ export class RunPodRestProvider implements RunPodProvider {
       networkVolumeId,
       networkVolumeMountPath,
       interruptible,
-      hourlyPriceUsd: adjustedCost ?? regularCost,
+      hourlyPriceMicroUsd: parsedPrice.valid ? parsedPrice.hourlyPriceMicroUsd : null,
       createdAt,
       startRequestId: extractStartRequestId(name, criteria.podNamePrefix),
       proxyUrl: deriveRunPodProxyUrl(id, criteria.workerPort),

@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 2,
+  "promptFixture": { "path": "contracts/gpu-benchmark-prompts-v2.json", "sha256": "5f2f0ae47b8220672a29f9fbf477c4990686fe4973ed72d6343348b326154aa4", "count": 30 },
+  "seedFixture": { "path": "contracts/gpu-benchmark-seeds-v2.json", "sha256": "55e18eaa16ff11474196c731e7a5cea20312ab8ec12d5fc3f137e35c5f675489", "count": 30 },
+  "contract": {
+    "modelId": "black-forest-labs/FLUX.2-klein-4B",
+    "modelRevision": "0123456789abcdef0123456789abcdef01234567",
+    "workerImageDigest": "ghcr.io/imageforge/worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "templateId": "imageforge-template-v1",
+    "precision": "bf16", "width": 1280, "height": 720, "steps": 4, "guidanceMilli": 1000,
+    "jpegQuality": 95, "referenceMode": "none", "promptFixtureId": "imageforge-gpu-benchmark-30-v1",
+    "promptFixtureSha256": "5f2f0ae47b8220672a29f9fbf477c4990686fe4973ed72d6343348b326154aa4",
+    "seedFixtureSha256": "55e18eaa16ff11474196c731e7a5cea20312ab8ec12d5fc3f137e35c5f675489"
+  },
+  "durationVector": { "ascendingStartUs": 1000000, "incrementUs": 1000, "expectedMedianUs": 1014500, "expectedP95Us": 1028000 },
+  "timestampCases": [
+    { "value": "2026-08-01T00:00:00.000Z", "valid": true },
+    { "value": "2026-08-01T00:00:00Z", "valid": false },
+    { "value": "2026-08-01T00:00:00.00Z", "valid": false },
+    { "value": "2026-08-01T00:00:00.0000Z", "valid": false },
+    { "value": "2026-08-01T00:00:00.000+00:00", "valid": false },
+    { "value": "2026-08-01 00:00:00.000Z", "valid": false },
+    { "value": "2026-02-30T00:00:00.000Z", "valid": false },
+    { "value": "2026-08-01T00:00:00.000z", "valid": false }
+  ],
+  "sampleRelationCases": [
+    { "id": "success", "outcome": "success", "durationUs": 1000000, "failureCode": null, "valid": true },
+    { "id": "failure", "outcome": "failure", "durationUs": null, "failureCode": "gpu_timeout", "valid": true },
+    { "id": "success_missing_duration", "outcome": "success", "durationUs": null, "failureCode": null, "valid": false },
+    { "id": "success_with_failure_code", "outcome": "success", "durationUs": 1000000, "failureCode": "gpu_timeout", "valid": false },
+    { "id": "failure_with_duration", "outcome": "failure", "durationUs": 1000000, "failureCode": "gpu_timeout", "valid": false },
+    { "id": "failure_missing_code", "outcome": "failure", "durationUs": null, "failureCode": null, "valid": false },
+    { "id": "failure_bad_code", "outcome": "failure", "durationUs": null, "failureCode": " bad", "valid": false }
+  ],
+  "ageCases": [
+    { "ageMs": 7775999999, "state": "measured" },
+    { "ageMs": 7776000000, "state": "stale" },
+    { "ageMs": 7776000001, "state": "stale" },
+    { "ageMs": -1, "state": "unmeasured" }
+  ]
+}

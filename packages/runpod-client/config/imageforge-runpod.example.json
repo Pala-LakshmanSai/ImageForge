@@ -21,7 +21,7 @@
   "benchmarkContract": {
     "model": "black-forest-labs/FLUX.2-klein-4B",
     "modelRevision": "replace-with-pinned-model-revision",
-    "softwareImage": "replace-with-pinned-image-digest",
+    "softwareImage": "ghcr.io/imageforge/worker@sha256:0000000000000000000000000000000000000000000000000000000000000000",
     "precision": "BF16",
     "width": 1280,
     "height": 720,

@@ -1,6 +1,9 @@
 import { AlertTriangle, CheckCircle2, Info, X, XCircle } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
+import { formatHourlyMicroUsdV1, type NativeGpuInventorySnapshotV1 } from '@imageforge/runpod-client';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { createFakeImageForgeAdapter, type ImageForgeAdapter } from './adapters/imageForgeAdapter';
+import { WebAudioQueueAlarm, type QueueAlarmPort } from './adapters/queueAlarm';
+import { snapshotQueueReferences } from './adapters/queueStore';
 import {
   persistSafePreferences,
   readPersistedBatchRecovery,
@@ -8,11 +11,42 @@ import {
 } from './adapters/safePreferences';
 import { BottomNav, TopBar } from './components/AppChrome';
 import { DialogPortal } from './components/DialogPortal';
+import { GpuSelector } from './components/GpuSelector';
+import { GpuSwitchConsent } from './components/GpuSwitchConsent';
+import {
+  GpuSwitchProgress,
+  type GpuSwitchProgressActionV1,
+} from './components/GpuSwitchProgress';
 import { SetupAssistant } from './components/SetupAssistant';
 import { StudioCoordination } from './components/StudioCoordination';
 import { Button, IconButton } from './components/primitives';
 import { canStartBatch, createInitialState, appReducer } from './domain/reducer';
+import {
+  assertQueueItemTransition,
+  clearQueueHistory,
+  createQueueRun,
+  createStagedQueueItem,
+  isCanonicalQueueUuid,
+  isQueuePlaceholder,
+  isQueueLocallyRemovableIssue,
+  moveQueueItem,
+  nextQueueItem,
+  queueCohortAtFixedPoint,
+  queueCompletionKind,
+  queueRunIsActive,
+  removeQueueItem,
+  replaceQueueItem,
+  updateQueueItem,
+  updateQueueRun,
+  type NativeQueueAlarmV1,
+  type NativeQueueDocumentV1,
+  type NativeQueueSnapshotV1,
+  type QueueAlertKind,
+} from './domain/queue';
 import type { AppAction, AppState } from './domain/types';
+import type { GpuSelectorConfirmationV1, GpuSelectorModeV1 } from './domain/gpuSelector';
+import type { NativeGpuStartResultV1 } from './native/gpuStartBridge';
+import type { NativeGpuSwitchSnapshotV1 } from './native/gpuSwitchBridge';
 import { CreateScreen } from './screens/CreateScreen';
 import { LibraryScreen } from './screens/LibraryScreen';
 import { ProgressScreen } from './screens/ProgressScreen';
@@ -23,11 +57,12 @@ import './styles.css';
 export interface AppProps {
   initialState?: AppState;
   adapter?: ImageForgeAdapter;
+  alarmPort?: QueueAlarmPort;
 }
 
 const CROSS_CLIENT_HEARTBEAT_MS = 4_000;
 
-export default function App({ initialState, adapter: injectedAdapter }: AppProps) {
+export default function App({ initialState, adapter: injectedAdapter, alarmPort: injectedAlarm }: AppProps) {
   const [state, dispatch] = useReducer(appReducer, initialState, (provided) => provided ?? createInitialState());
   const adapter = useMemo(
     () => injectedAdapter ?? createFakeImageForgeAdapter(initialState?.setup.credentials),
@@ -36,6 +71,21 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
   const stateRef = useRef(state);
   stateRef.current = state;
   const runtime = adapter.mode === 'production' ? adapter.runtime : undefined;
+  const [gpuSelectorOpen, setGpuSelectorOpen] = useState(false);
+  const [gpuSelectorBusy, setGpuSelectorBusy] = useState(false);
+  const [gpuSelectorMode, setGpuSelectorMode] = useState<GpuSelectorModeV1>('offline_start');
+  const [gpuSelectorSnapshot, setGpuSelectorSnapshot] = useState<NativeGpuInventorySnapshotV1 | null>(
+    () => runtime?.getGpuInventory() ?? null,
+  );
+  const gpuSelectorReturnFocusRef = useRef<HTMLElement | null>(null);
+  const [gpuPriceAttention, setGpuPriceAttention] = useState<NativeGpuStartResultV1 | null>(null);
+  const [gpuPriceConfirmBusy, setGpuPriceConfirmBusy] = useState(false);
+  const [gpuSwitchSnapshot, setGpuSwitchSnapshot] = useState<NativeGpuSwitchSnapshotV1 | null>(null);
+  const [gpuSwitchLoadState, setGpuSwitchLoadState] = useState<'loading' | 'ready' | 'error'>(
+    runtime ? 'loading' : 'ready',
+  );
+  const [gpuSwitchActionBusy, setGpuSwitchActionBusy] = useState<GpuSwitchProgressActionV1 | null>(null);
+  const alarm = useMemo(() => injectedAlarm ?? new WebAudioQueueAlarm(), [injectedAlarm]);
   const recoveryPointerRef = useRef<PersistedBatchRecovery | null>(
     adapter.mode === 'production' ? readPersistedBatchRecovery(window.localStorage) : null,
   );
@@ -43,6 +93,140 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
   const refreshInFlightRef = useRef<Promise<boolean> | null>(null);
   const observationInFlightRef = useRef<Promise<void> | null>(null);
   const batchStartInFlightRef = useRef(false);
+  const queueSnapshotRef = useRef<NativeQueueSnapshotV1>({
+    schemaVersion: state.queue.schemaVersion,
+    storeRevision: state.queue.storeRevision,
+    document: state.queue.document,
+    issues: state.queue.issues,
+  });
+  const queueMutationTailRef = useRef<Promise<void>>(Promise.resolve());
+  const queueDispatchInFlightRef = useRef(false);
+  const queueBatchSyncInFlightRef = useRef(false);
+  const queueCompletionInFlightRef = useRef(false);
+  const queueAlertInFlightRef = useRef(false);
+  const queueAlertAttemptsRef = useRef(new Set<string>());
+  const queueFailureCodesRef = useRef(new Map<string, string>());
+  const queueAuthorizationRef = useRef<string | null>(null);
+  const queuePodIdRef = useRef<string | null>(null);
+  const queueRemoteCreateInFlightRef = useRef<string | null>(null);
+
+  const commitQueue = useCallback((
+    mutate: (document: NativeQueueDocumentV1) => NativeQueueDocumentV1,
+    referenceBlobs: Parameters<ImageForgeAdapter['queue']['commit']>[0]['referenceBlobs'] = [],
+  ): Promise<NativeQueueSnapshotV1> => {
+    let resolveResult: (snapshot: NativeQueueSnapshotV1) => void;
+    let rejectResult: (error: unknown) => void;
+    const result = new Promise<NativeQueueSnapshotV1>((resolve, reject) => {
+      resolveResult = resolve;
+      rejectResult = reject;
+    });
+    const operation = queueMutationTailRef.current.then(async () => {
+      const current = queueSnapshotRef.current;
+      const snapshot = await adapter.queue.commit({
+        expectedRevision: current.storeRevision,
+        document: mutate(current.document),
+        referenceBlobs,
+      });
+      queueSnapshotRef.current = snapshot;
+      dispatch({ type: 'QUEUE_COMMITTED', snapshot });
+      resolveResult(snapshot);
+    }).catch((error: unknown) => {
+      rejectResult(error);
+    });
+    queueMutationTailRef.current = operation.then(() => undefined, () => undefined);
+    return result;
+  }, [adapter.queue]);
+
+  const deliverQueueNotification = useCallback(async (
+    alarmState: NativeQueueAlarmV1,
+    forceRetry = false,
+  ) => {
+    if (alarmState.state !== 'ringing') return;
+    const snoozeAttempt = alarmState.snoozeUsed && alarmState.snoozeNotificationDisposition !== null;
+    const kind: QueueAlertKind | null = snoozeAttempt ? 'snooze' : alarmState.kind;
+    const disposition = snoozeAttempt
+      ? alarmState.snoozeNotificationDisposition
+      : alarmState.notificationDisposition;
+    if (kind === null || disposition === null || disposition === 'delivered') return;
+    if (!forceRetry && !['pending', 'failed'].includes(disposition)) return;
+    const attemptKey = `${alarmState.eventId}:${kind}`;
+    if (!forceRetry && queueAlertAttemptsRef.current.has(attemptKey)) return;
+    if (queueAlertInFlightRef.current) return;
+    queueAlertAttemptsRef.current.add(attemptKey);
+    queueAlertInFlightRef.current = true;
+    try {
+      const result = await adapter.queue.signalAlert({ eventId: alarmState.eventId, kind });
+      const nextDisposition = result.disposition === 'delivered' || result.disposition === 'already_delivered'
+        ? 'delivered'
+        : result.disposition;
+      await commitQueue((document) => {
+        if (document.alarm?.eventId !== result.eventId) return document;
+        return {
+          ...document,
+          alarm: snoozeAttempt
+            ? { ...document.alarm, snoozeNotificationDisposition: nextDisposition }
+            : { ...document.alarm, notificationDisposition: nextDisposition },
+        };
+      });
+    } catch {
+      await commitQueue((document) => {
+        if (document.alarm?.eventId !== alarmState.eventId) return document;
+        return {
+          ...document,
+          alarm: snoozeAttempt
+            ? { ...document.alarm, snoozeNotificationDisposition: 'failed' }
+            : { ...document.alarm, notificationDisposition: 'failed' },
+        };
+      }).catch(() => undefined);
+    } finally {
+      queueAlertInFlightRef.current = false;
+    }
+  }, [adapter.queue, commitQueue]);
+
+  const releaseQueueResources = useCallback(async (runRevision: string) => {
+    try {
+      const power = await adapter.queue.setSleepPrevention({ runRevision, enabled: false });
+      dispatch({ type: 'QUEUE_POWER_CHANGED', power });
+    } catch {
+      dispatch({ type: 'QUEUE_POWER_CHANGED', power: null });
+    }
+    try {
+      const lease = await adapter.queue.releaseRunner({ runRevision });
+      dispatch({ type: 'QUEUE_LEASE_CHANGED', lease });
+    } catch {
+      dispatch({ type: 'QUEUE_LEASE_CHANGED', lease: null });
+    }
+    if (queueAuthorizationRef.current === runRevision) queueAuthorizationRef.current = null;
+  }, [adapter.queue]);
+
+  const parkQueue = useCallback(async (code: string, message?: string) => {
+    const current = queueSnapshotRef.current.document;
+    const run = current.run;
+    if (run === null || ['completed', 'idle'].includes(run.runnerState)) return;
+    const item = current.items.find((row) => (
+      !isQueuePlaceholder(row)
+      && row.runRevision === run.runRevision
+      && ['dispatching', 'active', 'saving', 'interrupted', 'needs_attention', 'staged'].includes(row.state)
+    ));
+    try {
+      await commitQueue((document) => {
+        let next = document;
+        if (item !== undefined && !isQueuePlaceholder(item)) {
+          next = updateQueueItem(next, item.queueItemId, { state: 'needs_attention', attentionCode: code }, new Date().toISOString());
+        }
+        return updateQueueRun(next, { runnerState: 'needs_attention', authorizationRequired: true });
+      });
+    } catch {
+      // The native revision conflict remains visible through the next reload.
+    }
+    await releaseQueueResources(run.runRevision);
+    dispatch({
+      type: 'SHOW_TOAST',
+      tone: 'warning',
+      title: 'Queue paused',
+      message: message ?? 'Review the highlighted batch, then choose Resume queue.',
+    });
+  }, [commitQueue, releaseQueueResources]);
 
   const refreshProductionStatus = useCallback((): Promise<boolean> => {
     if (!runtime || !stateRef.current.setup.completed || !stateRef.current.setup.credentials.runpodApiKey.configured) {
@@ -74,6 +258,39 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
   }, [runtime]);
 
   useEffect(() => {
+    let active = true;
+    void adapter.queue.load().then(
+      (snapshot) => {
+        if (!active) return;
+        queueSnapshotRef.current = snapshot;
+        dispatch({ type: 'QUEUE_LOADED', snapshot });
+      },
+      (error: unknown) => {
+        if (!active) return;
+        const code = typeof error === 'object' && error !== null && typeof (error as { code?: unknown }).code === 'string'
+          ? (error as { code: string }).code
+          : 'queue_store_unrecoverable';
+        dispatch({ type: 'QUEUE_LOAD_FAILED', code });
+      },
+    );
+    void adapter.queue.isNotificationPermissionGranted().then((granted) => {
+      if (active) dispatch({ type: 'QUEUE_NOTIFICATION_PERMISSION', permission: granted ? 'granted' : 'denied' });
+    }, () => {
+      if (active) dispatch({ type: 'QUEUE_NOTIFICATION_PERMISSION', permission: 'denied' });
+    });
+    return () => { active = false; };
+  }, [adapter.queue]);
+
+  useEffect(() => () => {
+    alarm.dispose();
+    const runRevision = queueSnapshotRef.current.document.run?.runRevision;
+    if (runRevision !== undefined) {
+      void adapter.queue.setSleepPrevention({ runRevision, enabled: false }).catch(() => undefined);
+      void adapter.queue.releaseRunner({ runRevision }).catch(() => undefined);
+    }
+  }, [adapter.queue, alarm]);
+
+  useEffect(() => {
     if (!runtime || !state.setup.completed) return;
     void runtime.restoreLocalLibrary(stateRef.current).catch(() => undefined);
   }, [runtime, state.setup.completed, state.settings.defaultDestination]);
@@ -84,13 +301,21 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
       if (event.type === 'pod') dispatch({ type: 'SYNC_RUNTIME_POD', pod: event.pod });
       else if (event.type === 'batch') dispatch({ type: 'SYNC_RUNTIME_BATCH', batch: event.batch, assets: event.assets });
       else if (event.type === 'library') dispatch({ type: 'SYNC_RUNTIME_LIBRARY', assets: event.assets });
-      else if (event.type === 'busy') dispatch({ type: 'SYNC_RUNTIME_BUSY', batch: event.batch });
+      else if (event.type === 'busy') {
+        dispatch({ type: 'SYNC_RUNTIME_BUSY', batch: event.batch });
+        if (queueRunIsActive(queueSnapshotRef.current.document)) {
+          void parkQueue('batch_busy', `${event.batch.owner} is using the GPU. The local queue was not remotely reserved.`);
+        }
+      }
       else if (event.type === 'idle') dispatch({ type: 'RUNTIME_BATCH_IDLE' });
-      else if (event.type === 'stop-guard-active') dispatch({
-        type: 'RUNTIME_STOP_GUARD_ACTIVE',
-        podId: event.podId,
-        message: event.message,
-      });
+      else if (event.type === 'stop-guard-active') {
+        dispatch({
+          type: 'RUNTIME_STOP_GUARD_ACTIVE',
+          podId: event.podId,
+          message: event.message,
+        });
+        if (queueRunIsActive(queueSnapshotRef.current.document)) void parkQueue('gpu_stop_pending', event.message);
+      }
       else if (event.type === 'create-recovery') dispatch({ type: 'SYNC_CREATE_RECOVERY', marker: event.marker });
       else if (event.type === 'studio') dispatch({ type: 'SYNC_STUDIO_STATE', studio: event.studio });
       else if (event.type === 'stop-blocked') dispatch({
@@ -106,16 +331,66 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
         retryable: event.retryable,
       });
       else if (event.type === 'stop-complete') dispatch({ type: 'STUDIO_STOPPED', alreadyStopped: event.alreadyStopped });
-      else if (event.type === 'local-error') dispatch({
-        type: 'RUNTIME_LOCAL_ERROR',
-        batchId: event.batchId,
-        code: event.code,
-        message: event.message,
-        retryable: event.retryable,
-      });
+      else if (event.type === 'local-error') {
+        const queueItemId = stateRef.current.batch?.queueItemId;
+        if (queueItemId !== undefined) queueFailureCodesRef.current.set(queueItemId, event.code);
+        dispatch({
+          type: 'RUNTIME_LOCAL_ERROR',
+          batchId: event.batchId,
+          code: event.code,
+          message: event.message,
+          retryable: event.retryable,
+        });
+        if (queueRunIsActive(queueSnapshotRef.current.document)) void parkQueue(event.code, event.message);
+      }
       else if (event.type === 'notice') dispatch({ type: 'SHOW_TOAST', tone: event.tone, title: event.title, message: event.message });
-      else dispatch({ type: 'RUNTIME_ERROR', scope: event.scope, code: event.code, message: event.message, retryable: event.retryable });
+      else {
+        if (event.scope === 'batch') {
+          const queueItemId = stateRef.current.batch?.queueItemId;
+          if (queueItemId !== undefined) {
+            queueFailureCodesRef.current.set(queueItemId, event.code ?? 'queue_submission_failed');
+          }
+        }
+        dispatch({ type: 'RUNTIME_ERROR', scope: event.scope, code: event.code, message: event.message, retryable: event.retryable });
+        if (event.scope === 'batch' && queueRunIsActive(queueSnapshotRef.current.document)) {
+          void parkQueue(event.code ?? 'queue_submission_failed', event.message);
+        }
+      }
     });
+  }, [parkQueue, runtime]);
+
+  useEffect(() => {
+    if (!runtime) {
+      setGpuSelectorSnapshot(null);
+      setGpuSelectorOpen(false);
+      setGpuPriceAttention(null);
+      setGpuSwitchSnapshot(null);
+      setGpuSwitchLoadState('ready');
+      return;
+    }
+    let active = true;
+    setGpuSwitchLoadState('loading');
+    setGpuSelectorSnapshot(runtime.getGpuInventory());
+    const unsubscribe = runtime.subscribeGpuInventory((snapshot) => {
+      if (active) setGpuSelectorSnapshot(snapshot);
+    });
+    void runtime.loadGpuInventory().then((snapshot) => {
+      if (active) setGpuSelectorSnapshot(snapshot);
+    }, () => undefined);
+    void runtime.loadGpuStart().then((result) => {
+      if (active && result?.state === 'price_attention') setGpuPriceAttention(result);
+    }, () => undefined);
+    void runtime.loadGpuSwitch().then((snapshot) => {
+      if (!active) return;
+      setGpuSwitchSnapshot(snapshot);
+      setGpuSwitchLoadState('ready');
+    }, () => {
+      if (active) setGpuSwitchLoadState('error');
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, [runtime]);
 
   useEffect(() => {
@@ -231,7 +506,9 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
   useEffect(() => {
     if (state.pod.lifecycleSequence === 0 || state.pod.phase !== 'selecting') return;
     if (runtime) {
-      void runtime.startGpu(stateRef.current).catch(() => undefined);
+      // Production Start is committed only by the mounted receipt-bound GPU
+      // selector. A restored legacy `selecting` phase must never fall through
+      // to the renderer-authorized RunPod provider path.
       return;
     }
     return adapter.runPodLifecycle(
@@ -254,7 +531,37 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
   useEffect(() => {
     if (state.batch?.phase !== 'validating') return;
     if (runtime) {
-      void runtime.startBatch(stateRef.current).catch(() => undefined);
+      const queueItemId = state.batch.queueItemId;
+      if (queueItemId === undefined) {
+        void runtime.startBatch(stateRef.current).catch(() => undefined);
+        return;
+      }
+      void queueMutationTailRef.current.then(async () => {
+        const latest = stateRef.current;
+        const document = queueSnapshotRef.current.document;
+        const run = document.run;
+        const row = document.items.find((item) => item.queueItemId === queueItemId);
+        if (
+          latest.batch?.phase !== 'validating'
+          || latest.batch.queueItemId !== queueItemId
+          || run === null
+          || run.runnerState !== 'running'
+          || run.authorizationRequired
+          || queueAuthorizationRef.current !== run.runRevision
+          || row === undefined
+          || isQueuePlaceholder(row)
+          || row.state !== 'dispatching'
+          || row.runRevision !== run.runRevision
+        ) return;
+        queueRemoteCreateInFlightRef.current = queueItemId;
+        try {
+          await runtime.startBatch(latest);
+        } finally {
+          if (queueRemoteCreateInFlightRef.current === queueItemId) {
+            queueRemoteCreateInFlightRef.current = null;
+          }
+        }
+      }).catch(() => undefined);
       return;
     }
     return adapter.validateBatch(() => dispatch({ type: 'BATCH_VALIDATED' }));
@@ -281,9 +588,893 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
     return () => window.clearTimeout(timer);
   }, [state.toast]);
 
+  const showQueueError = useCallback((error: unknown, fallback: string) => {
+    const message = error instanceof Error && error.message ? error.message : fallback;
+    dispatch({ type: 'SHOW_TOAST', tone: 'error', title: 'Queue update failed', message });
+  }, []);
+
+  const stageDraft = useCallback(async () => {
+    const current = stateRef.current;
+    if (
+      current.queue.loadState !== 'ready'
+      || current.draft.prompts.length === 0
+      || current.draft.destination === null
+      || current.draft.issues.some((issue) => issue.level === 'error')
+    ) {
+      dispatch({ type: 'SHOW_TOAST', tone: 'warning', title: 'Batch is not ready to stage', message: 'Resolve the highlighted prompts and choose a downloads folder first.' });
+      return;
+    }
+    try {
+      const references = await snapshotQueueReferences(current.draft.references);
+      const staged = createStagedQueueItem(
+        current.draft,
+        current.settings,
+        references,
+        new Date().toISOString(),
+      );
+      await commitQueue(
+        (document) => replaceQueueItem(document, staged.item, current.draft.queueReplacementId),
+        staged.referenceBlobs,
+      );
+      dispatch({ type: 'NEW_BATCH' });
+      dispatch({
+        type: 'SHOW_TOAST',
+        tone: 'success',
+        title: current.draft.queueReplacementId ? 'Staged batch replaced' : 'Batch staged on this device',
+        message: 'It is saved locally and is not reserved on the GPU.',
+      });
+    } catch (error) {
+      showQueueError(error, 'The batch could not be saved to this device queue.');
+    }
+  }, [commitQueue, showQueueError]);
+
+  const startQueueRun = useCallback(async () => {
+    const current = stateRef.current;
+    if (current.queue.loadState !== 'ready') return;
+    if (current.batch !== null) {
+      dispatch({ type: 'SHOW_TOAST', tone: 'warning', title: 'Finish the current batch first', message: 'The worker still permits exactly one active batch.' });
+      return;
+    }
+    if (current.pod.phase !== 'ready' || current.pod.podId === null) {
+      dispatch({ type: 'SHOW_TOAST', tone: 'warning', title: 'Start the GPU first', message: 'Run queue never starts a Pod automatically.' });
+      return;
+    }
+    if (['pending', 'approved', 'finalizing'].includes(current.studio.stop.phase)) {
+      dispatch({ type: 'SHOW_TOAST', tone: 'warning', title: 'GPU Stop is in progress', message: 'Resolve the shared Stop request before running this local queue.' });
+      return;
+    }
+    const runRevision = crypto.randomUUID();
+    try {
+      // Persist the singular run before asking native code to lease it. The
+      // production lease validates that exact durable revision; a permissive
+      // in-memory fake must not hide this ordering requirement.
+      await commitQueue((document) => createQueueRun(
+        document,
+        runRevision,
+        current.queue.alarmTest === 'heard',
+        current.queue.keepAwakePreference,
+      ));
+      const lease = await adapter.queue.acquireRunner({ runRevision });
+      dispatch({ type: 'QUEUE_LEASE_CHANGED', lease });
+      await commitQueue((document) => updateQueueRun(document, {
+        runnerState: 'running',
+        authorizationRequired: false,
+      }));
+      queueAuthorizationRef.current = runRevision;
+      queuePodIdRef.current = current.pod.podId;
+      if (current.queue.keepAwakePreference) {
+        const power = await adapter.queue.setSleepPrevention({ runRevision, enabled: true });
+        dispatch({ type: 'QUEUE_POWER_CHANGED', power });
+      }
+      dispatch({ type: 'SHOW_TOAST', tone: 'success', title: 'Queue running', message: 'ImageForge will submit one local snapshot at a time while this app stays open.' });
+    } catch (error) {
+      await adapter.queue.releaseRunner({ runRevision }).catch(() => undefined);
+      await commitQueue((document) => document.run?.runRevision === runRevision
+        ? updateQueueRun(document, { runnerState: 'paused', authorizationRequired: true })
+        : document).catch(() => undefined);
+      showQueueError(error, 'The local queue could not start.');
+    }
+  }, [adapter.queue, commitQueue, showQueueError]);
+
+  const resumeQueue = useCallback(async () => {
+    const current = stateRef.current;
+    const run = current.queue.document.run;
+    if (run === null) return;
+    if (current.pod.phase !== 'ready' || current.pod.podId === null) {
+      dispatch({ type: 'SHOW_TOAST', tone: 'warning', title: 'GPU is not ready', message: 'Start or restore the GPU explicitly, then Resume queue.' });
+      return;
+    }
+    if (current.batch?.phase === 'locked') {
+      dispatch({ type: 'SHOW_TOAST', tone: 'warning', title: 'GPU is busy', message: 'Another editor owns the active worker batch. The local queue remains paused.' });
+      return;
+    }
+    try {
+      const lease = await adapter.queue.acquireRunner({ runRevision: run.runRevision });
+      dispatch({ type: 'QUEUE_LEASE_CHANGED', lease });
+      const candidate = queueSnapshotRef.current.document.items.find((row) => (
+        !isQueuePlaceholder(row)
+        && row.runRevision === run.runRevision
+        && !['completed', 'completed_with_failures', 'cancelled', 'historical'].includes(row.state)
+      ));
+      let reattachedBatchId: string | null = null;
+      if (candidate !== undefined && !isQueuePlaceholder(candidate) && runtime) {
+        reattachedBatchId = await runtime.reconcileQueueSubmission({
+          queueItemId: candidate.queueItemId,
+          clientSubmissionId: candidate.clientSubmissionId,
+          name: candidate.name,
+          destination: candidate.destination,
+        });
+        // Owner-only exact lookup always precedes status/preflight. A missing
+        // association is safe to submit only for a never-accepted/uncertain
+        // staged row, never for a row that recorded a remote batch.
+        const refreshed = await refreshProductionStatus();
+        const authoritativePod = runtime.getAuthoritativePodState?.() ?? stateRef.current.pod;
+        if (!refreshed || authoritativePod.phase !== 'ready' || authoritativePod.podId === null) {
+          throw Object.assign(new Error('The exact GPU could not be verified after submission lookup.'), { code: 'queue_pod_offline' });
+        }
+        if (queuePodIdRef.current !== null && queuePodIdRef.current !== authoritativePod.podId) {
+          throw Object.assign(new Error('The GPU identity changed while the queue was paused.'), { code: 'queue_pod_replaced' });
+        }
+        if (reattachedBatchId === null && (candidate.remoteBatchId !== null || ['active', 'saving', 'interrupted'].includes(candidate.state))) {
+          throw Object.assign(new Error('The previously accepted submission association is missing.'), { code: 'submission_not_found' });
+        }
+      }
+      await commitQueue((document) => {
+        const active = document.items.find((row) => (
+          !isQueuePlaceholder(row)
+          && row.runRevision === run.runRevision
+          && ['dispatching', 'needs_attention', 'interrupted'].includes(row.state)
+        ));
+        const repaired = active !== undefined && !isQueuePlaceholder(active)
+          ? updateQueueItem(document, active.queueItemId, {
+              state: reattachedBatchId === null ? 'staged' : 'active',
+              attentionCode: null,
+              remoteBatchId: reattachedBatchId,
+            }, new Date().toISOString())
+          : document;
+        return updateQueueRun(repaired, { runnerState: 'running', authorizationRequired: false });
+      });
+      queueAuthorizationRef.current = run.runRevision;
+      queuePodIdRef.current = current.pod.podId;
+      if (run.keepAwake) {
+        const power = await adapter.queue.setSleepPrevention({ runRevision: run.runRevision, enabled: true });
+        dispatch({ type: 'QUEUE_POWER_CHANGED', power });
+      }
+      if (reattachedBatchId !== null && current.batch?.phase === 'interrupted' && current.batch.queueItemId && runtime) {
+        await runtime.controlBatch('resume', stateRef.current);
+      }
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && typeof (error as { code?: unknown }).code === 'string'
+        ? (error as { code: string }).code
+        : 'submission_uncertain';
+      const message = error instanceof Error ? error.message : 'The queue could not resume safely.';
+      await parkQueue(code, message);
+    }
+  }, [adapter.queue, commitQueue, parkQueue, refreshProductionStatus, runtime]);
+
+  const pauseQueue = useCallback(async () => {
+    const current = stateRef.current;
+    const run = current.queue.document.run;
+    if (run === null || !['running', 'pause_after_current'].includes(run.runnerState)) return;
+    const queueItemId = current.batch?.queueItemId;
+    const queuedRow = queueItemId === undefined
+      ? undefined
+      : queueSnapshotRef.current.document.items.find((row) => row.queueItemId === queueItemId);
+    const pausingBeforeCreate = queueItemId !== undefined
+      && current.batch?.phase === 'validating'
+      && queueRemoteCreateInFlightRef.current !== queueItemId
+      && queuedRow !== undefined
+      && !isQueuePlaceholder(queuedRow)
+      && queuedRow.state === 'dispatching';
+    const active = queueItemId !== undefined && (
+      queueRemoteCreateInFlightRef.current === queueItemId
+      || ['running', 'paused'].includes(current.batch?.phase ?? '')
+      || (queuedRow !== undefined
+        && !isQueuePlaceholder(queuedRow)
+        && ['active', 'saving', 'interrupted'].includes(queuedRow.state))
+    );
+    try {
+      await commitQueue((document) => {
+        const reverted = pausingBeforeCreate && queueItemId !== undefined
+          ? updateQueueItem(
+            document,
+            queueItemId,
+            { state: 'staged', attentionCode: null },
+            new Date().toISOString(),
+          )
+          : document;
+        return updateQueueRun(reverted, {
+          runnerState: active ? 'pause_after_current' : 'paused',
+          authorizationRequired: !active,
+        });
+      });
+      if (pausingBeforeCreate) dispatch({ type: 'QUEUE_RELEASE_BATCH' });
+      if (!active) await releaseQueueResources(run.runRevision);
+    } catch (error) {
+      showQueueError(error, 'The queue could not be paused.');
+    }
+  }, [commitQueue, releaseQueueResources, showQueueError]);
+
+  const moveQueuedItem = useCallback(async (queueItemId: string, direction: -1 | 1) => {
+    try {
+      await commitQueue((document) => moveQueueItem(document, queueItemId, direction));
+    } catch (error) {
+      showQueueError(error, 'The staged batch could not move.');
+    }
+  }, [commitQueue, showQueueError]);
+
+  const removeQueuedItem = useCallback(async (queueItemId: string) => {
+    const row = queueSnapshotRef.current.document.items.find((item) => item.queueItemId === queueItemId);
+    if (row === undefined) return;
+    const runRevision = !isQueuePlaceholder(row) && row.runRevision !== null ? row.runRevision : null;
+    const heldLease = stateRef.current.queue.lease;
+    const needsRecoveryLease = runRevision !== null
+      && isQueueLocallyRemovableIssue(row)
+      && (heldLease?.held !== true || heldLease.runRevision !== runRevision);
+    let acquiredRecoveryLease = false;
+    try {
+      if (needsRecoveryLease) {
+        const lease = await adapter.queue.acquireRunner({ runRevision });
+        dispatch({ type: 'QUEUE_LEASE_CHANGED', lease });
+        acquiredRecoveryLease = true;
+      }
+      await commitQueue((document) => removeQueueItem(document, queueItemId, new Date().toISOString()));
+    } catch (error) {
+      showQueueError(error, 'The local batch could not be removed safely.');
+    } finally {
+      if (acquiredRecoveryLease && runRevision !== null) {
+        await releaseQueueResources(runRevision);
+      }
+    }
+  }, [adapter.queue, commitQueue, releaseQueueResources, showQueueError]);
+
+  const editQueuedItem = useCallback(async (queueItemId: string) => {
+    const row = queueSnapshotRef.current.document.items.find((item) => item.queueItemId === queueItemId);
+    if (row === undefined || isQueuePlaceholder(row) || row.state !== 'staged') return;
+    try {
+      const payload = await adapter.queue.prepareDispatch({
+        queueItemId,
+        clientSubmissionId: row.clientSubmissionId,
+        purpose: 'edit',
+      });
+      dispatch({ type: 'RESTORE_QUEUE_ITEM_TO_DRAFT', payload, styleSuffix: row.styleSuffix });
+    } catch (error) {
+      showQueueError(error, 'The staged batch could not be restored for editing.');
+    }
+  }, [adapter.queue, showQueueError]);
+
+  const testQueueAlarm = useCallback(async () => {
+    dispatch({ type: 'QUEUE_ALARM_TEST_STATE', state: 'playing' });
+    try {
+      await alarm.test();
+      dispatch({ type: 'QUEUE_ALARM_TEST_STATE', state: 'tested' });
+    } catch (error) {
+      dispatch({ type: 'QUEUE_ALARM_TEST_STATE', state: 'blocked' });
+      showQueueError(error, 'The alarm test could not play.');
+    }
+  }, [alarm, showQueueError]);
+
+  const confirmQueueAlarm = useCallback(async () => {
+    if (stateRef.current.queue.alarmTest !== 'tested') return;
+    dispatch({ type: 'QUEUE_ALARM_TEST_STATE', state: 'heard' });
+    try {
+      const permission = await adapter.queue.requestNotificationPermission();
+      dispatch({ type: 'QUEUE_NOTIFICATION_PERMISSION', permission: permission === 'granted' ? 'granted' : 'denied' });
+    } catch {
+      dispatch({ type: 'QUEUE_NOTIFICATION_PERMISSION', permission: 'denied' });
+    }
+  }, [adapter.queue]);
+
+  const dismissQueueAlarm = useCallback(async () => {
+    alarm.stop();
+    try {
+      await commitQueue((document) => document.alarm === null
+        ? document
+        : { ...document, alarm: { ...document.alarm, state: 'acknowledged', snoozeDueAt: null } });
+    } catch (error) {
+      showQueueError(error, 'The alarm acknowledgement could not be saved.');
+    }
+  }, [alarm, commitQueue, showQueueError]);
+
+  const snoozeQueueAlarm = useCallback(async () => {
+    const alarmState = queueSnapshotRef.current.document.alarm;
+    if (alarmState === null || alarmState.snoozeUsed || alarmState.state !== 'ringing') return;
+    alarm.stop();
+    const due = new Date(Date.now() + 15 * 60_000).toISOString();
+    try {
+      await commitQueue((document) => document.alarm === null ? document : {
+        ...document,
+        alarm: { ...document.alarm, state: 'snoozed', snoozeUsed: true, snoozeDueAt: due },
+      });
+    } catch (error) {
+      showQueueError(error, 'The alarm could not be snoozed.');
+    }
+  }, [alarm, commitQueue, showQueueError]);
+
+  const clearQueueCompleted = useCallback(async () => {
+    const current = queueSnapshotRef.current.document;
+    if (current.run?.runnerState !== 'completed' || current.alarm?.state !== 'acknowledged') return;
+    const cohort = new Set(current.run.cohortItemIds);
+    try {
+      await commitQueue((document) => ({
+        ...document,
+        items: document.items.map((row) => {
+          if (isQueuePlaceholder(row) || !cohort.has(row.queueItemId) || !['completed', 'completed_with_failures', 'cancelled'].includes(row.state)) return row;
+          const archived = { ...row, state: 'historical' as const, recordRevision: row.recordRevision + 1, updatedAt: new Date().toISOString() };
+          assertQueueItemTransition(row, archived);
+          return archived;
+        }),
+      }));
+    } catch (error) {
+      showQueueError(error, 'Completed rows could not be archived.');
+    }
+  }, [commitQueue, showQueueError]);
+
+  const clearQueueHistoryRows = useCallback(async () => {
+    try {
+      await commitQueue(clearQueueHistory);
+    } catch (error) {
+      showQueueError(error, 'Queue history could not be cleared.');
+    }
+  }, [commitQueue, showQueueError]);
+
+  const resetLocalQueue = useCallback(async () => {
+    alarm.stop();
+    try {
+      const snapshot = await adapter.queue.reset({ confirmation: 'RESET LOCAL QUEUE' });
+      queueSnapshotRef.current = snapshot;
+      queueAuthorizationRef.current = null;
+      queuePodIdRef.current = null;
+      dispatch({ type: 'QUEUE_LOADED', snapshot });
+      dispatch({ type: 'DISMISS_DIALOG' });
+      dispatch({
+        type: 'SHOW_TOAST',
+        tone: 'success',
+        title: 'Local queue reset',
+        message: 'The unrecoverable queue was quarantined. No GPU or downloaded image was changed.',
+      });
+    } catch (error) {
+      dispatch({ type: 'DISMISS_DIALOG' });
+      showQueueError(error, 'The local queue could not be reset safely.');
+    }
+  }, [adapter.queue, alarm, showQueueError]);
+
+  useEffect(() => {
+    const document = state.queue.document;
+    const run = document.run;
+    if (
+      state.queue.loadState !== 'ready'
+      || run === null
+      || run.runnerState !== 'running'
+      || run.authorizationRequired
+      || queueAuthorizationRef.current !== run.runRevision
+      || queueDispatchInFlightRef.current
+    ) return;
+    if (state.batch?.phase === 'locked') {
+      void parkQueue('batch_busy', `${state.batch.owner} owns the active GPU batch. The local queue was not reserved.`);
+      return;
+    }
+    if (state.batch !== null) return;
+    const item = nextQueueItem(document);
+    if (item === null) return;
+    queueDispatchInFlightRef.current = true;
+    void (async () => {
+      try {
+        if (['pending', 'approved', 'finalizing'].includes(stateRef.current.studio.stop.phase)) {
+          await parkQueue('queue_stop_pending', 'A shared GPU Stop request is in progress.');
+          return;
+        }
+        const foundBatchId = runtime ? await runtime.reconcileQueueSubmission({
+          queueItemId: item.queueItemId,
+          clientSubmissionId: item.clientSubmissionId,
+          name: item.name,
+          destination: item.destination,
+        }) : null;
+        if (foundBatchId !== null) return;
+        if (runtime) {
+          const refreshed = await refreshProductionStatus();
+          const authoritativePod = runtime.getAuthoritativePodState?.() ?? stateRef.current.pod;
+          if (!refreshed || authoritativePod.phase !== 'ready' || authoritativePod.podId === null) {
+            await parkQueue('queue_pod_offline', 'The exact GPU could not be verified. Start or restore it explicitly, then Resume queue.');
+            return;
+          }
+          if (queuePodIdRef.current !== null && queuePodIdRef.current !== authoritativePod.podId) {
+            await parkQueue('queue_pod_replaced', 'The GPU identity changed. Review it before resuming this queue.');
+            return;
+          }
+        }
+        const payload = await adapter.queue.prepareDispatch({
+          queueItemId: item.queueItemId,
+          clientSubmissionId: item.clientSubmissionId,
+          purpose: 'dispatch',
+        });
+        const beforeCommit = queueSnapshotRef.current.document;
+        const beforeRun = beforeCommit.run;
+        const stillSelected = nextQueueItem(beforeCommit);
+        if (
+          beforeRun === null
+          || beforeRun.runnerState !== 'running'
+          || beforeRun.authorizationRequired
+          || queueAuthorizationRef.current !== beforeRun.runRevision
+          || stillSelected?.queueItemId !== item.queueItemId
+        ) return;
+        queueFailureCodesRef.current.delete(item.queueItemId);
+        const committed = await commitQueue((current) => {
+          const currentRun = current.run;
+          const selected = nextQueueItem(current);
+          if (
+            currentRun === null
+            || currentRun.runnerState !== 'running'
+            || currentRun.authorizationRequired
+            || queueAuthorizationRef.current !== currentRun.runRevision
+            || selected?.queueItemId !== item.queueItemId
+          ) {
+            throw Object.assign(new Error('The queue was paused before remote admission.'), { code: 'queue_dispatch_cancelled' });
+          }
+          return updateQueueItem(
+            current,
+            item.queueItemId,
+            { state: 'dispatching', attentionCode: null },
+            new Date().toISOString(),
+          );
+        });
+        const committedRun = committed.document.run;
+        const committedRow = committed.document.items.find((row) => row.queueItemId === item.queueItemId);
+        if (
+          committedRun === null
+          || committedRun.runnerState !== 'running'
+          || committedRun.authorizationRequired
+          || queueAuthorizationRef.current !== committedRun.runRevision
+          || committedRow === undefined
+          || isQueuePlaceholder(committedRow)
+          || committedRow.state !== 'dispatching'
+        ) return;
+        dispatch({ type: 'QUEUE_DISPATCH_ITEM', payload, startedAt: new Date().toISOString() });
+      } catch (error) {
+        const code = typeof error === 'object' && error !== null && typeof (error as { code?: unknown }).code === 'string'
+          ? (error as { code: string }).code
+          : 'submission_uncertain';
+        if (code === 'queue_dispatch_cancelled') return;
+        const message = error instanceof Error ? error.message : 'Queue admission could not be confirmed.';
+        await parkQueue(code, message);
+      } finally {
+        queueDispatchInFlightRef.current = false;
+      }
+    })();
+  }, [
+    adapter.queue,
+    commitQueue,
+    parkQueue,
+    refreshProductionStatus,
+    runtime,
+    state.batch,
+    state.queue.document,
+    state.queue.loadState,
+  ]);
+
+  useEffect(() => {
+    const batch = state.batch;
+    if (batch?.queueItemId === undefined || queueBatchSyncInFlightRef.current) return;
+    const row = state.queue.document.items.find((item) => item.queueItemId === batch.queueItemId);
+    if (row === undefined || isQueuePlaceholder(row)) return;
+    let nextState: typeof row.state | null = null;
+    let attentionCode: string | null = null;
+    if (['running', 'paused'].includes(batch.phase)) nextState = 'active';
+    else if (batch.phase === 'complete') nextState = 'completed';
+    else if (batch.phase === 'partial_failure') nextState = 'completed_with_failures';
+    else if (batch.phase === 'cancelled') nextState = 'cancelled';
+    else if (batch.phase === 'interrupted') {
+      nextState = 'interrupted';
+      attentionCode = 'queue_batch_interrupted';
+    } else if (batch.phase === 'error') {
+      nextState = 'needs_attention';
+      attentionCode = queueFailureCodesRef.current.get(row.queueItemId)
+        ?? state.localSyncIssue?.code
+        ?? 'queue_batch_failed';
+    }
+    if (nextState === null) return;
+    const acceptedPhase = ['running', 'paused', 'complete', 'partial_failure', 'cancelled', 'interrupted'].includes(batch.phase);
+    const remoteBatchId = acceptedPhase && isCanonicalQueueUuid(batch.id) ? batch.id : row.remoteBatchId;
+    if (row.state === nextState && row.attentionCode === attentionCode && row.remoteBatchId === remoteBatchId) return;
+    queueBatchSyncInFlightRef.current = true;
+    void (async () => {
+      const commitState = (target: typeof row.state, code: string | null, applyRunnerPolicy: boolean) => commitQueue((document) => {
+        const currentRow = document.items.find((item) => item.queueItemId === row.queueItemId);
+        if (currentRow === undefined || isQueuePlaceholder(currentRow)) throw new Error('The active queue item disappeared.');
+        const targetRemote = target === 'staged' || target === 'dispatching' ? null : remoteBatchId;
+        if (currentRow.state === target && currentRow.attentionCode === code && currentRow.remoteBatchId === targetRemote) return document;
+        let next = updateQueueItem(document, row.queueItemId, {
+          state: target,
+          attentionCode: code,
+          remoteBatchId: targetRemote,
+        }, new Date().toISOString());
+        const run = next.run;
+        if (applyRunnerPolicy && run !== null) {
+          if (['interrupted', 'needs_attention'].includes(target)) {
+            next = updateQueueRun(next, { runnerState: 'needs_attention', authorizationRequired: true });
+          } else if (target === 'cancelled') {
+            next = updateQueueRun(next, { runnerState: 'paused', authorizationRequired: true });
+          } else if (run.runnerState === 'pause_after_current' && !queueCohortAtFixedPoint(next)) {
+            next = updateQueueRun(next, { runnerState: 'paused', authorizationRequired: true });
+          }
+        }
+        return next;
+      });
+
+      let currentState = row.state;
+      const terminal = nextState === 'completed' || nextState === 'completed_with_failures';
+      if ((nextState === 'active' || terminal) && currentState === 'staged') {
+        await commitState('dispatching', null, false);
+        currentState = 'dispatching';
+      }
+      if ((nextState === 'active' || terminal) && ['dispatching', 'needs_attention', 'interrupted'].includes(currentState)) {
+        await commitState('active', null, false);
+        currentState = 'active';
+      }
+      if (terminal && currentState === 'active') {
+        await commitState('saving', null, false);
+      }
+      const snapshot = await commitState(nextState!, attentionCode, true);
+      if (['completed', 'completed_with_failures', 'cancelled'].includes(nextState!)) {
+        queueFailureCodesRef.current.delete(row.queueItemId);
+        runtime?.beginNewBatch();
+        dispatch({ type: 'QUEUE_RELEASE_BATCH' });
+      }
+      const run = snapshot.document.run;
+      if (run !== null && ['paused', 'needs_attention'].includes(run.runnerState)) {
+        await releaseQueueResources(run.runRevision);
+      }
+    })().catch((error: unknown) => {
+      showQueueError(error, 'The queue could not record the current batch state.');
+    }).finally(() => {
+      queueBatchSyncInFlightRef.current = false;
+    });
+  }, [
+    commitQueue,
+    releaseQueueResources,
+    runtime,
+    showQueueError,
+    state.batch,
+    state.localSyncIssue?.code,
+    state.queue.document.items,
+  ]);
+
+  useEffect(() => {
+    const document = state.queue.document;
+    const run = document.run;
+    const alarmState = document.alarm;
+    if (
+      run === null
+      || alarmState === null
+      || run.runnerState === 'completed'
+      || !queueCohortAtFixedPoint(document)
+      || queueCompletionInFlightRef.current
+    ) return;
+    queueCompletionInFlightRef.current = true;
+    const kind = queueCompletionKind(document);
+    const shouldRing = alarmState.state === 'armed';
+    void commitQueue((current) => ({
+      ...updateQueueRun(current, { runnerState: 'completed', authorizationRequired: true }),
+      alarm: current.alarm === null ? null : {
+        ...current.alarm,
+        kind,
+        state: shouldRing ? 'ringing' : 'disarmed',
+        notificationDisposition: shouldRing ? 'pending' : null,
+      },
+    })).then(async () => {
+      await releaseQueueResources(run.runRevision);
+      if (shouldRing && stateRef.current.queue.alarmTest === 'heard') {
+        await alarm.ring().catch(() => undefined);
+      }
+    }).catch((error: unknown) => {
+      showQueueError(error, 'Queue completion could not be recorded.');
+    }).finally(() => {
+      queueCompletionInFlightRef.current = false;
+    });
+  }, [alarm, commitQueue, releaseQueueResources, showQueueError, state.queue.document]);
+
+  useEffect(() => {
+    const alarmState = state.queue.document.alarm;
+    if (alarmState === null) return;
+    void deliverQueueNotification(alarmState);
+  }, [deliverQueueNotification, state.queue.document.alarm]);
+
+  useEffect(() => {
+    const alarmState = state.queue.document.alarm;
+    if (alarmState?.state !== 'snoozed' || alarmState.snoozeDueAt === null) return;
+    const due = new Date(alarmState.snoozeDueAt).valueOf();
+    const delay = Math.max(0, due - Date.now());
+    const timer = window.setTimeout(() => {
+      void commitQueue((document) => {
+        const current = document.alarm;
+        if (
+          current?.eventId !== alarmState.eventId
+          || current.state !== 'snoozed'
+          || !current.snoozeUsed
+          || current.snoozeDueAt !== alarmState.snoozeDueAt
+        ) return document;
+        return {
+          ...document,
+          alarm: {
+            ...current,
+            state: 'ringing',
+            snoozeDueAt: null,
+            snoozeNotificationDisposition: 'pending',
+          },
+        };
+      }).then(async (snapshot) => {
+        const current = snapshot.document.alarm;
+        if (
+          current?.eventId === alarmState.eventId
+          && current.state === 'ringing'
+          && current.snoozeUsed
+          && current.snoozeDueAt === null
+          && stateRef.current.queue.alarmTest === 'heard'
+        ) await alarm.ring().catch(() => undefined);
+      }).catch(() => undefined);
+    }, Math.min(delay, 2_147_483_647));
+    return () => window.clearTimeout(timer);
+  }, [alarm, commitQueue, state.queue.document.alarm]);
+
+  const prepareGpuSelector = useCallback(async (captureReturnFocus: boolean) => {
+    if (!runtime) return;
+    const current = stateRef.current;
+    if (gpuSwitchLoadState !== 'ready' || gpuSwitchSnapshot?.record !== null && gpuSwitchSnapshot?.record !== undefined) {
+      dispatch({
+        type: 'SHOW_TOAST',
+        tone: 'warning',
+        title: 'GPU switch recovery is paused',
+        message: gpuSwitchLoadState === 'loading'
+          ? 'ImageForge is still verifying the durable GPU Switch journal. No GPU mutation is allowed yet.'
+          : gpuSwitchLoadState === 'error'
+            ? 'ImageForge could not verify the durable GPU Switch journal, so no GPU mutation is allowed.'
+          : 'ImageForge found a durable GPU Switch. It will not start or replace a Pod until the native recovery controls are available.',
+      });
+      return;
+    }
+    if (current.pod.createRecovery !== null) {
+      dispatch({
+        type: 'SHOW_TOAST',
+        tone: 'warning',
+        title: 'Resolve the interrupted start first',
+        message: 'ImageForge will not risk creating a duplicate billed Pod.',
+      });
+      return;
+    }
+    const switchMode = current.pod.podId !== null;
+    if (switchMode ? current.pod.phase !== 'ready' : !['offline', 'error'].includes(current.pod.phase)) {
+      dispatch({
+        type: 'SHOW_TOAST',
+        tone: 'info',
+        title: 'Current GPU remains unchanged',
+        message: current.pod.podId === null
+          ? 'Wait for the current GPU transition to finish before choosing again.'
+          : 'Wait for the current managed GPU to become Ready before choosing a replacement.',
+      });
+      return;
+    }
+    setGpuSelectorMode(switchMode ? 'switch' : 'offline_start');
+    if (captureReturnFocus) {
+      gpuSelectorReturnFocusRef.current = document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+      setGpuSelectorOpen(true);
+    }
+    setGpuSelectorBusy(true);
+    try {
+      const snapshot = await runtime.prepareGpuInventory(current);
+      setGpuSelectorSnapshot(snapshot);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Live GPU inventory could not be refreshed.';
+      dispatch({ type: 'RUNTIME_ERROR', scope: 'pod', message });
+    } finally {
+      setGpuSelectorBusy(false);
+    }
+  }, [gpuSwitchLoadState, gpuSwitchSnapshot, runtime]);
+
+  const commitGpuSelectorChoice = useCallback((confirmation: GpuSelectorConfirmationV1) => {
+    if (!runtime) return;
+    if (confirmation.kind === 'switch') {
+      setGpuSelectorBusy(true);
+      void runtime.beginGpuSwitch(stateRef.current, confirmation).then(
+        (snapshot) => {
+          setGpuSwitchSnapshot(snapshot);
+          setGpuSwitchLoadState('ready');
+          setGpuSelectorOpen(false);
+        },
+        (error: unknown) => {
+          const message = error instanceof Error ? error.message : 'The coordinated GPU Switch could not begin safely.';
+          dispatch({ type: 'RUNTIME_ERROR', scope: 'pod', message });
+        },
+      ).finally(() => setGpuSelectorBusy(false));
+      return;
+    }
+    setGpuSelectorBusy(true);
+    void runtime.startGpuChoice(stateRef.current, confirmation).then(
+      (result) => {
+        setGpuSelectorOpen(false);
+        setGpuPriceAttention(result.state === 'price_attention' ? result : null);
+      },
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : 'The selected GPU could not be started safely.';
+        dispatch({ type: 'RUNTIME_ERROR', scope: 'pod', message });
+      },
+    ).finally(() => setGpuSelectorBusy(false));
+  }, [runtime]);
+
+  const confirmGpuPriceAttention = useCallback(() => {
+    if (
+      !runtime
+      || gpuPriceAttention?.state !== 'price_attention'
+      || gpuPriceAttention.actualHourlyPriceMicroUsd === null
+    ) return;
+    setGpuPriceConfirmBusy(true);
+    void runtime.confirmGpuActualPrice(
+      stateRef.current,
+      gpuPriceAttention.operationId,
+      gpuPriceAttention.actualHourlyPriceMicroUsd,
+    ).then((result) => {
+      setGpuPriceAttention(result.state === 'price_attention' ? result : null);
+    }, (error: unknown) => {
+      const message = error instanceof Error ? error.message : 'The actual GPU price could not be confirmed safely.';
+      dispatch({ type: 'RUNTIME_ERROR', scope: 'pod', message });
+    }).finally(() => setGpuPriceConfirmBusy(false));
+  }, [gpuPriceAttention, runtime]);
+
+  const runGpuSwitchProgressAction = useCallback((action: GpuSwitchProgressActionV1) => {
+    if (!runtime || gpuSwitchSnapshot?.record === null || gpuSwitchSnapshot?.record === undefined) return;
+    const record = gpuSwitchSnapshot.record;
+    setGpuSwitchActionBusy(action);
+    let operation: Promise<NativeGpuSwitchSnapshotV1>;
+    switch (action) {
+      case 'resume':
+        operation = runtime.resumeGpuSwitch(gpuSwitchSnapshot);
+        break;
+      case 'sync_worker':
+        operation = runtime.syncGpuSwitch(gpuSwitchSnapshot);
+        break;
+      case 'confirm_target':
+        operation = runtime.confirmGpuSwitchTarget(stateRef.current, gpuSwitchSnapshot);
+        break;
+      case 'finalize':
+        operation = runtime.finalizeGpuSwitch(stateRef.current, gpuSwitchSnapshot);
+        break;
+      case 'delete_old':
+        operation = runtime.deleteOldGpuSwitch(stateRef.current, gpuSwitchSnapshot);
+        break;
+      case 'prepare_attempt':
+        operation = runtime.prepareGpuSwitchAttempt(stateRef.current, gpuSwitchSnapshot);
+        break;
+      case 'confirm_attempt':
+        operation = runtime.confirmGpuSwitchAttempt(gpuSwitchSnapshot);
+        break;
+      case 'create_replacement':
+        operation = runtime.createGpuSwitchReplacement(stateRef.current, gpuSwitchSnapshot);
+        break;
+      case 'confirm_actual_price':
+        operation = runtime.confirmGpuSwitchActualPrice(gpuSwitchSnapshot);
+        break;
+      case 'delete_replacement': {
+        const rejectedPrice = record.blockedAt === 'replacement_identified'
+          || record.phase === 'replacement_identified';
+        operation = runtime.deleteGpuSwitchReplacement(
+          gpuSwitchSnapshot,
+          rejectedPrice ? 'actual_price_rejected' : 'replacement_failed',
+        );
+        break;
+      }
+      case 'reconcile_provider': {
+        const blockedPhase = record.phase === 'needs_attention' ? record.blockedAt : record.phase;
+        const reason = blockedPhase === 'delete_intent' || blockedPhase === 'delete_uncertain'
+          ? 'after_delete'
+          : blockedPhase === 'create_intent' || blockedPhase === 'create_uncertain'
+            ? 'after_create'
+            : blockedPhase === 'replacement_delete_intent'
+                || blockedPhase === 'replacement_delete_uncertain'
+              ? 'after_replacement_delete'
+              : blockedPhase === 'provisioning' || blockedPhase === 'replacement_failed'
+                ? 'provisioning'
+                : 'resume';
+        operation = runtime.reconcileGpuSwitchProvider(gpuSwitchSnapshot, reason);
+        break;
+      }
+      case 'verify_replacement':
+        operation = runtime.verifyGpuSwitchReplacement(gpuSwitchSnapshot);
+        break;
+      case 'complete':
+        operation = runtime.completeGpuSwitch(gpuSwitchSnapshot);
+        break;
+      case 'cancel':
+        operation = runtime.cancelGpuSwitch(gpuSwitchSnapshot);
+        break;
+      default: {
+        const unreachable: never = action;
+        throw new Error(`Unsupported GPU Switch action: ${String(unreachable)}`);
+      }
+    }
+    void operation.then((snapshot) => {
+      setGpuSwitchSnapshot(snapshot);
+      setGpuSwitchLoadState('ready');
+    }, (error: unknown) => {
+      const message = error instanceof Error ? error.message : 'The GPU Switch action could not be verified safely.';
+      dispatch({ type: 'RUNTIME_ERROR', scope: 'pod', message });
+      setGpuSwitchLoadState('loading');
+      return runtime.loadGpuSwitch().then((snapshot) => {
+        setGpuSwitchSnapshot(snapshot);
+        setGpuSwitchLoadState('ready');
+      }, () => setGpuSwitchLoadState('error'));
+    }).finally(() => setGpuSwitchActionBusy(null));
+  }, [gpuSwitchSnapshot, runtime]);
+
   const uiDispatch = useCallback((action: AppAction) => {
+    if (action.type === 'STAGE_DRAFT') {
+      void stageDraft();
+      return;
+    }
+    if (action.type === 'RUN_QUEUE') {
+      void startQueueRun();
+      return;
+    }
+    if (action.type === 'RESUME_QUEUE') {
+      void resumeQueue();
+      return;
+    }
+    if (action.type === 'PAUSE_QUEUE') {
+      void pauseQueue();
+      return;
+    }
+    if (action.type === 'MOVE_QUEUE_ITEM') {
+      void moveQueuedItem(action.queueItemId, action.direction);
+      return;
+    }
+    if (action.type === 'REMOVE_QUEUE_ITEM') {
+      void removeQueuedItem(action.queueItemId);
+      return;
+    }
+    if (action.type === 'EDIT_QUEUE_ITEM') {
+      void editQueuedItem(action.queueItemId);
+      return;
+    }
+    if (action.type === 'TEST_QUEUE_ALARM') {
+      void testQueueAlarm();
+      return;
+    }
+    if (action.type === 'CONFIRM_QUEUE_ALARM') {
+      void confirmQueueAlarm();
+      return;
+    }
+    if (action.type === 'SNOOZE_QUEUE_ALARM') {
+      void snoozeQueueAlarm();
+      return;
+    }
+    if (action.type === 'DISMISS_QUEUE_ALARM') {
+      void dismissQueueAlarm();
+      return;
+    }
+    if (action.type === 'RING_QUEUE_ALARM') {
+      const currentAlarm = stateRef.current.queue.document.alarm;
+      void alarm.ring().catch((error: unknown) => showQueueError(error, 'The alarm could not start.'));
+      if (currentAlarm !== null) void deliverQueueNotification(currentAlarm, true);
+      return;
+    }
+    if (action.type === 'CLEAR_QUEUE_COMPLETED') {
+      void clearQueueCompleted();
+      return;
+    }
+    if (action.type === 'CLEAR_QUEUE_HISTORY') {
+      void clearQueueHistoryRows();
+      return;
+    }
+    if (action.type === 'CONFIRM_RESET_QUEUE') {
+      void resetLocalQueue();
+      return;
+    }
     if (!runtime) {
       dispatch(action);
+      return;
+    }
+    if (action.type === 'START_POD' || action.type === 'OPEN_GPU_SELECTOR') {
+      void prepareGpuSelector(true);
       return;
     }
     const current = stateRef.current;
@@ -321,12 +1512,23 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
         dispatch(action);
         return;
       }
-      dispatch({
-        type: 'BEGIN_STUDIO_STOP',
-        podId: current.pod.podId,
-        gpuDisplayName: current.pod.gpu ?? 'ImageForge GPU',
-      });
-      void runtime.requestGpuStop(current).catch(() => undefined);
+      void (async () => {
+        if (queueRunIsActive(stateRef.current.queue.document)) {
+          await pauseQueue();
+        }
+        const latest = stateRef.current;
+        if (latest.pod.podId !== current.pod.podId) {
+          dispatch({ type: 'DISMISS_DIALOG' });
+          dispatch({ type: 'SHOW_TOAST', tone: 'warning', title: 'GPU changed', message: 'Refresh and confirm the exact current GPU before stopping it.' });
+          return;
+        }
+        dispatch({
+          type: 'BEGIN_STUDIO_STOP',
+          podId: current.pod.podId!,
+          gpuDisplayName: current.pod.gpu ?? 'ImageForge GPU',
+        });
+        await runtime.requestGpuStop(latest).catch(() => undefined);
+      })();
       return;
     }
     if (action.type === 'RESPOND_STUDIO_STOP') {
@@ -335,6 +1537,13 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
     }
     if (action.type === 'CANCEL_STUDIO_STOP') {
       void runtime.cancelGpuStop(action.requestId).catch(() => undefined);
+      return;
+    }
+    if (action.type === 'RESPOND_STUDIO_GPU_SWITCH') {
+      void runtime.respondToGpuSwitch(action.switchId, action.decision).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : 'The GPU Switch response could not be recorded safely.';
+        dispatch({ type: 'RUNTIME_ERROR', scope: 'pod', message });
+      });
       return;
     }
     if (action.type === 'START_BATCH') {
@@ -394,7 +1603,27 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
       return;
     }
     dispatch(action);
-  }, [refreshProductionStatus, runtime]);
+  }, [
+    alarm,
+    clearQueueCompleted,
+    clearQueueHistoryRows,
+    confirmQueueAlarm,
+    dismissQueueAlarm,
+    editQueuedItem,
+    moveQueuedItem,
+    pauseQueue,
+    prepareGpuSelector,
+    refreshProductionStatus,
+    removeQueuedItem,
+    resetLocalQueue,
+    resumeQueue,
+    runtime,
+    showQueueError,
+    snoozeQueueAlarm,
+    stageDraft,
+    startQueueRun,
+    testQueueAlarm,
+  ]);
 
   const screenProps = { state, dispatch: uiDispatch, adapter };
 
@@ -406,6 +1635,46 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
       <TopBar state={state} dispatch={uiDispatch} />
 
       <StudioCoordination stop={state.studio.stop} dispatch={uiDispatch} />
+      <GpuSwitchConsent
+        request={gpuSwitchSnapshot?.record !== null && gpuSwitchSnapshot?.record !== undefined
+          && state.studio.gpuSwitch?.isRequester
+          ? null
+          : state.studio.gpuSwitch}
+        dispatch={uiDispatch}
+      />
+      {gpuSwitchSnapshot?.record !== null && gpuSwitchSnapshot?.record !== undefined ? (
+        <GpuSwitchProgress
+          snapshot={gpuSwitchSnapshot}
+          workerRequest={state.studio.gpuSwitch}
+          busyAction={gpuSwitchActionBusy}
+          onAction={runGpuSwitchProgressAction}
+        />
+      ) : null}
+
+      {gpuPriceAttention?.state === 'price_attention' ? (
+        <aside className="duplicate-warning" role="alert" aria-live="assertive">
+          <AlertTriangle size={18} />
+          <div>
+            <strong>{gpuPriceAttention.actualHourlyPriceMicroUsd === null
+              ? 'Actual GPU price is unavailable'
+              : 'Actual GPU price needs confirmation'}</strong>
+            <span>
+              {gpuPriceAttention.actualHourlyPriceMicroUsd === null
+                ? 'The created Pod remains visible and stoppable, but generation is blocked because RunPod did not return a valid exact price.'
+                : `Confirmed ${formatHourlyMicroUsdV1(gpuPriceAttention.confirmedHourlyPriceMicroUsd)} · actual ${formatHourlyMicroUsdV1(gpuPriceAttention.actualHourlyPriceMicroUsd)}. Accepting uses a second native paid-action confirmation.`}
+            </span>
+          </div>
+          {gpuPriceAttention.actualHourlyPriceMicroUsd === null ? (
+            <Button compact tone="secondary" onClick={() => dispatch({ type: 'NAVIGATE', view: 'settings' })}>
+              Review GPU controls
+            </Button>
+          ) : (
+            <Button compact tone="primary" pending={gpuPriceConfirmBusy} disabled={gpuPriceConfirmBusy} onClick={confirmGpuPriceAttention}>
+              Accept actual price
+            </Button>
+          )}
+        </aside>
+      ) : null}
 
       {state.pod.matchingPodIds.length > 1 ? (
         <aside className="duplicate-warning" role="alert">
@@ -440,6 +1709,18 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
         </aside>
       ) : null}
 
+      {gpuSwitchLoadState === 'error' ? (
+        <aside className="local-sync-warning" role="alert" aria-live="assertive">
+          <AlertTriangle size={18} />
+          <div>
+            <strong>GPU switch recovery is paused</strong>
+            <span>
+              The durable Switch journal could not be verified. Start, Stop, and replacement stay blocked.
+            </span>
+          </div>
+        </aside>
+      ) : null}
+
       <main id="main-content" className="page-stage" tabIndex={-1}>
         {state.activeView === 'create' ? <CreateScreen {...screenProps} /> : null}
         {state.activeView === 'progress' ? <ProgressScreen {...screenProps} /> : null}
@@ -447,6 +1728,31 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
         {state.activeView === 'usage' ? <UsageScreen {...screenProps} /> : null}
         {state.activeView === 'settings' ? <SettingsScreen {...screenProps} /> : null}
       </main>
+
+      {gpuSelectorOpen ? (
+        gpuSelectorSnapshot === null ? (
+          <section className="gpu-selector" role="dialog" aria-labelledby="gpu-selector-loading-title">
+            <header className="gpu-selector__header">
+              <div>
+                <p className="gpu-selector__eyebrow">Secure Cloud · EU-RO-1 · one GPU</p>
+                <h2 id="gpu-selector-loading-title">Choose a GPU</h2>
+                <p>Loading the native inventory journal…</p>
+              </div>
+              <Button tone="secondary" onClick={() => setGpuSelectorOpen(false)}>Close</Button>
+            </header>
+          </section>
+        ) : (
+          <GpuSelector
+            snapshot={gpuSelectorSnapshot}
+            mode={gpuSelectorMode}
+            busy={gpuSelectorBusy}
+            returnFocusRef={gpuSelectorReturnFocusRef}
+            onClose={() => setGpuSelectorOpen(false)}
+            onRefresh={() => { void prepareGpuSelector(false); }}
+            onCommit={commitGpuSelectorChoice}
+          />
+        )
+      ) : null}
 
       <BottomNav state={state} dispatch={uiDispatch} />
 
@@ -494,6 +1800,21 @@ export default function App({ initialState, adapter: injectedAdapter }: AppProps
                 <div className="modal__actions">
                   <Button data-autofocus onClick={() => dispatch({ type: 'DISMISS_DIALOG' })}>Keep blocked</Button>
                   <Button tone="danger" onClick={() => uiDispatch({ type: 'CONFIRM_RESOLVE_CREATE' })}>I confirmed no Pod exists</Button>
+                </div>
+              </>
+            ) : state.dialog.type === 'reset-queue' ? (
+              <>
+                <p className="eyebrow">Local queue recovery</p>
+                <h2 id="modal-title">Reset the unrecoverable local queue?</h2>
+                <p>
+                  ImageForge will quarantine the existing private queue store and create an empty one. This does not delete downloaded images, stop the GPU, or change a remote batch.
+                </p>
+                <div className="modal__notice">
+                  Use this only after reviewing the recovery warning. Staged queue rows must be created again from their original briefs.
+                </div>
+                <div className="modal__actions">
+                  <Button data-autofocus onClick={() => dispatch({ type: 'DISMISS_DIALOG' })}>Keep queue files</Button>
+                  <Button tone="danger" onClick={() => uiDispatch({ type: 'CONFIRM_RESET_QUEUE' })}>Reset local queue</Button>
                 </div>
               </>
             ) : state.dialog.type === 'cancel-batch' ? (

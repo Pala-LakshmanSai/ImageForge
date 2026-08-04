@@ -79,11 +79,12 @@ export interface GpuOffer {
   readonly manufacturer: string;
   readonly memoryGb: number;
   readonly cloud: CloudLane;
-  readonly hourlyPriceUsd: number | null;
+  /** Authoritative price. UI formatting may derive decimal USD from this integer. */
+  readonly hourlyPriceMicroUsd: number | null;
   readonly availability: AvailabilityLevel;
   readonly dataCenterId: string;
   readonly volumeCompatible: boolean;
-  readonly observedAt: string;
+  readonly observedAt: string | null;
 }
 
 export interface BenchmarkContract {
@@ -107,14 +108,15 @@ export interface GpuBenchmarkProfile {
   readonly contract: BenchmarkContract;
 }
 
-export type RankingMode = "measured_job_cost" | "safe_4090_default";
+export type RankingMode = "fixed_policy";
 
 export interface RankedGpuOffer extends GpuOffer {
   readonly rank: number;
   readonly rankingMode: RankingMode;
-  readonly estimatedGenerationCostPerImageUsd: number | null;
-  readonly estimatedJobCostUsd: number | null;
-  readonly estimatedJobCostPerImageUsd: number | null;
+  /** Legacy v1 benchmark profiles are diagnostics only and never score. */
+  readonly estimatedGenerationCostPerImageMicroUsd: null;
+  readonly estimatedJobCostMicroUsd: null;
+  readonly estimatedJobCostPerImageMicroUsd: null;
 }
 
 export interface PodConstraintInput {
@@ -179,7 +181,7 @@ export interface ManagedPod {
   readonly networkVolumeId: string | null;
   readonly networkVolumeMountPath: string | null;
   readonly interruptible: boolean | null;
-  readonly hourlyPriceUsd: number | null;
+  readonly hourlyPriceMicroUsd: number | null;
   readonly createdAt: string | null;
   readonly startRequestId: string | null;
   readonly proxyUrl: string;

@@ -33,6 +33,8 @@ function pendingState(currentSessionId = representativeId) {
     current_session: allSessions.find((candidate) => candidate.session_id === currentSessionId),
     sessions: allSessions,
     active_batch: null,
+    gpu_switch_can_respond: false,
+    gpu_switch_request: null,
     stop_request: {
       request_id: requestId,
       pod_id: 'pod-exact-1',
@@ -69,7 +71,86 @@ function finalizingState() {
   });
 }
 
+function pendingSwitchState(currentSessionId = representativeId) {
+  const wire = pendingState(currentSessionId);
+  return {
+    ...wire,
+    stop_request: null,
+    gpu_switch_can_respond: currentSessionId !== requesterId,
+    gpu_switch_request: {
+      schema_version: 1,
+      switch_id: '66666666-6666-4666-8666-666666666666',
+      old_pod_id: 'pod-exact-1',
+      old_gpu_id: 'NVIDIA GeForce RTX 4090',
+      old_gpu_display_name: 'RTX 4090',
+      initial_target_gpu_id: 'NVIDIA RTX 5090',
+      initial_target_gpu_display_name: 'RTX 5090',
+      initial_replacement_attempt_id: '77777777-7777-4777-8777-777777777777',
+      requester: { session_id: requesterId, display_name: 'Lakshman' },
+      state: 'pending',
+      reason: null,
+      requested_at: '2026-08-03T10:00:00.000Z',
+      response_deadline: '2026-08-03T10:00:30.000Z',
+      ready_to_delete_at: null,
+      waiting_for: [{ session_id: representativeId, display_name: 'Sujal' }],
+      approved_by: [] as Array<{ session_id: string; display_name: string }>,
+      denied_by: [] as Array<{ session_id: string; display_name: string }>,
+      batch_id: null,
+      batch_owner: null,
+      batch_state_at_finalization: null,
+      replacement_attempt_id: null,
+      replacement_attempt_revision: null,
+      replacement_pod_id: null,
+      actual_target_gpu_id: null,
+    },
+  };
+}
+
 describe('studio collaboration contracts', () => {
+  it('strictly projects the public GPU Switch consent request for the required peer', () => {
+    const projected = projectStudioState(parseStudioState(pendingSwitchState()));
+
+    expect(projected.gpuSwitch).toMatchObject({
+      switchId: '66666666-6666-4666-8666-666666666666',
+      phase: 'pending',
+      oldGpuDisplayName: 'RTX 4090',
+      initialTargetGpuDisplayName: 'RTX 5090',
+      isRequester: false,
+      canRespond: true,
+    });
+  });
+
+  it('uses the authenticated per-session capability for a non-representative peer session', () => {
+    const projected = projectStudioState(parseStudioState(pendingSwitchState(duplicateId)));
+
+    expect(projected.gpuSwitch?.waitingFor).toEqual([
+      { sessionId: representativeId, displayName: 'Sujal' },
+    ]);
+    expect(projected.gpuSwitch?.canRespond).toBe(true);
+
+    const requester = pendingSwitchState(requesterId) as any;
+    requester.gpu_switch_can_respond = true;
+    expect(() => parseStudioState(requester)).toThrow('gpu_switch_can_respond');
+
+    const missingRepresentativeCapability = pendingSwitchState(representativeId) as any;
+    missingRepresentativeCapability.gpu_switch_can_respond = false;
+    expect(() => parseStudioState(missingRepresentativeCapability)).toThrow('response capability');
+  });
+
+  it('rejects terminal, partial-replacement, and private GPU Switch projections', () => {
+    const terminal = pendingSwitchState() as any;
+    terminal.gpu_switch_request.state = 'completed';
+    expect(() => parseStudioState(terminal)).toThrow('tombstone');
+
+    const partial = pendingSwitchState() as any;
+    partial.gpu_switch_request.replacement_attempt_id = '88888888-8888-4888-8888-888888888888';
+    expect(() => parseStudioState(partial)).toThrow('replacement identity');
+
+    const privateField = pendingSwitchState() as any;
+    privateField.gpu_switch_request.principal_binding_id = '99999999-9999-4999-8999-999999999999';
+    expect(() => parseStudioState(privateField)).toThrow('unknown field');
+  });
+
   it('offers approval to every required foreground session for the principal', () => {
     const representative = projectStudioState(parseStudioState(pendingState(representativeId)));
     expect(representative.stop).toMatchObject({ phase: 'pending', canRespond: true, isRequester: false });
@@ -92,6 +173,20 @@ describe('studio collaboration contracts', () => {
       finalizationId: null,
       finalizationExpiresAt: null,
     });
+  });
+
+  it('uses the shared 1-128 byte GPU identity grammar for Stop projections', () => {
+    const colon = pendingState();
+    colon.stop_request.gpu_display_name = 'NVIDIA RTX PRO 4500:Blackwell 32GB';
+    expect(parseStudioState(colon).stopRequest?.gpuDisplayName).toBe('NVIDIA RTX PRO 4500:Blackwell 32GB');
+
+    const oversized = pendingState();
+    oversized.stop_request.gpu_display_name = `A${'b'.repeat(127)}Z`;
+    expect(() => parseStudioState(oversized)).toThrow('ImageForge GPU identity');
+
+    const invalid = pendingState();
+    invalid.stop_request.gpu_display_name = 'NVIDIA/RTX 4090';
+    expect(() => parseStudioState(invalid)).toThrow('ImageForge GPU identity');
   });
 
   it('keeps the finalization UUID exclusive to the exact requester session', () => {

@@ -1,5 +1,11 @@
 # Task 003 — Explicit RunPod lifecycle and dynamic GPU selection
 
+Task 014 narrowly supersedes the catalog/ranking and exact-target Start surface
+with native receipt-bound live inventory, lossless micro-USD prices, benchmark-
+v2 evidence, and an explicit coordinated replacement saga. Task 003's one Pod,
+one GPU, fixed profile/volume, explicit Start/Stop, no timer, and no silent
+unapproved fallback rules remain binding.
+
 ## Acceptance criteria
 
 - List existing ImageForge Pods on every refresh.

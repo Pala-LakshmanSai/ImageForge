@@ -7,6 +7,7 @@ import {
   RunPodLifecycleController,
   deriveRunPodProxyUrl,
   type RunPodClientConfig,
+  type GpuAutoSelectionSourceV1,
   type StopGuard,
 } from "../src/index.js";
 import { makeConfig, makeOffer, makePod } from "./helpers.js";
@@ -18,12 +19,14 @@ function makeController(
     readonly now?: () => number;
     readonly token?: () => string;
     readonly stopGuard?: StopGuard;
+    readonly gpuSelectionSource?: GpuAutoSelectionSourceV1;
     readonly configOverrides?: Partial<RunPodClientConfig>;
   } = {},
 ): RunPodLifecycleController {
   return new RunPodLifecycleController({
     provider,
     config: makeConfig(options.configOverrides),
+    gpuSelectionSource: options.gpuSelectionSource ?? provider,
     ...(options.health === undefined ? {} : { workerHealthProbe: options.health }),
     ...(options.now === undefined ? {} : { clock: { now: options.now } }),
     ...(options.token === undefined ? {} : { tokenFactory: options.token }),
@@ -52,6 +55,21 @@ describe("RunPodLifecycleController refresh and start", () => {
     assert.equal(provider.calls.inventory[0]?.gpuCount, 1);
     assert.equal(provider.calls.inventory[0]?.dataCenterId, "EU-RO-1");
     assert.equal(provider.calls.inventory[0]?.includeEmergencyTier, false);
+  });
+
+  it("observes Pods repeatedly from cached inventory without another inventory call", async () => {
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()] });
+    const controller = makeController(provider);
+
+    await controller.refresh();
+    await controller.observePods({ suppressTransientPhase: true });
+    await controller.observePods({ suppressTransientPhase: true });
+
+    assert.equal(provider.calls.inventory.length, 1);
+    assert.equal(provider.calls.list.length, 3);
+    assert.deepEqual(controller.getSnapshot().inventory.map((offer) => offer.gpuId), [
+      "NVIDIA GeForce RTX 4090",
+    ]);
   });
 
   it("completes inventory before discovering a dynamic-GPU Pod", async () => {
@@ -223,7 +241,7 @@ describe("RunPodLifecycleController refresh and start", () => {
     assert.equal(provider.calls.create.length, 0);
   });
 
-  it("soft-falls back from catalog failure to one authoritative ordered create", async () => {
+  it("renders receipt-free fallback policy but never creates from it", async () => {
     const provider = new FakeRunPodProvider();
     provider.failNext(
       "inventory",
@@ -236,34 +254,116 @@ describe("RunPodLifecycleController refresh and start", () => {
     );
     const controller = makeController(provider);
 
-    const result = await controller.startGpu({
-      intent: "start_gpu",
-      source: "foreground_user",
-      requestId: "fallback1",
-      expectedImageCount: 450,
-    });
+    await controller.refresh({ suppressTransientPhase: true });
 
-    assert.equal(result.outcome, "created");
-    assert.equal(provider.calls.create.length, 1);
-    assert.equal(provider.calls.create[0]?.gpuCount, 1);
-    assert.equal(
-      provider.calls.create[0]?.imageName,
-      "ghcr.io/imageforge/worker@sha256:0123456789abcdef",
+    await assert.rejects(
+      () => controller.startGpu({
+        intent: "start_gpu",
+        source: "foreground_user",
+        requestId: "fallback1",
+        expectedImageCount: 450,
+      }),
+      (error: unknown) =>
+        error instanceof RunPodClientError && error.code === "no_gpu_available",
     );
-    assert.equal(provider.calls.create[0]?.gpuTypePriority, "custom");
-    assert.equal(provider.calls.create[0]?.cloud, "secure");
-    assert.deepEqual(provider.calls.create[0]?.gpuTypeIds, [
-      "NVIDIA GeForce RTX 4090",
-      "NVIDIA GeForce RTX 5090",
-      "NVIDIA L4",
-      "NVIDIA RTX A4500",
-      "NVIDIA RTX 4000 Ada Generation",
-    ]);
+
+    assert.equal(provider.calls.create.length, 0);
     assert.equal(provider.calls.terminate.length, 0);
-    assert.ok(result.snapshot.warnings.some((warning) => warning.code === "inventory_fallback"));
+    assert.equal(provider.calls.inventory.length, 1);
+    assert.ok(controller.getSnapshot().warnings.some((warning) => warning.code === "inventory_fallback"));
+    assert.ok(controller.getSnapshot().inventory.every((offer) => offer.observedAt === null));
   });
 
-  it("keeps RTX 2000 Ada unavailable unless the emergency tier is explicitly enabled", async () => {
+  it("keeps an unknown-price current Pod visible and stoppable but never reuses it", async () => {
+    const current = makePod({ id: "unknownpricecurrent1", hourlyPriceMicroUsd: null });
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()], pods: [current] });
+    const controller = makeController(provider, { token: () => "unknown-price-stop" });
+
+    await assert.rejects(
+      () => controller.startGpu({
+        intent: "start_gpu",
+        source: "foreground_user",
+        requestId: "unknownprice1",
+      }),
+      (error: unknown) =>
+        error instanceof RunPodClientError && error.code === "gpu_actual_price_unavailable",
+    );
+    assert.equal(provider.calls.create.length, 0);
+    assert.equal(controller.getSnapshot().pods[0]?.id, current.id);
+
+    const confirmation = controller.requestStopConfirmation({
+      intent: "stop_gpu",
+      source: "foreground_user",
+      podId: current.id,
+    });
+    await controller.stopGpu({
+      intent: "confirm_stop_gpu",
+      source: "foreground_user",
+      podId: current.id,
+      confirmationToken: confirmation.token,
+    });
+    assert.deepEqual(provider.calls.terminate, [current.id]);
+  });
+
+  it("keeps an unknown-price created Pod as attention and never reports Start success", async () => {
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()] });
+    provider.onCreate((request) => makePod({
+      id: "unknownpricecreated1",
+      name: request.name,
+      status: "provisioning",
+      startRequestId: request.startRequestId,
+      hourlyPriceMicroUsd: null,
+    }));
+    const controller = makeController(provider);
+
+    await assert.rejects(
+      () => controller.startGpu({
+        intent: "start_gpu",
+        source: "foreground_user",
+        requestId: "unknowncreated1",
+      }),
+      (error: unknown) =>
+        error instanceof RunPodClientError && error.code === "gpu_actual_price_unavailable",
+    );
+    assert.equal(provider.calls.create.length, 1);
+    assert.equal(controller.getSnapshot().pods.some((pod) => pod.id === "unknownpricecreated1"), true);
+  });
+
+  it("derives provider create order from the receipt-bound Auto projection, not legacy ranking", async () => {
+    const rtx5090 = makeOffer({
+      gpuId: "NVIDIA GeForce RTX 5090",
+      policyKey: "rtx_5090",
+      coldPriority: 2,
+      displayName: "RTX 5090",
+      memoryGb: 32,
+      hourlyPriceMicroUsd: 700_001,
+    });
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer(), rtx5090] });
+    const receiptAuthority = new FakeRunPodProvider({ inventory: [rtx5090] });
+    let authorityCalls = 0;
+    const controller = makeController(provider, {
+      gpuSelectionSource: {
+        async refreshForAutoStart(input) {
+          authorityCalls += 1;
+          return receiptAuthority.refreshForAutoStart(input);
+        },
+      },
+    });
+
+    await controller.startGpu({
+      intent: "start_gpu",
+      source: "foreground_user",
+      requestId: "receiptbound1",
+    });
+
+    assert.deepEqual(provider.calls.create[0]?.gpuTypeIds, ["NVIDIA GeForce RTX 5090"]);
+    assert.equal(provider.calls.create[0]?.gpuTypePriority, "custom");
+    assert.equal(provider.calls.inventory.length, 0);
+    assert.equal(provider.calls.list.length, 2);
+    assert.equal(authorityCalls, 1);
+  });
+
+  it("keeps RTX 2000 Ada outside Auto even when its explicit manual tier is visible", async () => {
     const emergencyOffer = makeOffer({
       gpuId: "NVIDIA RTX 2000 Ada Generation",
       displayName: "RTX 2000 Ada",
@@ -289,16 +389,16 @@ describe("RunPodLifecycleController refresh and start", () => {
     const enabled = makeController(enabledProvider, {
       configOverrides: { allowEmergencyGpuTier: true },
     });
-    const result = await enabled.startGpu({
-      intent: "start_gpu",
-      source: "foreground_user",
-      requestId: "emergencyon1",
-    });
-
-    assert.equal(result.pod.gpuId, "NVIDIA RTX 2000 Ada Generation");
-    assert.deepEqual(enabledProvider.calls.create[0]?.gpuTypeIds, [
-      "NVIDIA RTX 2000 Ada Generation",
-    ]);
+    await assert.rejects(
+      () => enabled.startGpu({
+        intent: "start_gpu",
+        source: "foreground_user",
+        requestId: "emergencyon1",
+      }),
+      (error: unknown) =>
+        error instanceof RunPodClientError && error.code === "no_gpu_available",
+    );
+    assert.equal(enabledProvider.calls.create.length, 0);
   });
 
   it("keeps an existing emergency Pod visible and stoppable without reusing it after opt-out", async () => {
@@ -795,13 +895,13 @@ describe("RunPodLifecycleController refresh and start", () => {
     ));
   });
 
-  it("enforces a wall-clock wait bound and releases the mutation queue when inventory ignores abort", async () => {
+  it("enforces a wall-clock wait bound and releases the mutation queue when Pod discovery ignores abort", async () => {
     const provider = new FakeRunPodProvider({
       inventory: [makeOffer()],
       pods: [makePod({ id: "timeoutpod1", status: "provisioning" })],
     });
-    const originalInventory = provider.listGpuInventory.bind(provider);
-    provider.listGpuInventory = (() => new Promise(() => undefined)) as typeof provider.listGpuInventory;
+    const originalList = provider.listImageForgePods.bind(provider);
+    provider.listImageForgePods = (() => new Promise(() => undefined)) as typeof provider.listImageForgePods;
     const controller = makeController(provider);
     const startedAt = Date.now();
 
@@ -811,9 +911,36 @@ describe("RunPodLifecycleController refresh and start", () => {
     );
     assert.ok(Date.now() - startedAt < 500);
 
-    provider.listGpuInventory = originalInventory;
+    assert.equal(provider.calls.inventory.length, 0);
+    provider.listImageForgePods = originalList;
     const refreshed = await controller.refresh();
     assert.equal(refreshed.selectedPodId, "timeoutpod1");
+  });
+
+  it("polls Pod readiness repeatedly without refetching provider inventory", async () => {
+    const provisioning = makePod({ id: "readinesspod1", status: "provisioning" });
+    const running = makePod({ id: "readinesspod1", status: "running" });
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()], pods: [provisioning] });
+    const originalList = provider.listImageForgePods.bind(provider);
+    let listCalls = 0;
+    provider.listImageForgePods = (async (criteria, signal) => {
+      listCalls += 1;
+      if (listCalls === 2) provider.setPods([running]);
+      return originalList(criteria, signal);
+    }) as typeof provider.listImageForgePods;
+    const health = new FakeWorkerHealthProbe();
+    health.setHealth(running.proxyUrl, {
+      schemaVersion: 1,
+      phase: "ready",
+      phaseProgress: 1,
+    });
+    const controller = makeController(provider, { health });
+
+    const snapshot = await controller.waitUntilReady({ timeoutMs: 200, pollIntervalMs: 1 });
+
+    assert.equal(snapshot.phase, "ready");
+    assert.ok(provider.calls.list.length >= 2);
+    assert.equal(provider.calls.inventory.length, 0);
   });
 
   it("gives public refresh its own deadline and releases the queue without a caller signal", async () => {
@@ -1103,13 +1230,13 @@ describe("RunPodLifecycleController refresh and start", () => {
 
     const refresh = controller.refresh();
     await Promise.resolve();
-    assert.equal(provider.calls.inventory.length, 1);
+    assert.equal(provider.calls.inventory.length, 0);
     assert.equal(provider.calls.list.length, 1);
 
     releaseCreate.resolve();
     const [started, refreshed] = await Promise.all([start, refresh]);
     assert.equal(started.pod.id, refreshed.selectedPodId);
-    assert.equal(provider.calls.inventory.length, 2);
+    assert.equal(provider.calls.inventory.length, 1);
     assert.equal(provider.calls.list.length, 3);
   });
 

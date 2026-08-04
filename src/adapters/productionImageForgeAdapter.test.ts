@@ -1,14 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { RunPodSnapshot } from '@imageforge/runpod-client';
+import type { NativeGpuInventorySnapshotV1, RunPodSnapshot } from '@imageforge/runpod-client';
 import { createConfiguredInitialState } from '../domain/reducer';
 import type { CredentialMetadataMap } from '../domain/types';
 import { DEFAULT_STUDIO_PROFILE } from './imageForgeAdapter';
 import { GpuLifecycleCoordinator } from './gpuLifecycleCoordinator';
+import { createMemoryQueueHost } from './queueStore';
 import {
   createProductionImageForgeAdapter,
   type ProductionDesktopPort,
   type ProductionRuntimeEvent,
 } from './productionImageForgeAdapter';
+import type { NativeGpuPodObservationV1, NativeGpuPodPort } from '../native/gpuPodBridge';
+import type { NativeGpuSwitchSnapshotV1 } from '../native/gpuSwitchBridge';
 
 const batchId = '11111111-1111-4111-8111-111111111111';
 
@@ -81,6 +84,8 @@ function studioState(sessionId: string) {
       expires_at: '2026-08-01T10:00:12.000Z',
     }],
     active_batch: null,
+    gpu_switch_can_respond: false,
+    gpu_switch_request: null,
     stop_request: null,
   };
 }
@@ -176,10 +181,103 @@ function offlineRunPodFetch() {
   }) as unknown as typeof fetch;
 }
 
+function gpuPodObservation(podPresent: boolean): NativeGpuPodObservationV1 {
+  return Object.freeze({
+    schemaVersion: 1,
+    processEpochId: '50000000-0000-4000-8000-000000000000',
+    lifecycleRevision: 1,
+    state: podPresent ? 'single' : 'offline',
+    observedAt: '2026-08-04T00:00:00.000Z',
+    stale: false,
+    pods: podPresent
+      ? Object.freeze([Object.freeze({
+          podId: 'pod-exact-1',
+          gpuId: 'NVIDIA GeForce RTX 4090',
+          gpuDisplayName: 'RTX 4090',
+          hourlyPriceMicroUsd: 540_000,
+          status: 'running' as const,
+        })])
+      : Object.freeze([]),
+    overflow: false,
+    issue: null,
+  });
+}
+
+function gpuPodPort(podPresent: boolean): NativeGpuPodPort {
+  const observation = gpuPodObservation(podPresent);
+  return {
+    observe: vi.fn(async () => observation),
+    loadNormalStop: vi.fn(async () => null),
+    normalStop: vi.fn(async (input) => ({
+      schemaVersion: 1,
+      operationId: '60000000-0000-4000-8000-000000000000',
+      podId: input.podId,
+      disposition: 'stopped',
+      observation: gpuPodObservation(false),
+      issue: null,
+    } as const)),
+  };
+}
+
+function readyGpuInventory(): NativeGpuInventorySnapshotV1 {
+  const processEpochId = '10000000-0000-4000-8000-000000000000';
+  const observationId = '20000000-0000-4000-8000-000000000000';
+  const receiptId = '30000000-0000-4000-8000-000000000000';
+  const observedAt = '2026-08-04T00:00:00.000Z';
+  return {
+    schemaVersion: 1,
+    observationId,
+    processEpochId,
+    includeEmergencyTier: false,
+    state: 'ready',
+    observedAt,
+    receipt: {
+      schemaVersion: 1,
+      receiptId,
+      processEpochId,
+      receivedAt: observedAt,
+      validForMs: 60_000,
+      catalogSha256: 'a'.repeat(64),
+    },
+    offers: [{
+      schemaVersion: 1,
+      observationId,
+      receiptId,
+      gpuId: 'NVIDIA GeForce RTX 4090',
+      policyKey: 'rtx_4090',
+      displayName: 'RTX 4090',
+      memoryGb: 24,
+      emergency: false,
+      availability: 'high',
+      hourlyPriceMicroUsd: 500_000,
+      dataCenterId: 'EU-RO-1',
+      source: 'live',
+      observedAt,
+      stale: false,
+      selectable: true,
+      disabledReason: null,
+      benchmarkState: 'unmeasured',
+      benchmarkAgeMs: null,
+      speedScore: null,
+      benchmarkMedianDurationUs: null,
+      benchmarkP95DurationUs: null,
+      benchmarkMeasuredAt: null,
+      benchmarkEvidenceSha256: null,
+      estimatedSwitchRemainingCostMicroUsd: null,
+    }],
+    currentPod: null,
+    currentPodObservedAt: null,
+    currentPodStale: false,
+    issue: null,
+  };
+}
+
 function port(overrides: Partial<ProductionDesktopPort> = {}): ProductionDesktopPort {
   const unusedFetch = vi.fn(async () => { throw new Error('unused'); }) as unknown as typeof fetch;
+  const unusedSwitch = async (): Promise<never> => { throw new Error('unused GPU Switch'); };
+  const inventory = readyGpuInventory();
   return {
-    runPodFetch: unusedFetch,
+    ...createMemoryQueueHost(),
     workerHealthFetch: unusedFetch,
     bindProfile: vi.fn(async () => undefined),
     authorizeStart: vi.fn(async () => undefined),
@@ -196,12 +294,12 @@ function port(overrides: Partial<ProductionDesktopPort> = {}): ProductionDesktop
     validateDestination: vi.fn(async (path) => ({ path, writable: true })),
     credentialMetadata: vi.fn(async () => credentials()),
     replaceCredential: vi.fn(async (_kind, value) => ({ configured: true, suffix: value.slice(-4), provider: 'macOS Keychain' })),
-    status: vi.fn(async () => ({ status: 200, body: { schema_version: 1, ready: true, active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false } } })),
+    status: vi.fn(async () => ({ status: 200, body: { schema_version: 1, ready: true, active_batch: null, permissions: { can_create: true, can_manage_active: false, is_owner: false, create_block_reason: null } } })),
     studioHeartbeat: vi.fn(async (sessionId) => ({ status: 200, body: studioState(sessionId) })),
     studioStatus: vi.fn(async (sessionId) => ({ status: 200, body: studioState(sessionId) })),
     studioCreateStopRequest: vi.fn(async (_requestId, sessionId) => ({ status: 201, body: studioState(sessionId) })),
     studioRespondToStopRequest: vi.fn(async (_requestId, sessionId) => ({ status: 200, body: studioState(sessionId) })),
-    studioFinalizeStopRequest: vi.fn(async (_requestId, sessionId) => ({ status: 200, body: studioState(sessionId) })),
+    studioRespondToGpuSwitch: vi.fn(async (_switchId, sessionId) => ({ status: 200, body: studioState(sessionId) })),
     studioCancelStopRequest: vi.fn(async (_requestId, sessionId) => ({ status: 200, body: studioState(sessionId) })),
     createBatch: vi.fn(async () => ({ status: 201, body: manifest() })),
     getBatch: vi.fn(async () => ({ status: 200, body: manifest() })),
@@ -220,6 +318,47 @@ function port(overrides: Partial<ProductionDesktopPort> = {}): ProductionDesktop
     }]),
     downloadArtifact: vi.fn(async () => { throw new Error('already reconciled'); }),
     ...overrides,
+    gpuInventory: overrides.gpuInventory ?? {
+      load: vi.fn(async () => inventory),
+      beginRefresh: vi.fn(async () => inventory),
+      listen: vi.fn(async () => () => undefined),
+    },
+    gpuStart: overrides.gpuStart ?? {
+      load: vi.fn(async () => null),
+      startAuto: vi.fn(async () => ({
+        schemaVersion: 1,
+        operationId: '40000000-0000-4000-8000-000000000000',
+        lifecycleRevision: 1,
+        state: 'create_intent',
+        pod: null,
+        confirmedHourlyPriceMicroUsd: 500_000,
+        actualHourlyPriceMicroUsd: null,
+        issue: null,
+      } as const)),
+      startSelected: vi.fn(async () => { throw new Error('unused selected Start'); }),
+      confirmActualPrice: vi.fn(async () => { throw new Error('unused price confirmation'); }),
+    },
+    gpuPod: overrides.gpuPod ?? gpuPodPort(true),
+    gpuSwitch: overrides.gpuSwitch ?? {
+      load: unusedSwitch,
+      authorizeForeground: unusedSwitch,
+      begin: unusedSwitch,
+      acquire: unusedSwitch,
+      release: unusedSwitch,
+      syncWorker: unusedSwitch,
+      finalize: unusedSwitch,
+      confirmTarget: unusedSwitch,
+      deleteOld: unusedSwitch,
+      prepareAttempt: unusedSwitch,
+      confirmAttempt: unusedSwitch,
+      createReplacement: unusedSwitch,
+      confirmActualPrice: unusedSwitch,
+      deleteReplacement: unusedSwitch,
+      reconcileProvider: unusedSwitch,
+      verifyReplacement: unusedSwitch,
+      complete: unusedSwitch,
+      cancel: unusedSwitch,
+    },
   };
 }
 
@@ -262,7 +401,259 @@ function stateWithReadyPod() {
   return state;
 }
 
+function gpuSwitchSnapshot(
+  targetConfirmation: 'required' | 'confirmed',
+  authorizationRequired = false,
+  recordRevision = 3,
+): NativeGpuSwitchSnapshotV1 {
+  const target = {
+    replacementAttemptId: '81000000-0000-4000-8000-000000000000',
+    attemptRevision: 1,
+    gpuId: 'NVIDIA GeForce RTX 4090',
+    gpuDisplayName: 'RTX 4090',
+    hourlyPriceMicroUsd: 500_000,
+    observationId: '82000000-0000-4000-8000-000000000000',
+    receiptId: '83000000-0000-4000-8000-000000000000',
+    inventoryObservedAt: '2026-08-04T00:00:00.000Z',
+    priceConfirmedAt: '2026-08-04T00:00:01.000Z',
+  } as const;
+  return {
+    schemaVersion: 1,
+    storeRevision: 7,
+    record: {
+      schemaVersion: 1,
+      switchId: '80000000-0000-4000-8000-000000000000',
+      recordRevision,
+      phase: 'consent_pending',
+      blockedAt: null,
+      attentionCode: null,
+      authorizationRequired,
+      targetConfirmation,
+      oldPod: {
+        podId: 'pod-old-1',
+        gpuId: 'NVIDIA GeForce RTX 5090',
+        gpuDisplayName: 'RTX 5090',
+        hourlyPriceMicroUsd: 890_000,
+      },
+      initialTarget: target,
+      currentTarget: target,
+      preparedTarget: null,
+      priorAttempts: [],
+      queueReservation: { active: true, queueRunRevision: null },
+      expectedBatchId: null,
+      oldDeleteWireAttempts: 0,
+      replacementPodId: null,
+      peerPodIds: [],
+      peerPodOverflow: false,
+      actualHourlyPriceMicroUsd: null,
+      confirmedActualPrice: false,
+      createdAt: '2026-08-04T00:00:02.000Z',
+      updatedAt: '2026-08-04T00:00:02.000Z',
+    },
+    issues: [],
+  };
+}
+
 describe('production ImageForge adapter', () => {
+  it('loads the durable native GPU Switch journal without starting recovery actions', async () => {
+    const base = port();
+    const expected = { schemaVersion: 1 as const, storeRevision: 0, record: null, issues: [] };
+    const load = vi.fn(async () => expected);
+    const authorizeForeground = vi.fn(async () => { throw new Error('must remain read only'); });
+    const native = port({ gpuSwitch: { ...base.gpuSwitch, load, authorizeForeground } });
+    const adapter = createProductionImageForgeAdapter(native);
+
+    await expect(adapter.runtime!.loadGpuSwitch()).resolves.toEqual(expected);
+    expect(load).toHaveBeenCalledOnce();
+    expect(authorizeForeground).not.toHaveBeenCalled();
+  });
+
+  it('mints native foreground authority before loading and beginning an exact Switch', async () => {
+    const base = port();
+    const grant = {
+      schemaVersion: 1 as const,
+      grantId: '70000000-0000-4000-8000-000000000000',
+      processEpochId: '71000000-0000-4000-8000-000000000000',
+      action: 'begin' as const,
+      expiresAt: '2026-08-04T00:00:05.000Z',
+    };
+    const empty = { schemaVersion: 1 as const, storeRevision: 4, record: null, issues: [] };
+    const authorizeForeground = vi.fn(async () => grant);
+    const load = vi.fn(async () => empty);
+    const begin = vi.fn(async () => empty);
+    const native = port({ gpuSwitch: { ...base.gpuSwitch, authorizeForeground, load, begin } });
+    const adapter = createProductionImageForgeAdapter(native);
+    const state = stateWithReadyPod();
+    state.queue.storeRevision = 9;
+    state.queue.document.run = {
+      runRevision: '72000000-0000-4000-8000-000000000000',
+      cohortItemIds: [],
+      runnerState: 'paused',
+      authorizationRequired: true,
+      keepAwake: false,
+    };
+
+    await expect(adapter.runtime!.beginGpuSwitch(state, {
+      kind: 'switch',
+      projection: {
+        schemaVersion: 1,
+        observationId: '73000000-0000-4000-8000-000000000000',
+        receiptId: '74000000-0000-4000-8000-000000000000',
+        targetGpuId: 'NVIDIA GeForce RTX 5090',
+        confirmedHourlyPriceMicroUsd: 890_000,
+      },
+      offer: {
+        schemaVersion: 1,
+        observationId: '73000000-0000-4000-8000-000000000000',
+        receiptId: '74000000-0000-4000-8000-000000000000',
+        gpuId: 'NVIDIA GeForce RTX 5090',
+        policyKey: 'rtx_5090',
+        displayName: 'RTX 5090',
+        memoryGb: 32,
+        emergency: false,
+        availability: 'high',
+        hourlyPriceMicroUsd: 890_000,
+        dataCenterId: 'EU-RO-1',
+        source: 'live',
+        observedAt: '2026-08-04T00:00:00.000Z',
+        stale: false,
+        selectable: true,
+        disabledReason: null,
+        benchmarkState: 'unmeasured',
+        benchmarkAgeMs: null,
+        speedScore: null,
+        benchmarkMedianDurationUs: null,
+        benchmarkP95DurationUs: null,
+        benchmarkMeasuredAt: null,
+        benchmarkEvidenceSha256: null,
+        estimatedSwitchRemainingCostMicroUsd: null,
+      },
+    })).resolves.toEqual(empty);
+
+    expect(authorizeForeground).toHaveBeenCalledWith({
+      action: 'begin',
+      switchId: null,
+      observationId: '73000000-0000-4000-8000-000000000000',
+      targetGpuId: 'NVIDIA GeForce RTX 5090',
+    });
+    expect(authorizeForeground.mock.invocationCallOrder[0]).toBeLessThan(load.mock.invocationCallOrder[0]);
+    expect(begin).toHaveBeenCalledWith(expect.objectContaining({
+      expectedStoreRevision: 4,
+      queueExpectedStoreRevision: 9,
+      queueRunRevision: '72000000-0000-4000-8000-000000000000',
+      foregroundGrantId: grant.grantId,
+      targetGpuId: 'NVIDIA GeForce RTX 5090',
+      confirmedHourlyPriceMicroUsd: 890_000,
+    }));
+  });
+
+  it('uses the durable target-confirmation field to expose one exact next action', async () => {
+    const base = port();
+    const required = gpuSwitchSnapshot('required');
+    const confirmed = gpuSwitchSnapshot('confirmed', false, 4);
+    const confirmTarget = vi.fn(async () => confirmed);
+    const finalize = vi.fn(async () => ({ ...confirmed, record: { ...confirmed.record!, phase: 'pausing' as const } }));
+
+    const confirmPort = port({
+      gpuSwitch: {
+        ...base.gpuSwitch,
+        load: vi.fn(async () => required),
+        confirmTarget,
+        finalize,
+      },
+    });
+    const confirmAdapter = createProductionImageForgeAdapter(confirmPort);
+    await expect(confirmAdapter.runtime!.confirmGpuSwitchTarget(
+      stateWithReadyPod(),
+      required,
+    )).resolves.toEqual(confirmed);
+    expect(confirmTarget).toHaveBeenCalledWith(expect.objectContaining({
+      switchId: required.record!.switchId,
+      expectedRecordRevision: required.record!.recordRevision,
+      targetGpuId: 'NVIDIA GeForce RTX 4090',
+      confirmedHourlyPriceMicroUsd: 500_000,
+      observationId: '20000000-0000-4000-8000-000000000000',
+      receiptId: '30000000-0000-4000-8000-000000000000',
+    }));
+    expect(finalize).not.toHaveBeenCalled();
+
+    const finalizePort = port({
+      gpuSwitch: {
+        ...base.gpuSwitch,
+        load: vi.fn(async () => confirmed),
+        confirmTarget,
+        finalize,
+      },
+    });
+    const finalizeAdapter = createProductionImageForgeAdapter(finalizePort);
+    await finalizeAdapter.runtime!.finalizeGpuSwitch(stateWithReadyPod(), confirmed);
+    expect(finalize).toHaveBeenCalledWith(expect.objectContaining({
+      switchId: confirmed.record!.switchId,
+      expectedRecordRevision: confirmed.record!.recordRevision,
+      targetGpuId: 'NVIDIA GeForce RTX 4090',
+      confirmedHourlyPriceMicroUsd: 500_000,
+      sessionId: expect.any(String),
+    }));
+    await expect(finalizeAdapter.runtime!.confirmGpuSwitchTarget(
+      stateWithReadyPod(),
+      confirmed,
+    )).rejects.toThrow('already confirmed');
+  });
+
+  it('mints fresh resume authority and acquires the exact switch before any recovery action', async () => {
+    const base = port();
+    const blocked = gpuSwitchSnapshot('confirmed', true);
+    const held = gpuSwitchSnapshot('confirmed', false);
+    const grant = {
+      schemaVersion: 1 as const,
+      grantId: '84000000-0000-4000-8000-000000000000',
+      processEpochId: '85000000-0000-4000-8000-000000000000',
+      action: 'resume' as const,
+      expiresAt: '2026-08-04T00:00:05.000Z',
+    };
+    const load = vi.fn(async () => held);
+    const authorizeForeground = vi.fn(async () => grant);
+    const acquire = vi.fn(async () => ({ switchId: blocked.record!.switchId, held: true }));
+    const native = port({
+      gpuSwitch: { ...base.gpuSwitch, load, authorizeForeground, acquire },
+    });
+    const adapter = createProductionImageForgeAdapter(native);
+
+    await expect(adapter.runtime!.resumeGpuSwitch(blocked)).resolves.toEqual(held);
+    expect(authorizeForeground).toHaveBeenCalledWith({
+      action: 'resume',
+      switchId: blocked.record!.switchId,
+      observationId: null,
+      targetGpuId: null,
+    });
+    expect(authorizeForeground.mock.invocationCallOrder[0])
+      .toBeLessThan(acquire.mock.invocationCallOrder[0]);
+    expect(acquire.mock.invocationCallOrder[0]).toBeLessThan(load.mock.invocationCallOrder[0]);
+  });
+
+  it('returns native sent-uncertain attention when Resume reconciliation releases the lease', async () => {
+    const base = port();
+    const blocked = gpuSwitchSnapshot('confirmed', true);
+    const grant = {
+      schemaVersion: 1 as const,
+      grantId: '84000000-0000-4000-8000-000000000000',
+      processEpochId: '85000000-0000-4000-8000-000000000000',
+      action: 'resume' as const,
+      expiresAt: '2026-08-04T00:00:05.000Z',
+    };
+    const load = vi.fn(async () => blocked);
+    const authorizeForeground = vi.fn(async () => grant);
+    const acquire = vi.fn(async () => ({ switchId: blocked.record!.switchId, held: false }));
+    const native = port({
+      gpuSwitch: { ...base.gpuSwitch, load, authorizeForeground, acquire },
+    });
+    const adapter = createProductionImageForgeAdapter(native);
+
+    await expect(adapter.runtime!.resumeGpuSwitch(blocked)).resolves.toEqual(blocked);
+    expect(acquire).toHaveBeenCalledOnce();
+    expect(load).toHaveBeenCalledOnce();
+  });
+
   it('validates setup without starting compute and returns only vault metadata', async () => {
     const native = port();
     const adapter = createProductionImageForgeAdapter(native);
@@ -306,8 +697,57 @@ describe('production ImageForge adapter', () => {
       total: 450,
       message: 'An active batch must finish or release its lease before the GPU can stop.',
     });
-    expect(native.runPodFetch).not.toHaveBeenCalled();
-    expect(native.studioFinalizeStopRequest).not.toHaveBeenCalled();
+    expect(native.gpuPod.observe).not.toHaveBeenCalled();
+  });
+
+  it('loads and replays an interrupted native Stop with its exact persisted input after profile bind', async () => {
+    const recoveryInput = {
+      podId: 'pod-exact-1',
+      stopRequestId: '40000000-0000-4000-8000-000000000000',
+      sessionId: '50000000-0000-4000-8000-000000000000',
+      expectedServerInstanceId: '60000000-0000-4000-8000-000000000000',
+      expectedCoordinationRevision: 7,
+      expectedLifecycleRevision: 3,
+    } as const;
+    const retained = {
+      ...gpuPodObservation(true),
+      lifecycleRevision: 11,
+      state: 'unavailable' as const,
+      stale: true,
+      issue: { code: 'gpu_pod_observation_unavailable' as const, retryable: true as const },
+    };
+    const gpuPod: NativeGpuPodPort = {
+      observe: vi.fn(async () => gpuPodObservation(false)),
+      loadNormalStop: vi.fn(async () => recoveryInput),
+      normalStop: vi.fn(async (input) => ({
+        schemaVersion: 1,
+        operationId: '70000000-0000-4000-8000-000000000000',
+        podId: input.podId,
+        disposition: 'delete_uncertain',
+        observation: retained,
+        issue: { code: 'gpu_stop_delete_uncertain', retryable: false },
+      } as const)),
+    };
+    const native = port({ gpuPod });
+    const adapter = createProductionImageForgeAdapter(native);
+    const events: ProductionRuntimeEvent[] = [];
+    adapter.runtime!.subscribe((event) => events.push(event));
+
+    await adapter.runtime!.refresh(stateWithReadyPod());
+
+    expect(gpuPod.loadNormalStop).toHaveBeenCalledOnce();
+    expect(gpuPod.normalStop).toHaveBeenCalledWith(recoveryInput);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'stop-failed',
+      retryable: false,
+      message: expect.stringContaining('RunPod did not confirm'),
+    }));
+    expect(adapter.runtime!.getAuthoritativePodState!()).toMatchObject({
+      podId: recoveryInput.podId,
+    });
+    // Profile binding clears once before recovery; the unresolved Stop must
+    // not clear the recovered old-Pod worker binding afterward.
+    expect(native.clearWorkerSession).toHaveBeenCalledTimes(1);
   });
 
   it('projects an approval-pending stop without blocking generation or calling RunPod', async () => {
@@ -353,8 +793,7 @@ describe('production ImageForge adapter', () => {
       type: 'studio',
       studio: { stop: { phase: 'pending', isRequester: true, canRespond: false } },
     });
-    expect(native.runPodFetch).not.toHaveBeenCalled();
-    expect(native.studioFinalizeStopRequest).not.toHaveBeenCalled();
+    expect(native.gpuPod.observe).not.toHaveBeenCalled();
   });
 
   it('projects idle-but-not-creatable worker truth as a temporary stop guard, not busy or error', async () => {
@@ -365,7 +804,7 @@ describe('production ImageForge adapter', () => {
           schema_version: 1,
           ready: true,
           active_batch: null,
-          permissions: { can_create: false, can_manage_active: false, is_owner: false },
+          permissions: { can_create: false, can_manage_active: false, is_owner: false, create_block_reason: 'gpu_stop_pending' },
         },
       })),
     });
@@ -381,6 +820,39 @@ describe('production ImageForge adapter', () => {
       message: 'GPU Stop is finalizing; new generation is temporarily blocked.',
     }]);
     expect(events.some((event) => event.type === 'busy' || event.type === 'error')).toBe(false);
+  });
+
+  it('projects corrupt submission history as its exact non-retryable error, never a Stop guard', async () => {
+    const native = port({
+      status: vi.fn(async () => ({
+        status: 200,
+        body: {
+          schema_version: 1,
+          ready: true,
+          active_batch: null,
+          permissions: {
+            can_create: false,
+            can_manage_active: false,
+            is_owner: false,
+            create_block_reason: 'submission_store_corrupt',
+          },
+        },
+      })),
+    });
+    const adapter = createProductionImageForgeAdapter(native);
+    const events: ProductionRuntimeEvent[] = [];
+    adapter.runtime!.subscribe((event) => events.push(event));
+
+    await adapter.runtime!.pollBatch(stateWithReadyPod());
+
+    expect(events).toEqual([{
+      type: 'error',
+      scope: 'batch',
+      code: 'submission_store_corrupt',
+      message: 'Worker submission history is unavailable. Repair the shared volume before starting generation.',
+      retryable: false,
+    }]);
+    expect(events.some((event) => event.type === 'stop-guard-active')).toBe(false);
   });
 
   it('starts the guarded exact-Pod lifecycle when an approved response has no server finalization ID yet', async () => {
@@ -418,74 +890,51 @@ describe('production ImageForge adapter', () => {
 
       await adapter.runtime!.requestGpuStop(stateWithReadyPod());
 
-      expect(stop).toHaveBeenCalledWith('pod-exact-1');
+      expect(stop).toHaveBeenCalledWith(expect.objectContaining({
+        podId: 'pod-exact-1',
+        stopRequestId: expect.stringMatching(/^[0-9a-f-]{36}$/i),
+        sessionId: expect.stringMatching(/^[0-9a-f-]{36}$/i),
+        expectedServerInstanceId: '22222222-2222-4222-8222-222222222222',
+        expectedCoordinationRevision: 2,
+      }));
       expect(events).toContainEqual({ type: 'stop-complete', alreadyStopped: false });
     } finally {
       stop.mockRestore();
     }
   });
 
-  it('fails a mismatched finalize response closed, cancels its exact local UUID, and never sends DELETE', async () => {
-    const deletes: string[] = [];
-    let approvedRequestId = '';
-    let localFinalizationId = '';
+  it('leaves finalization private to native and never auto-retries a failed Stop on heartbeat', async () => {
+    const gpuPod = gpuPodPort(true);
+    vi.mocked(gpuPod.normalStop).mockRejectedValue(Object.assign(
+      new Error('The worker finalization response was invalid.'),
+      { code: 'gpu_stop_worker_response_invalid', retryable: false, mayHaveSucceeded: false },
+    ));
     const native = port({
-      runPodFetch: productionRunPodFetch(deletes),
       workerHealthFetch: vi.fn(async () => jsonResponse(workerHealth())) as unknown as typeof fetch,
-      studioCreateStopRequest: vi.fn(async (requestId, sessionId, podId, gpuDisplayName) => {
-        approvedRequestId = requestId;
-        return {
-          status: 201,
-          body: {
-            ...studioState(sessionId),
-            coordination_revision: 2,
-            finalization_ttl_seconds: 60,
-            stop_request: {
-              request_id: requestId,
-              pod_id: podId,
-              gpu_display_name: gpuDisplayName,
-              requester: { session_id: sessionId, display_name: 'Lakshman' },
-              state: 'approved',
-              reason: null,
-              requested_at: '2026-08-01T10:00:00.000Z',
-              response_deadline: '2026-08-01T10:00:30.000Z',
-              finalization_expires_at: null,
-              waiting_for: [],
-              approved_by: [],
-              denied_by: [],
-              finalization_id: null,
-            },
+      gpuPod,
+      studioCreateStopRequest: vi.fn(async (requestId, sessionId, podId, gpuDisplayName) => ({
+        status: 201,
+        body: {
+          ...studioState(sessionId),
+          coordination_revision: 2,
+          finalization_ttl_seconds: 60,
+          stop_request: {
+            request_id: requestId,
+            pod_id: podId,
+            gpu_display_name: gpuDisplayName,
+            requester: { session_id: sessionId, display_name: 'Lakshman' },
+            state: 'approved',
+            reason: null,
+            requested_at: '2026-08-01T10:00:00.000Z',
+            response_deadline: '2026-08-01T10:00:30.000Z',
+            finalization_expires_at: null,
+            waiting_for: [],
+            approved_by: [],
+            denied_by: [],
+            finalization_id: null,
           },
-        };
-      }),
-      studioFinalizeStopRequest: vi.fn(async (requestId, sessionId, podId, finalizationId) => {
-        expect(podId).toBe('pod-exact-1');
-        localFinalizationId = finalizationId;
-        return {
-          status: 200,
-          body: {
-            ...studioState(sessionId),
-            coordination_revision: 3,
-            server_time: '2026-08-01T10:00:00.000Z',
-            finalization_ttl_seconds: 60,
-            stop_request: {
-              request_id: requestId,
-              pod_id: 'pod-replaced-by-stale-response',
-              gpu_display_name: 'RTX 4090',
-              requester: { session_id: sessionId, display_name: 'Lakshman' },
-              state: 'finalizing',
-              reason: null,
-              requested_at: '2026-08-01T10:00:00.000Z',
-              response_deadline: '2026-08-01T10:00:30.000Z',
-              finalization_expires_at: '2026-08-01T10:01:00.000Z',
-              waiting_for: [],
-              approved_by: [],
-              denied_by: [],
-              finalization_id: finalizationId,
-            },
-          },
-        };
-      }),
+        },
+      })),
     });
     const adapter = createProductionImageForgeAdapter(native);
     const events: ProductionRuntimeEvent[] = [];
@@ -494,15 +943,10 @@ describe('production ImageForge adapter', () => {
 
     await adapter.runtime!.refresh(state);
     await adapter.runtime!.requestGpuStop(state);
+    await adapter.runtime!.heartbeat(state, 'foreground');
 
-    expect(localFinalizationId).toMatch(/^[0-9a-f-]{36}$/i);
-    expect(native.studioCancelStopRequest).toHaveBeenCalledWith(
-      approvedRequestId,
-      expect.any(String),
-      'pod-exact-1',
-      localFinalizationId,
-    );
-    expect(deletes).toEqual([]);
+    expect(native.gpuPod.normalStop).toHaveBeenCalledOnce();
+    expect(native.studioCancelStopRequest).not.toHaveBeenCalled();
     expect(events.at(-1)).toMatchObject({ type: 'stop-failed', retryable: false });
   });
 
@@ -658,7 +1102,7 @@ describe('production ImageForge adapter', () => {
       return clearCalls === 2 ? offlineClear.promise : Promise.resolve();
     });
     const native = port({
-      runPodFetch: offlineRunPodFetch(),
+      gpuPod: gpuPodPort(false),
       clearWorkerSession,
       studioHeartbeat: vi.fn((currentSessionId) => {
         sessionId = currentSessionId;
@@ -712,7 +1156,7 @@ describe('production ImageForge adapter', () => {
   it('never lets a later stale AppState revive a worker epoch after RunPod proves Offline', async () => {
     let sessionId = '';
     const native = port({
-      runPodFetch: offlineRunPodFetch(),
+      gpuPod: gpuPodPort(false),
       studioHeartbeat: vi.fn(async (currentSessionId) => {
         sessionId = currentSessionId;
         return {
@@ -769,6 +1213,82 @@ describe('production ImageForge adapter', () => {
     expect(event).toMatchObject({ type: 'batch', batch: { id: batchId, name: 'History Brief', phase: 'complete' } });
     if (event?.type === 'batch') expect(event.assets[0].filename).toBe(`batches/${batchId}/000001.jpg`);
     expect(native.downloadArtifact).not.toHaveBeenCalled();
+  });
+
+  it('rejects a queued worker create when the durable run paused before the effect', async () => {
+    const native = port();
+    const adapter = createProductionImageForgeAdapter(native);
+    const state = stateWithValidatingBatch();
+    const queueItemId = '22222222-2222-4222-8222-222222222222';
+    const submissionId = '33333333-3333-4333-8333-333333333333';
+    const runRevision = '44444444-4444-4444-8444-444444444444';
+    state.batch = {
+      ...state.batch!,
+      queueItemId,
+      clientSubmissionId: submissionId,
+      admissionMode: 'queue',
+    };
+    state.queue.lease = { runRevision, held: true };
+    state.queue.document = {
+      schemaVersion: 1,
+      items: [{
+        schemaVersion: 1,
+        queueItemId,
+        clientSubmissionId: submissionId,
+        recordRevision: 3,
+        runRevision,
+        remoteBatchId: null,
+        state: 'dispatching',
+        attentionCode: null,
+        name: 'Paused overnight work',
+        prompts: ['A documentary shipyard at dawn'],
+        baseSeed: 700,
+        destination: '/safe/downloads',
+        aspectRatio: '16:9',
+        styleSuffix: null,
+        references: [],
+        createdAt: '2026-08-01T10:00:00.000Z',
+        updatedAt: '2026-08-01T10:00:01.000Z',
+      }],
+      run: {
+        runRevision,
+        cohortItemIds: [queueItemId],
+        runnerState: 'paused',
+        authorizationRequired: true,
+        keepAwake: false,
+      },
+      alarm: {
+        eventId: `queue-complete:${runRevision}`,
+        runRevision,
+        state: 'disarmed',
+        kind: null,
+        snoozeUsed: false,
+        snoozeDueAt: null,
+        notificationDisposition: null,
+        snoozeNotificationDisposition: null,
+      },
+    };
+
+    await expect(adapter.runtime!.startBatch(state)).rejects.toThrow('paused before worker admission');
+    expect(native.createBatch).not.toHaveBeenCalled();
+
+    state.queue.document = {
+      ...state.queue.document,
+      run: {
+        ...state.queue.document.run!,
+        runnerState: 'running',
+        authorizationRequired: false,
+      },
+    };
+    await expect(adapter.runtime!.startBatch(state)).resolves.toBeUndefined();
+    expect(native.createBatch).toHaveBeenCalledWith(
+      ['A documentary shipyard at dawn'],
+      700,
+      [],
+      '16:9',
+      submissionId,
+      'queue',
+    );
   });
 
   it('suppresses a create-time worker failure when RunPod proves the Pod was stopped remotely', async () => {
@@ -872,7 +1392,7 @@ describe('production ImageForge adapter', () => {
             pause_requested: false,
             cancel_requested: false,
           },
-          permissions: { can_create: false, can_manage_active: true, is_owner: true },
+          permissions: { can_create: false, can_manage_active: true, is_owner: true, create_block_reason: null },
         },
       })),
       readReceipts: vi.fn(async () => [namedReceipt]),
@@ -925,7 +1445,7 @@ describe('production ImageForge adapter', () => {
           pause_requested: false,
           cancel_requested: false,
         },
-        permissions: { can_create: false, can_manage_active: false, is_owner: false },
+        permissions: { can_create: false, can_manage_active: false, is_owner: false, create_block_reason: null },
       },
     }));
     const native = port({ status, reconcileReceipts, readReceipts });
@@ -961,7 +1481,7 @@ describe('production ImageForge adapter', () => {
           pause_requested: false,
           cancel_requested: false,
         },
-        permissions: { can_create: false, can_manage_active: true, is_owner: true },
+        permissions: { can_create: false, can_manage_active: true, is_owner: true, create_block_reason: null },
       },
     }));
     const native = port({ status, reconcileReceipts });
@@ -999,7 +1519,7 @@ describe('production ImageForge adapter', () => {
           pause_requested: false,
           cancel_requested: false,
         },
-        permissions: { can_create: false, can_manage_active: true, is_owner: true },
+        permissions: { can_create: false, can_manage_active: true, is_owner: true, create_block_reason: null },
       },
     }));
     const native = port({ status, reconcileReceipts });
@@ -1052,7 +1572,7 @@ describe('production ImageForge adapter', () => {
       })],
     }]);
     expect(native.status).not.toHaveBeenCalled();
-    expect(native.runPodFetch).not.toHaveBeenCalled();
+    expect(native.gpuPod.observe).not.toHaveBeenCalled();
     expect(native.workerHealthFetch).not.toHaveBeenCalled();
     expect(native.reconcileReceipts).not.toHaveBeenCalled();
     expect(events.some((event) => event.type === 'pod' || event.type === 'batch' || event.type === 'busy')).toBe(false);
@@ -1064,6 +1584,24 @@ describe('production ImageForge adapter', () => {
       'native runtime facade',
     );
     expect(() => adapter.validateBatch(() => undefined)).toThrow('native runtime facade');
+  });
+
+  it('routes an explicit peer GPU-switch decision through the narrow studio port', async () => {
+    const respond = vi.fn(async (_switchId: string, sessionId: string, _decision: 'approve' | 'deny') => ({
+      status: 200,
+      body: studioState(sessionId),
+    }));
+    const adapter = createProductionImageForgeAdapter(port({ studioRespondToGpuSwitch: respond }));
+    const switchId = '66666666-6666-4666-8666-666666666666';
+
+    await adapter.runtime!.respondToGpuSwitch(switchId, 'approve');
+
+    expect(respond).toHaveBeenCalledOnce();
+    expect(respond).toHaveBeenCalledWith(
+      switchId,
+      expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/),
+      'approve',
+    );
   });
 
   it('emits one retryable redacted event for one failed worker poll', async () => {

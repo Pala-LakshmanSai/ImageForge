@@ -1,5 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
+import type { NativeGpuInventorySnapshotV1 } from '@imageforge/runpod-client';
 import type { ProductionDesktopPort } from '../adapters/productionImageForgeAdapter';
+import { createMemoryQueueHost } from '../adapters/queueStore';
+import type { NativeGpuPodObservationV1 } from './gpuPodBridge';
 
 export type TwoClientSmokeRole = 'A' | 'B';
 
@@ -114,6 +117,48 @@ function response(result: SmokeExchangeResult): Response {
   });
 }
 
+function smokePodObservation(result: SmokeExchangeResult, revision: number): NativeGpuPodObservationV1 {
+  if (result.status !== 200 || !Array.isArray(result.body)) {
+    throw new Error('The two-client native fixture rejected the narrow Pod observation.');
+  }
+  const pods = result.body.map((item) => {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      throw new Error('The two-client native fixture returned an invalid Pod.');
+    }
+    const value = item as Record<string, unknown>;
+    const gpu = value.gpu;
+    if (
+      typeof value.id !== 'string'
+      || typeof gpu !== 'object'
+      || gpu === null
+      || Array.isArray(gpu)
+      || typeof (gpu as Record<string, unknown>).id !== 'string'
+      || typeof (gpu as Record<string, unknown>).displayName !== 'string'
+      || typeof value.adjustedCostPerHr !== 'number'
+    ) {
+      throw new Error('The two-client native fixture returned an invalid Pod.');
+    }
+    return Object.freeze({
+      podId: value.id,
+      gpuId: (gpu as Record<string, unknown>).id as string,
+      gpuDisplayName: (gpu as Record<string, unknown>).displayName as string,
+      hourlyPriceMicroUsd: Math.round(value.adjustedCostPerHr * 1_000_000),
+      status: value.desiredStatus === 'RUNNING' ? 'running' as const : 'unknown' as const,
+    });
+  }).sort((left, right) => left.podId.localeCompare(right.podId));
+  return Object.freeze({
+    schemaVersion: 1,
+    processEpochId: '50000000-0000-4000-8000-000000000000',
+    lifecycleRevision: revision,
+    state: pods.length === 0 ? 'offline' : pods.length === 1 ? 'single' : 'multiple',
+    observedAt: '2026-08-03T10:00:00.000Z',
+    stale: false,
+    pods: Object.freeze(pods),
+    overflow: false,
+    issue: null,
+  });
+}
+
 function localWorkerError(code: string, message: string) {
   return { status: 500, body: { error: { code, message, details: null } } };
 }
@@ -181,26 +226,103 @@ export function createTwoClientSmokePort(role: TwoClientSmokeRole): {
     mutatingReceiptReconciliations: 0,
     artifactDownloads: 0,
   };
-  const runPodFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = new URL(String(input));
-    const exact = url.pathname.match(/\/pods\/([^/]+)$/);
-    if (init?.method === 'DELETE') {
-      if (exact === null) throw new Error('The native smoke rejected a non-exact RunPod DELETE.');
-      return response(await exchange({ operation: 'runpod_delete', pod_id: decodeURIComponent(exact[1]) }));
-    }
-    if (exact !== null) {
-      return response(await exchange({ operation: 'runpod_get', pod_id: decodeURIComponent(exact[1]) }));
-    }
-    if (/\/pods$/.test(url.pathname)) {
-      return response(await exchange({ operation: 'runpod_list' }));
-    }
-    throw new Error(`The native smoke rejected an unexpected RunPod path: ${url.pathname}`);
-  }) as typeof fetch;
+  let podRevision = 0;
+  let finalizationCounter = 0;
   const workerHealthFetch = (async () => response(await exchange({ operation: 'worker_health' }))) as typeof fetch;
+  const unsupportedSwitch = async (): Promise<never> => {
+    throw new Error('The two-client Task 012 smoke cannot authorize a Task 014 GPU Switch.');
+  };
+  const inventoryUnavailable: NativeGpuInventorySnapshotV1 = Object.freeze({
+    schemaVersion: 1,
+    observationId: '40000000-0000-4000-8000-000000000000',
+    processEpochId: '50000000-0000-4000-8000-000000000000',
+    includeEmergencyTier: false,
+    state: 'error',
+    observedAt: null,
+    receipt: null,
+    offers: Object.freeze([]),
+    currentPod: null,
+    currentPodObservedAt: null,
+    currentPodStale: false,
+    issue: Object.freeze({ code: 'gpu_inventory_response_invalid', retryable: false }),
+  });
 
   const port: ProductionDesktopPort = {
-    runPodFetch,
+    ...createMemoryQueueHost(),
     workerHealthFetch,
+    gpuInventory: {
+      load: async () => inventoryUnavailable,
+      beginRefresh: async () => inventoryUnavailable,
+      listen: async () => () => undefined,
+    },
+    gpuStart: {
+      load: async () => null,
+      startAuto: async () => { throw new Error('The two-client smoke has no Start inventory authority.'); },
+      startSelected: async () => { throw new Error('The two-client smoke has no Start inventory authority.'); },
+      confirmActualPrice: async () => { throw new Error('The two-client smoke has no Start price authority.'); },
+    },
+    gpuPod: {
+      observe: async () => {
+        podRevision += 1;
+        return smokePodObservation(await exchange({ operation: 'runpod_list' }), podRevision);
+      },
+      loadNormalStop: async () => null,
+      normalStop: async (input) => {
+        const current = await exchange({ operation: 'runpod_get', pod_id: input.podId });
+        if (current.status !== 200 && current.status !== 404) {
+          throw new Error('The two-client native fixture rejected the exact Pod preflight.');
+        }
+        finalizationCounter += 1;
+        // The two installed clients share one worker authority. Keep the
+        // deterministic smoke IDs unique across clients as well as across
+        // repeated Stop calls within one client.
+        const clientNamespace = role === 'A' ? '1' : '2';
+        const finalizationId = `70000000-0000-4000-8000-${clientNamespace}${String(finalizationCounter).padStart(11, '0')}`;
+        const finalized = await exchange({
+          operation: 'studio_finalize',
+          request_id: input.stopRequestId,
+          session_id: input.sessionId,
+          pod_id: input.podId,
+          finalization_id: finalizationId,
+        });
+        if (finalized.status !== 200) {
+          throw new Error('The two-client native fixture rejected the worker finalization.');
+        }
+        const deleted = await exchange({ operation: 'runpod_delete', pod_id: input.podId });
+        if (deleted.status !== 204 && deleted.status !== 404) {
+          throw new Error('The two-client native fixture rejected the exact normal Stop.');
+        }
+        podRevision += 1;
+        return {
+          schemaVersion: 1,
+          operationId: '60000000-0000-4000-8000-000000000000',
+          podId: input.podId,
+          disposition: deleted.status === 404 ? 'already_stopped' : 'stopped',
+          observation: smokePodObservation(await exchange({ operation: 'runpod_list' }), podRevision),
+          issue: null,
+        };
+      },
+    },
+    gpuSwitch: {
+      load: unsupportedSwitch,
+      authorizeForeground: unsupportedSwitch,
+      begin: unsupportedSwitch,
+      acquire: unsupportedSwitch,
+      release: unsupportedSwitch,
+      syncWorker: unsupportedSwitch,
+      finalize: unsupportedSwitch,
+      confirmTarget: unsupportedSwitch,
+      deleteOld: unsupportedSwitch,
+      prepareAttempt: unsupportedSwitch,
+      confirmAttempt: unsupportedSwitch,
+      createReplacement: unsupportedSwitch,
+      confirmActualPrice: unsupportedSwitch,
+      deleteReplacement: unsupportedSwitch,
+      reconcileProvider: unsupportedSwitch,
+      verifyReplacement: unsupportedSwitch,
+      complete: unsupportedSwitch,
+      cancel: unsupportedSwitch,
+    },
     bindProfile: async () => undefined,
     authorizeStart: async () => undefined,
     clearStartAuthorization: async () => undefined,
@@ -292,13 +414,10 @@ export function createTwoClientSmokePort(role: TwoClientSmokeRole): {
       session_id: sessionId,
       decision,
     }),
-    studioFinalizeStopRequest: async (requestId, sessionId, podId, finalizationId) => exchange({
-      operation: 'studio_finalize',
-      request_id: requestId,
-      session_id: sessionId,
-      pod_id: podId,
-      finalization_id: finalizationId,
-    }),
+    studioRespondToGpuSwitch: async () => localWorkerError(
+      'native_smoke_unused',
+      'GPU Switch consent is not used by the Task 012 two-client smoke.',
+    ),
     studioCancelStopRequest: async (requestId, sessionId, podId, finalizationId) => exchange({
       operation: 'studio_cancel',
       request_id: requestId,

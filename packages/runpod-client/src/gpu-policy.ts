@@ -1,5 +1,12 @@
 import type { ApprovedGpuId } from "./types.js";
 
+export const IMAGEFORGE_GPU_IDENTITY_V1 =
+  /^[A-Za-z0-9](?:[A-Za-z0-9 ._()+:-]{0,126}[A-Za-z0-9])?$/;
+
+export function isGpuIdentityV1(value: unknown): value is string {
+  return typeof value === "string" && IMAGEFORGE_GPU_IDENTITY_V1.test(value);
+}
+
 export interface GpuPolicyEntry {
   readonly key: string;
   readonly catalogNames: readonly string[];
@@ -12,8 +19,8 @@ export interface GpuPolicyEntry {
 }
 
 /**
- * EU-RO-1 studio policy. Display-name matches are exact after case/whitespace
- * normalization. The returned catalog ID is always passed through unchanged.
+ * EU-RO-1 studio policy. Display-name matches are exact and byte-preserving.
+ * The returned catalog ID is always passed through unchanged.
  */
 const GPU_POLICY_DEFINITIONS: readonly GpuPolicyEntry[] = [
   {
@@ -108,16 +115,12 @@ export const GPU_POLICY: readonly GpuPolicyEntry[] = Object.freeze(
   ),
 );
 
-function normalizeCatalogName(value: string): string {
-  return value.trim().replace(/\s+/g, " ").toUpperCase();
-}
-
 export function isDynamicGpuDisplayName(displayName: string): boolean {
-  const normalizedName = normalizeCatalogName(displayName);
+  if (!isGpuIdentityV1(displayName)) return false;
   return GPU_POLICY.some(
     (entry) =>
       entry.exactIds.length === 0 &&
-      entry.catalogNames.some((name) => normalizeCatalogName(name) === normalizedName),
+      entry.catalogNames.includes(displayName),
   );
 }
 
@@ -127,17 +130,16 @@ export function isEmergencyGpuId(gpuId: string): boolean {
   );
 }
 
-const REMOVED_GPU_IDS = new Set([
+const REMOVED_GPU_IDS = new Set<string>([
   "NVIDIA A40",
   "NVIDIA RTX A6000",
   "NVIDIA L40",
   "NVIDIA L40S",
   "NVIDIA B200",
-].map(normalizeCatalogName));
+]);
 
 function isExplicitlyRemovedGpuId(value: string): boolean {
-  const normalized = normalizeCatalogName(value);
-  return REMOVED_GPU_IDS.has(normalized) || normalized.includes("RTX PRO 6000");
+  return REMOVED_GPU_IDS.has(value) || value.includes("RTX PRO 6000");
 }
 
 export interface CatalogGpuIdentity {
@@ -159,19 +161,20 @@ export function approveCatalogGpu(
   includeEmergencyTier: boolean,
 ): ApprovedCatalogGpu | null {
   if (
-    normalizeCatalogName(gpu.manufacturer) !== "NVIDIA" ||
-    !Number.isFinite(gpu.memoryGb) ||
+    gpu.manufacturer !== "NVIDIA" ||
+    !isGpuIdentityV1(gpu.id) ||
+    !isGpuIdentityV1(gpu.name) ||
+    !Number.isSafeInteger(gpu.memoryGb) ||
     isExplicitlyRemovedGpuId(gpu.id)
   ) {
     return null;
   }
-  const normalizedName = normalizeCatalogName(gpu.name);
   const policy = GPU_POLICY.find(
     (entry) => {
       const identityMatches =
         entry.exactIds.length > 0
           ? entry.exactIds.includes(gpu.id)
-          : entry.catalogNames.some((name) => normalizeCatalogName(name) === normalizedName);
+          : entry.catalogNames.includes(gpu.name);
       return (
         identityMatches &&
         gpu.memoryGb >= entry.minimumMemoryGb &&
@@ -202,17 +205,20 @@ export function approveManagedPodGpu(
   catalogApprovedGpuPolicies: ReadonlyMap<string, string> = new Map(),
   includeEmergencyTier = false,
 ): ApprovedCatalogGpu | null {
-  if (isExplicitlyRemovedGpuId(gpuId)) {
+  if (
+    !isGpuIdentityV1(gpuId) ||
+    !isGpuIdentityV1(displayName) ||
+    isExplicitlyRemovedGpuId(gpuId)
+  ) {
     return null;
   }
-  const normalizedName = normalizeCatalogName(displayName);
   const policy = GPU_POLICY.find(
     (entry) =>
       (!entry.emergency || includeEmergencyTier) &&
       (entry.exactIds.length > 0
         ? entry.exactIds.includes(gpuId)
         : catalogApprovedGpuPolicies.get(gpuId) === entry.key &&
-          entry.catalogNames.some((name) => normalizeCatalogName(name) === normalizedName)),
+          entry.catalogNames.includes(displayName)),
   );
   if (policy === undefined) {
     return null;

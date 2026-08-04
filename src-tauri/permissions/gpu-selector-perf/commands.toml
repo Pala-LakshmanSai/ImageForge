@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "allow-arm"
+description = "Allows the installed GPU selector performance harness to arm one sample."
+commands.allow = ["arm"]
+
+[[permission]]
+identifier = "allow-commit"
+description = "Allows the installed GPU selector performance harness to commit one sample."
+commands.allow = ["commit"]

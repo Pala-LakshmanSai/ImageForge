@@ -136,7 +136,11 @@
       "properties": {
         "model": { "const": "black-forest-labs/FLUX.2-klein-4B" },
         "modelRevision": { "type": "string", "minLength": 1 },
-        "softwareImage": { "type": "string", "minLength": 1 },
+        "softwareImage": {
+          "type": "string",
+          "maxLength": 512,
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[1-9][0-9]{0,4})?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$"
+        },
         "precision": { "const": "BF16" },
         "width": { "const": 1280 },
         "height": { "const": 720 },

@@ -61,6 +61,7 @@ export interface WorkerStatus {
     canCreate: boolean;
     canManageActive: boolean;
     isOwner: boolean;
+    createBlockReason: 'gpu_stop_pending' | 'submission_store_corrupt' | null;
   };
 }
 
@@ -86,6 +87,7 @@ export interface WorkerImageRecord {
 export interface WorkerManifest {
   schemaVersion: 1;
   batchId: string;
+  clientSubmissionId: string | null;
   owner: WorkerOwner;
   state: WorkerBatchState;
   createdAt: string;
@@ -372,7 +374,7 @@ export function parseWorkerStatus(value: unknown): WorkerStatus {
   exactKeys(item, ['schema_version', 'ready', 'active_batch', 'permissions'], 'worker status');
   if (item.schema_version !== 1) throw new Error('worker status schema version is unsupported.');
   const permissions = record(item.permissions, 'permissions');
-  exactKeys(permissions, ['can_create', 'can_manage_active', 'is_owner'], 'permissions');
+  exactKeys(permissions, ['can_create', 'can_manage_active', 'is_owner', 'create_block_reason'], 'permissions');
   const activeBatch = item.active_batch === null ? null : summary(item.active_batch);
   const parsed: WorkerStatus = {
     schemaVersion: 1,
@@ -382,6 +384,14 @@ export function parseWorkerStatus(value: unknown): WorkerStatus {
       canCreate: boolean(permissions.can_create, 'permissions.can_create'),
       canManageActive: boolean(permissions.can_manage_active, 'permissions.can_manage_active'),
       isOwner: boolean(permissions.is_owner, 'permissions.is_owner'),
+      createBlockReason: nullable(
+        permissions.create_block_reason,
+        (candidate) => enumeration(
+          candidate,
+          ['gpu_stop_pending', 'submission_store_corrupt'] as const,
+          'permissions.create_block_reason',
+        ),
+      ),
     },
   };
   if (activeBatch !== null && parsed.permissions.canCreate) {
@@ -392,6 +402,20 @@ export function parseWorkerStatus(value: unknown): WorkerStatus {
   }
   if (parsed.permissions.canManageActive && !parsed.permissions.isOwner) {
     throw new Error('worker status cannot grant mutation access to a non-owner.');
+  }
+  if (parsed.permissions.createBlockReason !== null && parsed.permissions.canCreate) {
+    throw new Error('worker status cannot allow creation while a create guard is active.');
+  }
+  if (
+    parsed.ready
+    && activeBatch === null
+    && !parsed.permissions.canCreate
+    && parsed.permissions.createBlockReason === null
+  ) {
+    throw new Error('worker status must identify the idle create guard.');
+  }
+  if (activeBatch !== null && parsed.permissions.createBlockReason === 'gpu_stop_pending') {
+    throw new Error('worker status cannot finalize GPU Stop while a batch owns the lease.');
   }
   return parsed;
 }
@@ -405,6 +429,7 @@ export function parseWorkerManifest(value: unknown): WorkerManifest {
     [
       'schema_version',
       'batch_id',
+      'client_submission_id',
       'owner',
       'state',
       'created_at',
@@ -457,6 +482,12 @@ export function parseWorkerManifest(value: unknown): WorkerManifest {
   return {
     schemaVersion: 1,
     batchId: uuid(item.batch_id, 'batch_id'),
+    // Version-1 manifests created before the local queue had no submission
+    // association. Omission and explicit null both project as legacy null;
+    // newly admitted v2 owner manifests always carry the canonical UUID.
+    clientSubmissionId: item.client_submission_id === undefined
+      ? null
+      : nullable(item.client_submission_id, (candidate) => uuid(candidate, 'client_submission_id')),
     owner: owner(item.owner),
     state: enumeration(item.state, BATCH_STATES, 'state'),
     createdAt: string(item.created_at, 'created_at'),

@@ -17,13 +17,26 @@ application took 30-60 minutes to become usable.
    network volume, template, and local output folder.
 2. Press **Start GPU**. ImageForge asks RunPod to deploy the best-value approved
    GPU, atomically falling back to the next type when the first is unavailable.
+   The GPU chip may instead open the live selector so the editor can compare
+   exact availability, observed hourly price, measured speed, and estimated
+   batch cost before explicitly starting one GPU.
 3. Watch `provisioning -> loading -> warming -> ready` without using a terminal.
 4. Paste or import one prompt per line (TXT or CSV), validate it, and start.
-5. Save each completed image directly into a folder named for the user's batch
+5. Optionally stage several device-local batches, explicitly press **Run queue**,
+   and let ImageForge submit them one at a time. A completion alarm tells the
+   editor when the authorized cohort is fully saved; stopping the GPU remains
+   a separate explicit action.
+6. Save each completed image directly into a folder named for the user's batch
    while later images generate. Browse the full-quality local JPEG or download
    a separate copy with a friendly batch-and-frame filename.
-6. Review failures, retry if needed, reveal the folder, and explicitly press
+7. Review failures, retry if needed, reveal the folder, and explicitly press
    **Stop GPU**.
+8. When a Pod is already running, the same GPU chip may start one coordinated
+   **Switch GPU** transaction. ImageForge finishes at most the current image,
+   durably pauses the batch and local queue, obtains every required editor's
+   consent, permanently deletes the exact old Pod, proves it absent, creates
+   one selected replacement with the same network volume, verifies the exact
+   worker/runtime identity, and leaves work paused for an explicit Resume.
 
 ## Acceptance criteria
 
@@ -59,14 +72,47 @@ application took 30-60 minutes to become usable.
 - AC-11: macOS and Windows installations require no development tools for use.
 - AC-12: API keys and worker credentials are never stored in plaintext project
   files or included in logs.
+- AC-13: The Task 013 queue is persisted only on the initiating device, freezes
+  one explicitly authorized cohort, and submits its batches sequentially through
+  the existing single worker lease. It never creates a worker-side or cross-device
+  waiting queue, never starts or stops a Pod, and never restores run authorization
+  after the app relaunches.
+- AC-14: Queue completion is reached only after every cohort row is terminal and
+  local receipt/download reconciliation is settled. ImageForge then creates one
+  durable completion event, raises a native notification plus in-app alarm, and
+  offers Dismiss or one 15-minute Snooze without implying that compute stopped.
+- AC-15: Keep awake is an explicit per-run choice. It prevents system idle sleep
+  only while the authorized foreground queue runner owns its native lease, allows
+  the display to sleep, and is released on pause, completion, reset, or process exit.
+- AC-16: The GPU chip opens the Task 014 compact live selector. It exposes only
+  policy-approved EU-RO-1 Secure one-GPU offers, refreshes while the foreground
+  sheet is open, distinguishes fresh, inventory-stale, benchmark-expired, and
+  unmeasured data, and never presents a heuristic speed score.
+- AC-17: Manual Start and coordinated Switch are explicit foreground actions
+  backed by a native monotonic inventory receipt and exact micro-USD price.
+  Renderer state, a persisted journal, a stale catalog, or a timer is never
+  provider authority.
+- AC-18: A Switch preserves exactly one active Pod/volume writer. It uses
+  cross-client worker consent, finishes at most the current image, proves the
+  exact old Pod absent before one replacement POST, verifies the same volume,
+  image, GPU and runtime, and leaves the batch and queue paused. No failure,
+  completion, alarm, or recovery path starts, switches, resumes, or stops a Pod
+  automatically.
 
 ## Non-goals for the first release
 
 - Multiple image models, LoRAs, video generation, or an LLM. Optional FLUX.2
   Klein reference images are supported as a batch-level input; this does not
   add another model or a prompt-rewriting step.
-- More than one simultaneous batch or a waiting batch queue.
+- More than one simultaneous worker batch, a worker-side waiting queue, or a
+  cross-device queue. The device-local sequential staging queue defined by
+  [Task 013](../tasks/013-local-sequential-batch-queue-and-completion-alarm.md)
+  is the narrow exception; it still holds only one remote batch lease at a time.
 - Automatic Pod termination.
+- In-place GPU mutation, simultaneous Pods sharing the production volume,
+  automatic price-driven switching, automatic switch fallback, or automatic
+  batch/queue resume. The narrow explicit replacement saga is defined by
+  [Task 014](../tasks/014-live-gpu-selector-and-coordinated-switch.md).
 - Accounts, billing, subscriptions, public SaaS hosting, or team administration.
 - Mobile or browser-only versions.
 - Automatic prompt rewriting. The visible Editorial Realism suffix is allowed.
@@ -90,3 +136,7 @@ application took 30-60 minutes to become usable.
 - Real GPU benchmark records boot phases, seconds/image, peak VRAM, transfer
   rate, failure count, and cost/image for every available approved GPU.
 - User taste review approves the major screens at desktop sizes on both OSes.
+- A three-batch device-local queue survives an app restart without resuming
+  automatically, preserves exact order and references, reconciles every local
+  receipt before advancing, and produces one completion event plus at most one
+  explicit snooze re-alert.

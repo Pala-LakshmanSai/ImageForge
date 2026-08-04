@@ -1,13 +1,201 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { GpuSelectorOfferV1, NativeGpuInventorySnapshotV1 } from '@imageforge/runpod-client';
 import App from './App';
 import type { ImageForgeAdapter } from './adapters/imageForgeAdapter';
 import type { ProductionRuntimeFacade } from './adapters/productionImageForgeAdapter';
 import type { ProductionRuntimeEvent } from './adapters/productionImageForgeAdapter';
 import { DEFAULT_STUDIO_PROFILE } from './adapters/imageForgeAdapter';
+import { createMemoryQueueHost, QueueStoreError } from './adapters/queueStore';
 import { appReducer, createConfiguredInitialState, createDemoState, createInitialState } from './domain/reducer';
 import type { CredentialMetadataMap, PodState } from './domain/types';
+import type { NativeGpuStartResultV1 } from './native/gpuStartBridge';
+import type { NativeGpuSwitchSnapshotV1 } from './native/gpuSwitchBridge';
+import {
+  createQueueRun,
+  updateQueueItem,
+  updateQueueRun,
+  type NativeQueueItemV1,
+  type NativeQueueSnapshotV1,
+  type QueueHostPort,
+} from './domain/queue';
+
+const QUEUE_ITEM_ID = '11111111-1111-4111-8111-111111111111';
+const QUEUE_SUBMISSION_ID = '22222222-2222-4222-8222-222222222222';
+const QUEUE_RUN_ID = '33333333-3333-4333-8333-333333333333';
+const QUEUE_REMOTE_ID = '44444444-4444-4444-8444-444444444444';
+const GPU_OBSERVATION_ID = '55555555-5555-4555-8555-555555555555';
+const GPU_RECEIPT_ID = '66666666-6666-4666-8666-666666666666';
+const GPU_PROCESS_EPOCH_ID = '77777777-7777-4777-8777-777777777777';
+
+function liveGpuInventory(): NativeGpuInventorySnapshotV1 {
+  const observedAt = '2026-08-04T00:00:00.000Z';
+  const offer: GpuSelectorOfferV1 = {
+    schemaVersion: 1,
+    observationId: GPU_OBSERVATION_ID,
+    receiptId: GPU_RECEIPT_ID,
+    gpuId: 'NVIDIA GeForce RTX 4090',
+    policyKey: 'rtx_4090',
+    displayName: 'RTX 4090',
+    memoryGb: 24,
+    emergency: false,
+    availability: 'high',
+    hourlyPriceMicroUsd: 690_000,
+    dataCenterId: 'EU-RO-1',
+    source: 'live',
+    observedAt,
+    stale: false,
+    selectable: true,
+    disabledReason: null,
+    benchmarkState: 'unmeasured',
+    benchmarkAgeMs: null,
+    speedScore: null,
+    benchmarkMedianDurationUs: null,
+    benchmarkP95DurationUs: null,
+    benchmarkMeasuredAt: null,
+    benchmarkEvidenceSha256: null,
+    estimatedSwitchRemainingCostMicroUsd: null,
+  };
+  return {
+    schemaVersion: 1,
+    observationId: GPU_OBSERVATION_ID,
+    processEpochId: GPU_PROCESS_EPOCH_ID,
+    includeEmergencyTier: false,
+    state: 'ready',
+    observedAt,
+    receipt: {
+      schemaVersion: 1,
+      receiptId: GPU_RECEIPT_ID,
+      processEpochId: GPU_PROCESS_EPOCH_ID,
+      receivedAt: observedAt,
+      validForMs: 60_000,
+      catalogSha256: 'a'.repeat(64),
+    },
+    offers: [offer],
+    currentPod: null,
+    currentPodObservedAt: null,
+    currentPodStale: false,
+    issue: null,
+  };
+}
+
+function switchGpuInventory(): NativeGpuInventorySnapshotV1 {
+  const snapshot = liveGpuInventory();
+  const target = {
+    ...snapshot.offers[0],
+    gpuId: 'NVIDIA GeForce RTX 5090',
+    policyKey: 'rtx_5090' as const,
+    displayName: 'RTX 5090',
+    memoryGb: 32,
+    hourlyPriceMicroUsd: 890_000,
+  };
+  return {
+    ...snapshot,
+    offers: [target],
+    currentPod: {
+      podId: 'pod-exact-1',
+      gpuId: 'NVIDIA GeForce RTX 4090',
+      gpuDisplayName: 'RTX 4090',
+      hourlyPriceMicroUsd: 690_000,
+    },
+    currentPodObservedAt: snapshot.observedAt,
+  };
+}
+
+function queuedItem(state: NativeQueueItemV1['state'] = 'staged'): NativeQueueItemV1 {
+  return {
+    schemaVersion: 1,
+    queueItemId: QUEUE_ITEM_ID,
+    clientSubmissionId: QUEUE_SUBMISSION_ID,
+    recordRevision: 1,
+    runRevision: state === 'staged' ? null : QUEUE_RUN_ID,
+    remoteBatchId: null,
+    state,
+    attentionCode: state === 'needs_attention' ? 'submission_uncertain' : null,
+    name: 'Overnight editorial',
+    prompts: ['A quiet documentary frame at dawn'],
+    baseSeed: 100_000,
+    destination: '/tmp/imageforge-output',
+    aspectRatio: '16:9',
+    styleSuffix: null,
+    references: [],
+    createdAt: '2026-08-03T12:00:00.000Z',
+    updatedAt: '2026-08-03T12:00:00.000Z',
+  };
+}
+
+function queueSnapshot(item: NativeQueueItemV1, running = false): NativeQueueSnapshotV1 {
+  const run = item.runRevision === null ? null : {
+    runRevision: QUEUE_RUN_ID,
+    cohortItemIds: [QUEUE_ITEM_ID],
+    runnerState: running ? 'running' as const : 'paused' as const,
+    authorizationRequired: !running,
+    keepAwake: false,
+  };
+  return {
+    schemaVersion: 1,
+    storeRevision: 1,
+    document: {
+      schemaVersion: 1,
+      items: [item],
+      run,
+      alarm: run === null ? null : {
+        eventId: `queue-complete:${QUEUE_RUN_ID}`,
+        runRevision: QUEUE_RUN_ID,
+        state: 'disarmed',
+        kind: null,
+        snoozeUsed: false,
+        snoozeDueAt: null,
+        notificationDisposition: null,
+        snoozeNotificationDisposition: null,
+      },
+    },
+    issues: [],
+  };
+}
+
+function ringingQueueSnapshot(disposition: 'pending' | 'delivered' | 'failed' | 'permission_denied' = 'failed'): NativeQueueSnapshotV1 {
+  const item: NativeQueueItemV1 = {
+    ...queuedItem(),
+    recordRevision: 6,
+    runRevision: QUEUE_RUN_ID,
+    remoteBatchId: QUEUE_REMOTE_ID,
+    state: 'completed',
+  };
+  return {
+    schemaVersion: 1,
+    storeRevision: 5,
+    document: {
+      schemaVersion: 1,
+      items: [item],
+      run: {
+        runRevision: QUEUE_RUN_ID,
+        cohortItemIds: [QUEUE_ITEM_ID],
+        runnerState: 'completed',
+        authorizationRequired: true,
+        keepAwake: false,
+      },
+      alarm: {
+        eventId: `queue-complete:${QUEUE_RUN_ID}`,
+        runRevision: QUEUE_RUN_ID,
+        state: 'ringing',
+        kind: 'complete',
+        snoozeUsed: false,
+        snoozeDueAt: null,
+        notificationDisposition: disposition,
+        snoozeNotificationDisposition: null,
+      },
+    },
+    issues: [],
+  };
+}
+
+function withQueueSnapshot(snapshot: NativeQueueSnapshotV1) {
+  const state = createConfiguredInitialState();
+  state.queue = { ...state.queue, ...snapshot, loadState: 'ready' };
+  return state;
+}
 
 function immediateAdapter(configured = true): ImageForgeAdapter {
   let credentials: CredentialMetadataMap = {
@@ -15,6 +203,7 @@ function immediateAdapter(configured = true): ImageForgeAdapter {
     workerToken: { configured, suffix: configured ? 'F2M4' : null, provider: 'Test vault' },
   };
   return {
+    queue: createMemoryQueueHost(),
     chooseDestination: async () => '/tmp/imageforge-output',
     validateDestination: async () => true,
     revealPath: async () => undefined,
@@ -48,15 +237,123 @@ function immediateAdapter(configured = true): ImageForgeAdapter {
   };
 }
 
+function gpuSwitchProgressSnapshot(
+  input: Partial<NonNullable<NativeGpuSwitchSnapshotV1['record']>> = {},
+): NativeGpuSwitchSnapshotV1 {
+  const target = {
+    replacementAttemptId: '11111111-1111-4111-8111-111111111111',
+    attemptRevision: 1,
+    gpuId: 'NVIDIA GeForce RTX 5090',
+    gpuDisplayName: 'RTX 5090',
+    hourlyPriceMicroUsd: 890_000,
+    observationId: '22222222-2222-4222-8222-222222222222',
+    receiptId: '33333333-3333-4333-8333-333333333333',
+    inventoryObservedAt: '2026-08-04T00:00:00.000Z',
+    priceConfirmedAt: '2026-08-04T00:00:01.000Z',
+  } as const;
+  return {
+    schemaVersion: 1,
+    storeRevision: 2,
+    record: {
+      schemaVersion: 1,
+      switchId: '44444444-4444-4444-8444-444444444444',
+      recordRevision: 3,
+      phase: 'consent_pending',
+      blockedAt: null,
+      attentionCode: null,
+      authorizationRequired: false,
+      targetConfirmation: 'confirmed',
+      oldPod: {
+        podId: 'pod-old-1',
+        gpuId: 'NVIDIA GeForce RTX 4090',
+        gpuDisplayName: 'RTX 4090',
+        hourlyPriceMicroUsd: 690_000,
+      },
+      initialTarget: target,
+      currentTarget: target,
+      preparedTarget: null,
+      priorAttempts: [],
+      queueReservation: { active: true, queueRunRevision: null },
+      expectedBatchId: null,
+      oldDeleteWireAttempts: 0,
+      replacementPodId: null,
+      peerPodIds: [],
+      peerPodOverflow: false,
+      actualHourlyPriceMicroUsd: null,
+      confirmedActualPrice: false,
+      createdAt: '2026-08-04T00:00:02.000Z',
+      updatedAt: '2026-08-04T00:00:02.000Z',
+      ...input,
+    },
+    issues: [],
+  };
+}
+
 function productionAdapter() {
   const listeners = new Set<Parameters<ProductionRuntimeFacade['subscribe']>[0]>();
+  const inventoryListeners = new Set<(snapshot: NativeGpuInventorySnapshotV1) => void>();
   let authoritativePod: PodState | null | undefined;
+  let gpuInventory: NativeGpuInventorySnapshotV1 | null = null;
+  let gpuSwitch: NativeGpuSwitchSnapshotV1 = {
+    schemaVersion: 1,
+    storeRevision: 0,
+    record: null,
+    issues: [],
+  };
+  const createIntent: NativeGpuStartResultV1 = {
+    schemaVersion: 1,
+    operationId: '88888888-8888-4888-8888-888888888888',
+    lifecycleRevision: 1,
+    state: 'create_intent',
+    pod: null,
+    confirmedHourlyPriceMicroUsd: 690_000,
+    actualHourlyPriceMicroUsd: null,
+    issue: null,
+  };
   const runtime: ProductionRuntimeFacade = {
     subscribe: vi.fn((listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
     }),
     getAuthoritativePodState: vi.fn(() => authoritativePod ?? null),
+    getGpuInventory: vi.fn(() => gpuInventory),
+    subscribeGpuInventory: vi.fn((listener) => {
+      inventoryListeners.add(listener);
+      if (gpuInventory !== null) listener(gpuInventory);
+      return () => inventoryListeners.delete(listener);
+    }),
+    loadGpuInventory: vi.fn(async () => {
+      if (gpuInventory === null) throw new Error('GPU inventory is not configured by this fixture.');
+      return gpuInventory;
+    }),
+    loadGpuStart: vi.fn(async () => null),
+    loadGpuSwitch: vi.fn(async () => gpuSwitch),
+    recoverGpuStop: vi.fn(async () => undefined),
+    beginGpuSwitch: vi.fn(async () => gpuSwitch),
+    resumeGpuSwitch: vi.fn(async () => gpuSwitch),
+    syncGpuSwitch: vi.fn(async () => gpuSwitch),
+    confirmGpuSwitchTarget: vi.fn(async () => gpuSwitch),
+    finalizeGpuSwitch: vi.fn(async () => gpuSwitch),
+    deleteOldGpuSwitch: vi.fn(async () => gpuSwitch),
+    prepareGpuSwitchAttempt: vi.fn(async () => gpuSwitch),
+    confirmGpuSwitchAttempt: vi.fn(async () => gpuSwitch),
+    createGpuSwitchReplacement: vi.fn(async () => gpuSwitch),
+    confirmGpuSwitchActualPrice: vi.fn(async () => gpuSwitch),
+    deleteGpuSwitchReplacement: vi.fn(async () => gpuSwitch),
+    reconcileGpuSwitchProvider: vi.fn(async () => gpuSwitch),
+    verifyGpuSwitchReplacement: vi.fn(async () => gpuSwitch),
+    completeGpuSwitch: vi.fn(async () => gpuSwitch),
+    cancelGpuSwitch: vi.fn(async () => gpuSwitch),
+    refreshGpuInventory: vi.fn(async () => {
+      if (gpuInventory === null) throw new Error('GPU inventory is not configured by this fixture.');
+      return gpuInventory;
+    }),
+    prepareGpuInventory: vi.fn(async () => {
+      if (gpuInventory === null) throw new Error('GPU inventory is not configured by this fixture.');
+      return gpuInventory;
+    }),
+    startGpuChoice: vi.fn(async () => createIntent),
+    confirmGpuActualPrice: vi.fn(async () => { throw new Error('GPU price confirmation is not used by this fixture.'); }),
     restoreLocalLibrary: vi.fn(async () => undefined),
     refresh: vi.fn(async () => undefined),
     observe: vi.fn(async () => undefined),
@@ -64,12 +361,14 @@ function productionAdapter() {
     startGpu: vi.fn(async () => undefined),
     requestGpuStop: vi.fn(async () => undefined),
     respondToGpuStop: vi.fn(async () => undefined),
+    respondToGpuSwitch: vi.fn(async () => undefined),
     cancelGpuStop: vi.fn(async () => undefined),
     startBatch: vi.fn(async () => undefined),
     pollBatch: vi.fn(async () => undefined),
     beginNewBatch: vi.fn(),
     controlBatch: vi.fn(async () => undefined),
     resolveAmbiguousStart: vi.fn(async () => undefined),
+    reconcileQueueSubmission: vi.fn(async () => null),
     dispose: vi.fn(),
   };
   const fake = immediateAdapter();
@@ -88,6 +387,11 @@ function productionAdapter() {
     listeners,
     emit: (event: ProductionRuntimeEvent) => listeners.forEach((listener) => listener(event)),
     setAuthoritativePod: (pod: PodState | null | undefined) => { authoritativePod = pod; },
+    setGpuInventory: (snapshot: NativeGpuInventorySnapshotV1) => {
+      gpuInventory = snapshot;
+      inventoryListeners.forEach((listener) => listener(snapshot));
+    },
+    setGpuSwitch: (snapshot: NativeGpuSwitchSnapshotV1) => { gpuSwitch = snapshot; },
   };
 }
 
@@ -98,16 +402,363 @@ afterEach(() => {
 describe('ImageForge shell', () => {
   it('refreshes production read-only on launch and starts compute only after a foreground click', async () => {
     const production = productionAdapter();
+    production.setGpuInventory(liveGpuInventory());
     render(<App initialState={createConfiguredInitialState()} adapter={production.adapter} />);
 
     await waitFor(() => expect(production.runtime.refresh).toHaveBeenCalledOnce());
     await waitFor(() => expect(production.runtime.restoreLocalLibrary).toHaveBeenCalledOnce());
+    await waitFor(() => expect(production.runtime.loadGpuInventory).toHaveBeenCalledOnce());
+    await waitFor(() => expect(production.runtime.loadGpuSwitch).toHaveBeenCalledOnce());
     expect(production.runtime.startGpu).not.toHaveBeenCalled();
     expect(production.adapter.runPodLifecycle).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Start GPU' })[0]);
-    await waitFor(() => expect(production.runtime.startGpu).toHaveBeenCalledOnce());
+    expect(await screen.findByRole('dialog', { name: 'Choose a GPU' })).toBeVisible();
+    fireEvent.click(screen.getByRole('radio', { name: /Auto best value/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review Auto start' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start Auto best value' }));
+    await waitFor(() => expect(production.runtime.startGpuChoice).toHaveBeenCalledOnce());
+    expect(production.runtime.startGpuChoice).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ kind: 'auto_start' }),
+    );
+    expect(production.runtime.startGpu).not.toHaveBeenCalled();
     expect(production.adapter.runPodLifecycle).not.toHaveBeenCalled();
+  });
+
+  it('opens Switch from the current GPU chip and begins only through the native switch facade', async () => {
+    const production = productionAdapter();
+    production.setGpuInventory(switchGpuInventory());
+    const state = createConfiguredInitialState();
+    state.pod = {
+      ...state.pod,
+      phase: 'ready',
+      phaseProgress: 100,
+      statusDetail: 'Model warm',
+      gpu: 'RTX 4090',
+      vram: '24 GB',
+      hourlyRate: 0.69,
+      health: 'healthy',
+      podId: 'pod-exact-1',
+      matchingPodIds: ['pod-exact-1'],
+    };
+    render(<App initialState={state} adapter={production.adapter} />);
+    await waitFor(() => expect(production.runtime.loadGpuSwitch).toHaveBeenCalledOnce());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Current GPU / Switch GPU' }));
+    expect(await screen.findByRole('dialog', { name: 'Current GPU / Switch GPU' })).toBeVisible();
+    fireEvent.click(screen.getByRole('radio', { name: /RTX 5090/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review switch to RTX 5090' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Switch to RTX 5090' }));
+
+    await waitFor(() => expect(production.runtime.beginGpuSwitch).toHaveBeenCalledOnce());
+    expect(production.runtime.beginGpuSwitch).toHaveBeenCalledWith(
+      expect.objectContaining({ pod: expect.objectContaining({ podId: 'pod-exact-1' }) }),
+      expect.objectContaining({ kind: 'switch' }),
+    );
+    expect(production.runtime.startGpuChoice).not.toHaveBeenCalled();
+  });
+
+  it('shows a peer GPU-switch consent prompt and records only the explicit decision', async () => {
+    const production = productionAdapter();
+    production.setGpuInventory(liveGpuInventory());
+    const initial = createConfiguredInitialState();
+    initial.pod = {
+      ...initial.pod,
+      phase: 'ready',
+      phaseProgress: 100,
+      statusDetail: 'Model warm',
+      podId: 'pod-exact-1',
+      gpu: 'RTX 4090',
+      vram: '24 GB',
+      hourlyRate: 0.69,
+    };
+    render(<App initialState={initial} adapter={production.adapter} />);
+    await waitFor(() => expect(production.runtime.subscribe).toHaveBeenCalledOnce());
+
+    act(() => production.emit({
+      type: 'studio',
+      studio: {
+        ...initial.studio,
+        connected: true,
+        serverInstanceId: '99999999-9999-4999-8999-999999999999',
+        coordinationRevision: 2,
+        currentSession: {
+          sessionId: '22222222-2222-4222-8222-222222222222',
+          displayName: 'Sujal',
+          availability: 'foreground',
+          expiresAt: '2999-08-03T10:00:12.000Z',
+        },
+        sessions: [{
+          sessionId: '22222222-2222-4222-8222-222222222222',
+          displayName: 'Sujal',
+          availability: 'foreground',
+          expiresAt: '2999-08-03T10:00:12.000Z',
+        }],
+        gpuSwitch: {
+          switchId: '66666666-6666-4666-8666-666666666666',
+          oldPodId: 'pod-exact-1',
+          oldGpuId: 'NVIDIA GeForce RTX 4090',
+          oldGpuDisplayName: 'RTX 4090',
+          initialTargetGpuId: 'NVIDIA RTX 5090',
+          initialTargetGpuDisplayName: 'RTX 5090',
+          requester: {
+            sessionId: '11111111-1111-4111-8111-111111111111',
+            displayName: 'Lakshman',
+          },
+          isRequester: false,
+          canRespond: true,
+          phase: 'pending',
+          reason: null,
+          requestedAt: '2026-08-03T10:00:00.000Z',
+          responseDeadline: '2999-08-03T10:00:30.000Z',
+          readyToDeleteAt: null,
+          waitingFor: [{
+            sessionId: '22222222-2222-4222-8222-222222222222',
+            displayName: 'Sujal',
+          }],
+          approvedBy: [],
+          deniedBy: [],
+          batchId: null,
+          batchOwner: null,
+          batchProgress: null,
+          batchStateAtFinalization: null,
+          replacementPodId: null,
+          actualTargetGpuId: null,
+        },
+      },
+    }));
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Keep current GPU' }));
+
+    await waitFor(() => expect(production.runtime.respondToGpuSwitch).toHaveBeenCalledWith(
+      '66666666-6666-4666-8666-666666666666',
+      'deny',
+    ));
+  });
+
+  it('loads a durable GPU Switch with an explicit native Resume action and blocks ordinary Start', async () => {
+    const production = productionAdapter();
+    production.setGpuInventory(liveGpuInventory());
+    const target = {
+      replacementAttemptId: '11111111-1111-4111-8111-111111111111',
+      attemptRevision: 1,
+      gpuId: 'NVIDIA GeForce RTX 5090',
+      gpuDisplayName: 'RTX 5090',
+      hourlyPriceMicroUsd: 890_000,
+      observationId: '22222222-2222-4222-8222-222222222222',
+      receiptId: '33333333-3333-4333-8333-333333333333',
+      inventoryObservedAt: '2026-08-03T12:00:00.000Z',
+      priceConfirmedAt: '2026-08-03T12:00:01.000Z',
+    } as const;
+    production.setGpuSwitch({
+      schemaVersion: 1,
+      storeRevision: 2,
+      record: {
+        schemaVersion: 1,
+        switchId: '44444444-4444-4444-8444-444444444444',
+        recordRevision: 1,
+        phase: 'consent_pending',
+        blockedAt: null,
+        attentionCode: null,
+        authorizationRequired: true,
+        targetConfirmation: 'required',
+        oldPod: {
+          podId: 'pod-old-1',
+          gpuId: 'NVIDIA GeForce RTX 4090',
+          gpuDisplayName: 'RTX 4090',
+          hourlyPriceMicroUsd: 690_000,
+        },
+        initialTarget: target,
+        currentTarget: target,
+        preparedTarget: null,
+        priorAttempts: [],
+        queueReservation: { active: true, queueRunRevision: null },
+        expectedBatchId: null,
+        oldDeleteWireAttempts: 0,
+        replacementPodId: null,
+        peerPodIds: [],
+        peerPodOverflow: false,
+        actualHourlyPriceMicroUsd: null,
+        confirmedActualPrice: false,
+        createdAt: '2026-08-03T12:00:02.000Z',
+        updatedAt: '2026-08-03T12:00:02.000Z',
+      },
+      issues: [],
+    });
+
+    render(<App initialState={createConfiguredInitialState()} adapter={production.adapter} />);
+    expect(await screen.findByText('Waiting for switch approval')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Resume switch' }));
+    await waitFor(() => expect(production.runtime.resumeGpuSwitch).toHaveBeenCalled());
+    fireEvent.click(screen.getAllByRole('button', { name: 'Start GPU' })[0]);
+    expect(await screen.findByText(/found a durable GPU Switch/i)).toBeVisible();
+    expect(screen.queryByRole('dialog', { name: 'Choose a GPU' })).not.toBeInTheDocument();
+    expect(production.runtime.startGpuChoice).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ phase: 'ready_to_delete' }, 'Terminate current GPU', 'deleteOldGpuSwitch'],
+    [{ phase: 'old_absent' }, 'Prepare another attempt', 'prepareGpuSwitchAttempt'],
+    [{
+      phase: 'old_absent',
+      preparedTarget: {
+        quoteId: '66666666-6666-4666-8666-666666666666',
+        preparedFromRecordRevision: 3,
+        gpuId: 'NVIDIA GeForce RTX 5090',
+        gpuDisplayName: 'RTX 5090',
+        hourlyPriceMicroUsd: 890_000,
+        observationId: '22222222-2222-4222-8222-222222222222',
+        receiptId: '33333333-3333-4333-8333-333333333333',
+        preparedAt: '2026-08-04T00:00:03.000Z',
+        expiresAt: '2026-08-04T00:01:03.000Z',
+      },
+    }, 'Confirm replacement attempt', 'confirmGpuSwitchAttempt'],
+    [{ phase: 'old_absent' }, 'Start replacement GPU', 'createGpuSwitchReplacement'],
+    [{
+      phase: 'replacement_identified',
+      replacementPodId: 'pod-replacement-1',
+      actualHourlyPriceMicroUsd: 910_000,
+    }, 'Accept actual price', 'confirmGpuSwitchActualPrice'],
+    [{
+      phase: 'replacement_failed',
+      replacementPodId: 'pod-replacement-1',
+    }, 'Terminate replacement', 'deleteGpuSwitchReplacement'],
+    [{ phase: 'delete_uncertain' }, 'Check provider state', 'reconcileGpuSwitchProvider'],
+    [{
+      phase: 'provisioning',
+      replacementPodId: 'pod-replacement-1',
+      actualHourlyPriceMicroUsd: 890_000,
+      confirmedActualPrice: true,
+    }, 'Verify replacement', 'verifyGpuSwitchReplacement'],
+    [{
+      phase: 'ready_paused',
+      replacementPodId: 'pod-replacement-1',
+      actualHourlyPriceMicroUsd: 890_000,
+      confirmedActualPrice: true,
+    }, 'Complete switch', 'completeGpuSwitch'],
+  ] satisfies ReadonlyArray<readonly [
+    Partial<NonNullable<NativeGpuSwitchSnapshotV1['record']>>,
+    string,
+    | 'deleteOldGpuSwitch'
+    | 'prepareGpuSwitchAttempt'
+    | 'confirmGpuSwitchAttempt'
+    | 'createGpuSwitchReplacement'
+    | 'confirmGpuSwitchActualPrice'
+    | 'deleteGpuSwitchReplacement'
+    | 'reconcileGpuSwitchProvider'
+    | 'verifyGpuSwitchReplacement'
+    | 'completeGpuSwitch',
+  ]>)('dispatches later Switch phase %s through %s', async (record, label, method) => {
+    const production = productionAdapter();
+    production.setGpuInventory(liveGpuInventory());
+    production.setGpuSwitch(gpuSwitchProgressSnapshot(record));
+    render(<App initialState={createConfiguredInitialState()} adapter={production.adapter} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: label }));
+    await waitFor(() => expect(production.runtime[method]).toHaveBeenCalledOnce());
+  });
+
+  it('binds provider reconciliation and replacement cleanup to the exact rendered reason', async () => {
+    const production = productionAdapter();
+    production.setGpuInventory(liveGpuInventory());
+    production.setGpuSwitch(gpuSwitchProgressSnapshot({
+      phase: 'replacement_failed',
+      replacementPodId: 'pod-replacement-1',
+    }));
+    const { unmount } = render(
+      <App initialState={createConfiguredInitialState()} adapter={production.adapter} />,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Terminate replacement' }));
+    await waitFor(() => expect(production.runtime.deleteGpuSwitchReplacement).toHaveBeenCalledWith(
+      expect.any(Object),
+      'replacement_failed',
+    ));
+    unmount();
+
+    const uncertain = productionAdapter();
+    uncertain.setGpuInventory(liveGpuInventory());
+    uncertain.setGpuSwitch(gpuSwitchProgressSnapshot({ phase: 'create_uncertain' }));
+    render(<App initialState={createConfiguredInitialState()} adapter={uncertain.adapter} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Check provider state' }));
+    await waitFor(() => expect(uncertain.runtime.reconcileGpuSwitchProvider).toHaveBeenCalledWith(
+      expect.any(Object),
+      'after_create',
+    ));
+  });
+
+  it('does not let a foreground Start outrun durable GPU Switch journal loading', async () => {
+    const production = productionAdapter();
+    production.setGpuInventory(liveGpuInventory());
+    vi.mocked(production.runtime.loadGpuSwitch).mockReturnValueOnce(new Promise(() => undefined));
+    render(<App initialState={createConfiguredInitialState()} adapter={production.adapter} />);
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Start GPU' })[0]);
+    expect(await screen.findByText(/still verifying the durable GPU Switch journal/i)).toBeVisible();
+    expect(screen.queryByRole('dialog', { name: 'Choose a GPU' })).not.toBeInTheDocument();
+    expect(production.runtime.startGpuChoice).not.toHaveBeenCalled();
+  });
+
+  it('keeps GPU mutation blocked when the durable Switch journal cannot be verified', async () => {
+    const production = productionAdapter();
+    production.setGpuInventory(liveGpuInventory());
+    vi.mocked(production.runtime.loadGpuSwitch).mockRejectedValueOnce(new Error('private journal detail'));
+    render(<App initialState={createConfiguredInitialState()} adapter={production.adapter} />);
+
+    expect(await screen.findByText(/durable Switch journal could not be verified/i)).toBeVisible();
+    fireEvent.click(screen.getAllByRole('button', { name: 'Start GPU' })[0]);
+    expect(await screen.findByText(/could not verify the durable GPU Switch journal/i)).toBeVisible();
+    expect(screen.queryByRole('dialog', { name: 'Choose a GPU' })).not.toBeInTheDocument();
+    expect(production.runtime.startGpuChoice).not.toHaveBeenCalled();
+    expect(screen.queryByText(/private journal detail/i)).not.toBeInTheDocument();
+  });
+
+  it('keeps exact native price attention visible and confirms it only from a second click', async () => {
+    const production = productionAdapter();
+    production.setGpuInventory(liveGpuInventory());
+    const attention: NativeGpuStartResultV1 = {
+      schemaVersion: 1,
+      operationId: '99999999-9999-4999-8999-999999999999',
+      lifecycleRevision: 3,
+      state: 'price_attention',
+      pod: {
+        podId: 'imageforge-pod-1',
+        gpuId: 'NVIDIA GeForce RTX 4090',
+        gpuDisplayName: 'RTX 4090',
+        hourlyPriceMicroUsd: 700_000,
+      },
+      confirmedHourlyPriceMicroUsd: 690_000,
+      actualHourlyPriceMicroUsd: 700_000,
+      issue: { code: 'gpu_actual_price_changed', retryable: false },
+    };
+    const ready: NativeGpuStartResultV1 = {
+      ...attention,
+      lifecycleRevision: 4,
+      state: 'ready',
+      confirmedHourlyPriceMicroUsd: 700_000,
+      issue: null,
+    };
+    vi.mocked(production.runtime.startGpuChoice).mockResolvedValueOnce(attention);
+    vi.mocked(production.runtime.confirmGpuActualPrice).mockResolvedValueOnce(ready);
+    render(<App initialState={createConfiguredInitialState()} adapter={production.adapter} />);
+
+    await waitFor(() => expect(production.runtime.loadGpuSwitch).toHaveBeenCalledOnce());
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.click(screen.getAllByRole('button', { name: 'Start GPU' })[0]);
+    fireEvent.click(await screen.findByRole('radio', { name: /Auto best value/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review Auto start' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start Auto best value' }));
+
+    expect(await screen.findByText('Actual GPU price needs confirmation')).toBeVisible();
+    expect(screen.getByText(/Confirmed \$0\.69\/hr · actual \$0\.7\/hr/)).toBeVisible();
+    expect(production.runtime.confirmGpuActualPrice).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Accept actual price' }));
+    await waitFor(() => expect(production.runtime.confirmGpuActualPrice).toHaveBeenCalledWith(
+      expect.any(Object),
+      attention.operationId,
+      700_000,
+    ));
+    await waitFor(() => expect(screen.queryByText('Actual GPU price needs confirmation')).not.toBeInTheDocument());
   });
 
   it('uses a bounded, receipt-free cross-client heartbeat while Create is idle', async () => {
@@ -836,5 +1487,313 @@ describe('ImageForge shell', () => {
 
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(screen.getByText('RunPod API key replaced')).toBeVisible();
+  });
+
+  it('persists a paused run before native lease acquisition, then authorizes dispatch', async () => {
+    const user = userEvent.setup();
+    const base = createMemoryQueueHost(queueSnapshot(queuedItem()));
+    const events: string[] = [];
+    const queue: QueueHostPort = {
+      ...base,
+      commit: vi.fn(async (input) => {
+        events.push(`commit:${input.document.run?.runnerState ?? 'none'}`);
+        return base.commit(input);
+      }),
+      acquireRunner: vi.fn(async (input) => {
+        events.push('acquire');
+        return base.acquireRunner(input);
+      }),
+    };
+    let state = createConfiguredInitialState();
+    state = appReducer(state, { type: 'SET_POD_PHASE', phase: 'ready', progress: 100, detail: 'Model warm', podId: 'pod-ui-test' });
+    render(<App initialState={state} adapter={{ ...immediateAdapter(), queue }} />);
+
+    await user.click(await screen.findByRole('button', { name: 'Run queue' }));
+    await waitFor(() => expect(events).toContain('commit:running'));
+    expect(events.slice(0, 3)).toEqual(['commit:paused', 'acquire', 'commit:running']);
+  });
+
+  it('does not submit a prepared batch when Pause wins before the dispatch transition', async () => {
+    const user = userEvent.setup();
+    const base = createMemoryQueueHost(queueSnapshot(queuedItem()));
+    let releasePrepared!: () => void;
+    const preparedGate = new Promise<void>((resolve) => { releasePrepared = resolve; });
+    const prepareStarted = vi.fn();
+    const queue: QueueHostPort = {
+      ...base,
+      prepareDispatch: vi.fn(async (input) => {
+        const payload = await base.prepareDispatch(input);
+        prepareStarted();
+        await preparedGate;
+        return payload;
+      }),
+    };
+    const production = productionAdapter();
+    let state = createConfiguredInitialState();
+    state = appReducer(state, {
+      type: 'SET_POD_PHASE',
+      phase: 'ready',
+      progress: 100,
+      detail: 'Model warm',
+      podId: 'pod-ui-test',
+    });
+    production.setAuthoritativePod(state.pod);
+    render(<App initialState={state} adapter={{ ...production.adapter, queue }} />);
+
+    await user.click(await screen.findByRole('button', { name: 'Run queue' }));
+    await waitFor(() => expect(prepareStarted).toHaveBeenCalledOnce());
+    await user.click(screen.getByRole('button', { name: 'Pause after current' }));
+    await waitFor(async () => expect((await base.load()).document.run).toMatchObject({
+      runnerState: 'paused',
+      authorizationRequired: true,
+    }));
+    releasePrepared();
+
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(production.runtime.startBatch).not.toHaveBeenCalled();
+    expect((await base.load()).document.items[0]).toMatchObject({ state: 'staged' });
+  });
+
+  it('does not start the worker when Pause is durable before the validating effect', async () => {
+    const item: NativeQueueItemV1 = {
+      ...queuedItem(),
+      recordRevision: 3,
+      runRevision: QUEUE_RUN_ID,
+      state: 'dispatching',
+    };
+    const snapshot = queueSnapshot(item);
+    const host = createMemoryQueueHost(snapshot);
+    const production = productionAdapter();
+    let state = withQueueSnapshot(snapshot);
+    state = appReducer(state, {
+      type: 'SET_POD_PHASE',
+      phase: 'ready',
+      progress: 100,
+      detail: 'Model warm',
+      podId: 'pod-ui-test',
+    });
+    state = appReducer(state, {
+      type: 'QUEUE_DISPATCH_ITEM',
+      payload: {
+        queueItemId: item.queueItemId,
+        clientSubmissionId: item.clientSubmissionId,
+        name: item.name,
+        prompts: item.prompts,
+        baseSeed: item.baseSeed,
+        destination: item.destination,
+        aspectRatio: item.aspectRatio,
+        references: [],
+      },
+      startedAt: '2026-08-03T12:00:01.000Z',
+    });
+
+    render(<App initialState={state} adapter={{ ...production.adapter, queue: host }} />);
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(production.runtime.startBatch).not.toHaveBeenCalled();
+    expect((await host.load()).document.run).toMatchObject({
+      runnerState: 'paused',
+      authorizationRequired: true,
+    });
+  });
+
+  it('does exact submission lookup before status and destination preflight on Resume', async () => {
+    const user = userEvent.setup();
+    const production = productionAdapter();
+    const base = createMemoryQueueHost(queueSnapshot(queuedItem('needs_attention')));
+    const events: string[] = [];
+    const queue: QueueHostPort = {
+      ...base,
+      prepareDispatch: vi.fn(async (input) => {
+        events.push('prepare');
+        return base.prepareDispatch(input);
+      }),
+    };
+    const adapter = { ...production.adapter, queue };
+    production.runtime.reconcileQueueSubmission = vi.fn(async () => {
+      events.push('lookup');
+      return null;
+    });
+    production.runtime.refresh = vi.fn(async () => { events.push('status'); });
+    let state = createConfiguredInitialState();
+    state = appReducer(state, { type: 'SET_POD_PHASE', phase: 'ready', progress: 100, detail: 'Model warm', podId: 'pod-ui-test' });
+    production.setAuthoritativePod(state.pod);
+    render(<App initialState={state} adapter={adapter} />);
+
+    const resume = await screen.findByRole('button', { name: 'Resume queue' });
+    events.length = 0;
+    await user.click(resume);
+    await waitFor(() => expect(events).toContain('prepare'));
+    expect(events.indexOf('lookup')).toBeGreaterThanOrEqual(0);
+    expect(events.indexOf('lookup')).toBeLessThan(events.indexOf('status'));
+    expect(events.indexOf('status')).toBeLessThan(events.indexOf('prepare'));
+  });
+
+  it('removes an assigned reference-damaged row under a short exact runner lease only', async () => {
+    const user = userEvent.setup();
+    const damaged = {
+      ...queuedItem('needs_attention'),
+      attentionCode: 'queue_reference_missing',
+    };
+    const initial = queueSnapshot(damaged);
+    const base = createMemoryQueueHost(initial);
+    const acquireRunner = vi.spyOn(base, 'acquireRunner');
+    const releaseRunner = vi.spyOn(base, 'releaseRunner');
+    const production = productionAdapter();
+    const state = withQueueSnapshot(initial);
+    render(<App initialState={state} adapter={{ ...production.adapter, queue: base }} />);
+
+    await user.click(await screen.findByRole('button', { name: 'Remove damaged item Overnight editorial' }));
+
+    await waitFor(async () => {
+      expect((await base.load()).document.items[0]).toMatchObject({
+        state: 'cancelled',
+        attentionCode: null,
+        runRevision: QUEUE_RUN_ID,
+      });
+    });
+    expect(acquireRunner).toHaveBeenCalledWith({ runRevision: QUEUE_RUN_ID });
+    expect(releaseRunner).toHaveBeenCalledWith({ runRevision: QUEUE_RUN_ID });
+    expect(production.runtime.startGpu).not.toHaveBeenCalled();
+    expect(production.runtime.requestGpuStop).not.toHaveBeenCalled();
+    expect(production.runtime.startBatch).not.toHaveBeenCalled();
+  });
+
+  it('persists the exact non-retryable worker code when queue error effects race', async () => {
+    const production = productionAdapter();
+    const host = createMemoryQueueHost();
+    const item = queuedItem();
+    const stagedDocument = { schemaVersion: 1 as const, items: [item], run: null, alarm: null };
+    await host.commit({ expectedRevision: 0, document: stagedDocument, referenceBlobs: [] });
+    const paused = createQueueRun(stagedDocument, QUEUE_RUN_ID, false, false);
+    await host.commit({ expectedRevision: 1, document: paused, referenceBlobs: [] });
+    await host.acquireRunner({ runRevision: QUEUE_RUN_ID });
+    const running = updateQueueRun(paused, { runnerState: 'running', authorizationRequired: false });
+    await host.commit({ expectedRevision: 2, document: running, referenceBlobs: [] });
+    const dispatching = updateQueueItem(running, QUEUE_ITEM_ID, { state: 'dispatching', attentionCode: null }, '2026-08-03T12:01:00.000Z');
+    const snapshot = await host.commit({ expectedRevision: 3, document: dispatching, referenceBlobs: [] });
+
+    let state = withQueueSnapshot(snapshot);
+    state = appReducer(state, {
+      type: 'SET_POD_PHASE',
+      phase: 'ready',
+      progress: 100,
+      detail: 'Model warm',
+      podId: 'pod-ui-test',
+    });
+    state = appReducer(state, {
+      type: 'QUEUE_DISPATCH_ITEM',
+      payload: {
+        queueItemId: item.queueItemId,
+        clientSubmissionId: item.clientSubmissionId,
+        name: item.name,
+        prompts: item.prompts,
+        baseSeed: item.baseSeed,
+        destination: item.destination,
+        aspectRatio: item.aspectRatio,
+        references: [],
+      },
+      startedAt: '2026-08-03T12:01:00.000Z',
+    });
+    render(<App initialState={state} adapter={{ ...production.adapter, queue: host }} />);
+    await waitFor(() => expect(production.listeners.size).toBe(1));
+
+    act(() => production.emit({
+      type: 'error',
+      scope: 'batch',
+      code: 'submission_store_corrupt',
+      message: 'The worker submission store needs operator repair.',
+      retryable: false,
+    }));
+
+    await waitFor(async () => {
+      const row = (await host.load()).document.items[0];
+      expect(row).toMatchObject({ state: 'needs_attention', attentionCode: 'submission_store_corrupt' });
+    });
+  });
+
+  it('requires explicit confirmation to quarantine an unrecoverable queue without mutating the Pod', async () => {
+    const user = userEvent.setup();
+    const production = productionAdapter();
+    const base = createMemoryQueueHost();
+    const resetSnapshot: NativeQueueSnapshotV1 = {
+      schemaVersion: 1,
+      storeRevision: 0,
+      document: { schemaVersion: 1, items: [], run: null, alarm: null },
+      issues: [],
+    };
+    const reset = vi.fn(async () => resetSnapshot);
+    const adapter = { ...production.adapter, queue: {
+      ...base,
+      load: vi.fn(async () => { throw new QueueStoreError('queue_store_unrecoverable', 'No valid generation remains.'); }),
+      reset,
+    } };
+    render(<App initialState={createConfiguredInitialState()} adapter={adapter} />);
+
+    await user.click(await screen.findByRole('button', { name: 'Reset local queue…' }));
+    expect(screen.getByRole('heading', { name: 'Reset the unrecoverable local queue?' })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Keep queue files' }));
+    expect(reset).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: 'Reset local queue…' }));
+    await user.click(screen.getByRole('button', { name: 'Reset local queue' }));
+    await waitFor(() => expect(reset).toHaveBeenCalledWith({ confirmation: 'RESET LOCAL QUEUE' }));
+    expect(production.runtime.startGpu).not.toHaveBeenCalled();
+    expect(production.runtime.requestGpuStop).not.toHaveBeenCalled();
+    expect(production.runtime.startBatch).not.toHaveBeenCalled();
+  });
+
+  it('retries one failed notification once after relaunch and never loops in one process', async () => {
+    const initial = ringingQueueSnapshot('failed');
+    let deliveryAttempt = 0;
+    const base = createMemoryQueueHost(initial, {
+      deliverAlert: () => deliveryAttempt++ === 0 ? 'failed' : 'delivered',
+    });
+    const signalAlert = vi.spyOn(base, 'signalAlert');
+    const adapter = { ...immediateAdapter(), queue: base };
+    const first = render(<App initialState={withQueueSnapshot(initial)} adapter={adapter} />);
+
+    await waitFor(() => expect(signalAlert).toHaveBeenCalledTimes(1));
+    await waitFor(async () => expect((await base.load()).document.alarm?.notificationDisposition).toBe('failed'));
+    await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 25)); });
+    expect(signalAlert).toHaveBeenCalledTimes(1);
+    first.unmount();
+
+    const recovered = await base.load();
+    render(<App initialState={withQueueSnapshot(recovered)} adapter={adapter} />);
+    await waitFor(() => expect(signalAlert).toHaveBeenCalledTimes(2));
+    await waitFor(async () => expect((await base.load()).document.alarm?.notificationDisposition).toBe('delivered'));
+    expect(signalAlert).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not let a stale snooze timer resurrect an acknowledged alarm', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-03T12:00:00.000Z'));
+    const snapshot = ringingQueueSnapshot('delivered');
+    snapshot.document.alarm = {
+      ...snapshot.document.alarm!,
+      state: 'snoozed',
+      snoozeUsed: true,
+      snoozeDueAt: '2026-08-03T12:00:01.000Z',
+      snoozeNotificationDisposition: null,
+    };
+    const host = createMemoryQueueHost(snapshot);
+    const alarmPort = {
+      test: vi.fn(async () => undefined),
+      ring: vi.fn(async () => undefined),
+      stop: vi.fn(),
+      dispose: vi.fn(),
+    };
+    render(<App initialState={withQueueSnapshot(snapshot)} adapter={{ ...immediateAdapter(), queue: host }} alarmPort={alarmPort} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss alarm' }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect((await host.load()).document.alarm?.state).toBe('acknowledged');
+
+    await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve(); });
+    expect((await host.load()).document.alarm?.state).toBe('acknowledged');
+    expect(alarmPort.ring).not.toHaveBeenCalled();
   });
 });

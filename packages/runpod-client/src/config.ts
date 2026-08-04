@@ -1,4 +1,6 @@
 import { RunPodClientError } from "./errors.js";
+import { isGpuIdentityV1 } from "./gpu-policy.js";
+import { isLowercaseRegistryImageDigestV1 } from "./image-identity.js";
 import {
   CLOUD_LANES,
   type BenchmarkContract,
@@ -196,7 +198,7 @@ function validateBenchmarkContract(value: unknown, field: string): BenchmarkCont
     configurationError(`${field}.modelRevision must pin a revision.`, `${field}.modelRevision`);
   }
   const softwareImage = requireString(contract.softwareImage, `${field}.softwareImage`);
-  if (softwareImage.trim().length === 0) {
+  if (!isLowercaseRegistryImageDigestV1(softwareImage)) {
     configurationError(`${field}.softwareImage must pin a container image.`, `${field}.softwareImage`);
   }
   if (
@@ -295,7 +297,7 @@ function validateProfiles(
       const profile = requireRecord(entry, field);
       rejectUnknownKeys(profile, BENCHMARK_PROFILE_KEYS, field);
       const gpuId = requireString(profile.gpuId, `${field}.gpuId`);
-      if (gpuId.trim().length === 0 || gpuId.length > 191) {
+      if (!isGpuIdentityV1(gpuId)) {
         configurationError(`${field}.gpuId must be a catalog GPU identifier.`, `${field}.gpuId`);
       }
       const measuredAt = requireString(profile.measuredAt, `${field}.measuredAt`);

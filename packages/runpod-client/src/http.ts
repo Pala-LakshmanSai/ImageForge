@@ -1,4 +1,5 @@
 import { RunPodClientError, type RunPodOperation } from "./errors.js";
+import { parseLosslessJson } from "./lossless-json.js";
 
 export type ApiKeyProvider = () => Promise<string> | string;
 export type FetchTransport = typeof fetch;
@@ -257,6 +258,21 @@ export class AuthorizedRestClient {
     const response = await this.request(url, options);
     try {
       return await response.json();
+    } catch (error) {
+      throw new RunPodClientError({
+        code: "api_response_invalid",
+        message: "RunPod returned malformed JSON.",
+        operation: options.operation,
+        httpStatus: response.status,
+        cause: error,
+      });
+    }
+  }
+
+  async requestLosslessJson(url: string, options: AuthorizedRequestOptions): Promise<unknown> {
+    const response = await this.request(url, options);
+    try {
+      return parseLosslessJson(await response.text());
     } catch (error) {
       throw new RunPodClientError({
         code: "api_response_invalid",

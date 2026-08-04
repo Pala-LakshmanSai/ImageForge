@@ -71,7 +71,13 @@ export function projectPodSnapshot(snapshot: RunPodSnapshot, current: PodState):
     statusDetail: podDetail(snapshot, selected),
     gpu: selected?.gpuDisplayName ?? null,
     vram: memory === undefined ? null : `${memory} GB`,
-    hourlyRate: selected?.hourlyPriceUsd ?? offer?.hourlyPriceUsd ?? null,
+    // Canonical micro-USD stays authoritative in the RunPod client. PodState's
+    // legacy number is presentation-only and is derived at this final UI edge.
+    hourlyRate: selected?.hourlyPriceMicroUsd !== null && selected?.hourlyPriceMicroUsd !== undefined
+      ? selected.hourlyPriceMicroUsd / 1_000_000
+      : offer?.hourlyPriceMicroUsd !== null && offer?.hourlyPriceMicroUsd !== undefined
+        ? offer.hourlyPriceMicroUsd / 1_000_000
+        : null,
     health: snapshot.phase === 'ready'
       ? 'healthy'
       : snapshot.phase === 'offline'

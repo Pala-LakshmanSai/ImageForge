@@ -560,3 +560,86 @@ the recovery poll observes it.
   visibility/publisher authority change, there is no supportable Task 012
   immutable worker digest to pin in the desktop, RunPod template, runbook, tag,
   or release.
+
+## Task 013 queue release smoke harness — macOS evidence retained
+
+- The non-native release lane now has a strict installed-app harness and JSON
+  validator for 450 device-queue rows, 450 active prompts, 30 trusted OS-key
+  move samples with p95 below 100 ms, three sequential fake batches while the
+  native window is minimized, one fixed-point completion alert, and zero
+  RunPod create/delete calls. The harness uses the real queue journal, runner
+  lease, dispatch preflight, and alert outbox; fake inference never imports the
+  production RunPod adapter.
+- The validator self-test, focused bridge/harness tests, TypeScript check, and
+  the installed macOS run are green. The Windows installed counterpart and the
+  eventual public release download still need the exact result/evidence files
+  and hashes named in `docs/RELEASE_REQUIREMENTS.md`.
+- No Task 013 publication claim is valid until both target-native OS artifacts
+  and the eventual public release download re-verify byte-for-byte.
+
+## Task 014 live selector and coordinated Switch — implementation in progress
+
+- The binding contract is frozen at
+  `tasks/014-live-gpu-selector-and-coordinated-switch.md`, SHA-256
+  `f1a21bd5cd23947a31e0f3a741614f6eb01af3cd912e45988a0693b4f1ce7eee`
+  (3,124 lines / 181,051 bytes). Independent API/concurrency/security and
+  persistence/restart/UX/performance reviews both cleared that exact hash for
+  implementation.
+- Current work is split into disjoint worker, RunPod-client/selector, native,
+  and App integration lanes. This log intentionally records no Task 014 pass:
+  native inventory/switch commands, target-native two-process switch smoke,
+  installed selector p95 artifacts, complete schema/vector parity, final worker
+  digest, packaging, and public artifact re-download are still required.
+- Mandatory review gates include lossless mixed RunPod price parsing to integer
+  micro-USD, checked wide-integer ranking/cost, re-hashed benchmark-v2 evidence,
+  one shared 1-128-byte GPU identity validator, worker envelope/tombstone crash
+  recovery, strict native queue reservation/lease, one old-Pod logical deletion
+  with at most one explicit retry, one POST per attempt, same-volume/runtime
+  verification, and no automatic Start/Stop/Switch/Resume.
+- The first Task 013 native Cargo evidence attempt was blocked by FAT/AppleDouble
+  target I/O rather than a source diagnostic. Its exact disposable partial
+  target was removed after all child processes exited; the verified installed
+  macOS rerun uses the separate APFS removable build volume and is recorded
+  above.
+
+## Installed macOS release evidence update — 2026-08-04
+
+- The repaired installed macOS artifact is
+  `/Volumes/ImageForgeBuild/cargo-target/release/bundle/dmg/ImageForge_0.1.9_aarch64.dmg`,
+  SHA-256 `5ea1b97d7abe44ee6b0de57b6159fc4b3f9e091fd71c4e0e6b2e69d03e641a9f`.
+  Its embedded `imageforge-desktop-core` is SHA-256
+  `56c90620291a75d7fad81231533f564dabb2c2f802755f7450e09c74988e42f1`;
+  `hdiutil verify` is VALID and strict deep codesign passes. Notarization was
+  skipped because Apple credentials were unavailable.
+- Coherent Task 013 queue evidence is retained at
+  `release-evidence/task-013/macos/` and the source root
+  `/Volumes/ImageForgeBuild/tmp/imageforge-queue-final-live-region-135356`:
+  phase 1 `PHASE1_PASS`, phase 2 `PHASE2_PASS` with p95 `18 ms`, relaunch
+  `PASS`, validator `passed=true`, evidence SHA-256
+  `7b74f18b2d37d63fc45e28adb3c052f51fdf51efae4cf59e1a2b501f88e44726`, and
+  attestation SHA-256
+  `512ea214d568ef5c677b09686131303e40d1e0a0e5a0231e878b0629903b575a`.
+  All three wrappers exited `0`; the queue recorded three native batches,
+  trusted samples, minimized completion, permission-denied fallback, and zero
+  provider mutations.
+- The same artifact passed the two-client installed smoke at
+  `/Volumes/ImageForgeBuild/tmp/imageforge-two-client-final-artifact-135845`:
+  both role results PASS, 25/25 checkpoints, exact two ordered deletes, zero
+  unexpected creates/deletes, empty app logs, and wrapper exit `0`. The launch
+  smoke at `/Volumes/ImageForgeBuild/tmp/imageforge-launch-final-artifact-135914`
+  also passed with wrapper exit `0`.
+- Windows x64 installer/install smoke, public re-download verification, and the
+  exact worker publisher/digest gate remain open; this evidence does not make
+  v0.1.9 a published release.
+
+## Current native verification — 2026-08-04
+
+- The current removable-disk Rust gate is green in
+  `/tmp/imageforge-native-full-current.log`: `234 passed, 0 failed` in 167.20s.
+  This includes the queue, Stop, Switch, worker, profile-control, and
+  capability-boundary suites. The shell wrapper used a reserved zsh variable
+  after Cargo completed, so its process exit was nonzero despite the exact
+  Cargo footer being green; the log is the authoritative test result.
+- Runtime identity fake-transport coverage is current and green: valid
+  response, response loss, typed 404, malformed response, and mismatched
+  switch identity all pass in the worker test slice.

@@ -59,7 +59,7 @@ describe('strict worker renderer contracts', () => {
           pause_requested: false,
           cancel_requested: false,
         },
-        permissions: { can_create: false, can_manage_active: false, is_owner: false },
+        permissions: { can_create: false, can_manage_active: false, is_owner: false, create_block_reason: null },
       }).activeBatch?.owner.displayName,
     ).toBe('Lakshman');
   });
@@ -69,10 +69,15 @@ describe('strict worker renderer contracts', () => {
       schema_version: 1,
       ready: true,
       active_batch: null,
-      permissions: { can_create: false, can_manage_active: false, is_owner: false },
+      permissions: { can_create: false, can_manage_active: false, is_owner: false, create_block_reason: 'gpu_stop_pending' },
     })).toMatchObject({
       activeBatch: null,
-      permissions: { canCreate: false, canManageActive: false, isOwner: false },
+      permissions: {
+        canCreate: false,
+        canManageActive: false,
+        isOwner: false,
+        createBlockReason: 'gpu_stop_pending',
+      },
     });
 
     expect(() => parseWorkerStatus({
@@ -86,8 +91,33 @@ describe('strict worker renderer contracts', () => {
         pause_requested: false,
         cancel_requested: false,
       },
-      permissions: { can_create: true, can_manage_active: false, is_owner: false },
+      permissions: { can_create: true, can_manage_active: false, is_owner: false, create_block_reason: null },
     })).toThrow('cannot allow creation');
+  });
+
+  it('requires an exact reason for an idle ready worker that cannot create', () => {
+    expect(parseWorkerStatus({
+      schema_version: 1,
+      ready: true,
+      active_batch: null,
+      permissions: {
+        can_create: false,
+        can_manage_active: false,
+        is_owner: false,
+        create_block_reason: 'submission_store_corrupt',
+      },
+    }).permissions.createBlockReason).toBe('submission_store_corrupt');
+    expect(() => parseWorkerStatus({
+      schema_version: 1,
+      ready: true,
+      active_batch: null,
+      permissions: {
+        can_create: false,
+        can_manage_active: false,
+        is_owner: false,
+        create_block_reason: null,
+      },
+    })).toThrow(/identify the idle create guard/i);
   });
 
   it('parses an ordered manifest and rejects response expansion', () => {
@@ -152,7 +182,7 @@ describe('strict worker renderer contracts', () => {
       schema_version: 1,
       ready: true,
       active_batch: null,
-      permissions: { can_create: true, can_manage_active: true, is_owner: false },
+      permissions: { can_create: true, can_manage_active: true, is_owner: false, create_block_reason: null },
     })).toThrow('mutation access');
   });
 

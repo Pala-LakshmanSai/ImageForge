@@ -9,6 +9,7 @@ import {
   HardDrive,
   Image,
   LockKeyhole,
+  ListPlus,
   ShieldCheck,
   Sparkles,
   Upload,
@@ -23,6 +24,7 @@ import { ASPECT_RATIOS } from '../domain/aspectRatio';
 import type { BatchReference, ReferenceMimeType } from '../domain/types';
 import { TERMINAL_BATCH_PHASES } from '../domain/types';
 import { Button, Eyebrow, PhaseBadge } from '../components/primitives';
+import { QueueRail } from '../components/QueueRail';
 import type { ScreenProps } from './types';
 
 function readiness(state: ScreenProps['state']) {
@@ -100,6 +102,11 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
   const terminalBatch = state.batch && TERMINAL_BATCH_PHASES.includes(state.batch.phase);
   const checklist = readiness(state);
   const isReady = canStartBatch(state);
+  const canStage = state.queue.loadState === 'ready'
+    && state.setup.completed
+    && state.draft.prompts.length > 0
+    && state.draft.destination !== null
+    && errors.length === 0;
 
   async function chooseDestination() {
     if (destinationLocked) return;
@@ -199,6 +206,8 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
         </div>
       </section>
 
+      <QueueRail state={state} dispatch={dispatch} />
+
       {activeBatch ? (
         <aside className="lock-banner" role="status">
           <span><LockKeyhole size={20} /></span>
@@ -206,7 +215,7 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
             <strong>{ownedActiveBatch ? 'Your batch is active' : 'Another batch is already running'}</strong>
             <p>{ownedActiveBatch
               ? `Your batch is ${state.batch?.phase.replace('_', ' ')} “${state.batch?.name}”. Open Progress to monitor it.`
-              : `${state.batch?.owner} is ${state.batch?.phase.replace('_', ' ')} “${state.batch?.name}”. ImageForge runs one batch at a time and does not queue another.`}</p>
+              : `${state.batch?.owner} is ${state.batch?.phase.replace('_', ' ')} “${state.batch?.name}”. The worker runs one batch at a time; drafts can still be staged on this device.`}</p>
           </div>
           <Button compact onClick={() => dispatch({ type: 'NAVIGATE', view: 'progress' })}>View progress</Button>
         </aside>
@@ -427,6 +436,15 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
               onClick={() => dispatch({ type: 'START_BATCH', startedAt: new Date().toISOString() })}
             >
               Generate {state.draft.prompts.length || ''} images
+            </Button>
+            <Button
+              className="queue-stage-button"
+              tone="secondary"
+              icon={ListPlus}
+              disabled={!canStage}
+              onClick={() => dispatch({ type: 'STAGE_DRAFT' })}
+            >
+              {state.draft.queueReplacementId ? 'Replace staged batch' : 'Add to device queue'}
             </Button>
             <p className="launch-panel__foot">ImageForge will not stop the GPU automatically.</p>
           </section>

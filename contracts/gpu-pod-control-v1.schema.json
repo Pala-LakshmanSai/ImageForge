@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://imageforge.local/contracts/gpu-pod-control-v1.schema.json",
+  "title": "ImageForge native Pod observation and normal Stop v1",
+  "oneOf": [
+    { "$ref": "#/$defs/podObservation" },
+    { "$ref": "#/$defs/normalStopInput" },
+    { "$ref": "#/$defs/normalStopResult" }
+  ],
+  "$defs": {
+    "uuidV4": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "podId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,56}[A-Za-z0-9])?$"
+    },
+    "gpuIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9 ._()+:-]{0,126}[A-Za-z0-9])?$"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "microUsd": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    },
+    "observedPod": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "podId",
+        "gpuId",
+        "gpuDisplayName",
+        "hourlyPriceMicroUsd",
+        "status"
+      ],
+      "properties": {
+        "podId": { "$ref": "#/$defs/podId" },
+        "gpuId": { "$ref": "#/$defs/gpuIdentity" },
+        "gpuDisplayName": { "$ref": "#/$defs/gpuIdentity" },
+        "hourlyPriceMicroUsd": {
+          "oneOf": [
+            { "$ref": "#/$defs/microUsd" },
+            { "type": "null" }
+          ]
+        },
+        "status": {
+          "enum": [
+            "provisioning",
+            "starting",
+            "running",
+            "exited",
+            "error",
+            "terminated",
+            "unknown"
+          ]
+        }
+      }
+    },
+    "observationIssue": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "retryable"],
+          "properties": {
+            "code": { "const": "gpu_pod_observation_unavailable" },
+            "retryable": { "const": true }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "retryable"],
+          "properties": {
+            "code": { "const": "gpu_pod_observation_invalid" },
+            "retryable": { "const": false }
+          }
+        }
+      ]
+    },
+    "podObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "processEpochId",
+        "lifecycleRevision",
+        "state",
+        "observedAt",
+        "stale",
+        "pods",
+        "overflow",
+        "issue"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "processEpochId": { "$ref": "#/$defs/uuidV4" },
+        "lifecycleRevision": { "$ref": "#/$defs/revision" },
+        "state": { "enum": ["offline", "single", "multiple", "unavailable"] },
+        "observedAt": {
+          "oneOf": [
+            { "$ref": "#/$defs/timestamp" },
+            { "type": "null" }
+          ]
+        },
+        "stale": { "type": "boolean" },
+        "pods": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/observedPod" }
+        },
+        "overflow": { "type": "boolean" },
+        "issue": {
+          "oneOf": [
+            { "$ref": "#/$defs/observationIssue" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "normalStopInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "podId",
+        "stopRequestId",
+        "sessionId",
+        "expectedServerInstanceId",
+        "expectedCoordinationRevision",
+        "expectedLifecycleRevision"
+      ],
+      "properties": {
+        "podId": { "$ref": "#/$defs/podId" },
+        "stopRequestId": { "$ref": "#/$defs/uuidV4" },
+        "sessionId": { "$ref": "#/$defs/uuidV4" },
+        "expectedServerInstanceId": { "$ref": "#/$defs/uuidV4" },
+        "expectedCoordinationRevision": { "$ref": "#/$defs/revision" },
+        "expectedLifecycleRevision": { "$ref": "#/$defs/revision" }
+      }
+    },
+    "normalStopIssue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "retryable"],
+      "properties": {
+        "code": { "const": "gpu_stop_delete_uncertain" },
+        "retryable": { "const": false }
+      }
+    },
+    "normalStopResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "operationId",
+        "podId",
+        "disposition",
+        "observation",
+        "issue"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "operationId": { "$ref": "#/$defs/uuidV4" },
+        "podId": { "$ref": "#/$defs/podId" },
+        "disposition": { "enum": ["stopped", "already_stopped", "delete_uncertain"] },
+        "observation": { "$ref": "#/$defs/podObservation" },
+        "issue": {
+          "oneOf": [
+            { "$ref": "#/$defs/normalStopIssue" },
+            { "type": "null" }
+          ]
+        }
+      }
+    }
+  }
+}

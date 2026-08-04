@@ -41,6 +41,9 @@ jobs:
       - name: Validate deterministic two-client fixture
         run: node scripts/native-two-client-smoke-server.mjs --self-test
 
+      - name: Validate queue release evidence contract
+        run: node scripts/validate-queue-release-smoke.mjs --self-test
+
       - name: Run frontend tests
         run: npm test
 
@@ -343,16 +346,139 @@ jobs:
             }
           }
 
-      - name: Upload failed Windows two-client smoke diagnostics
+      - name: Run installed Windows queue release smoke
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundleDir = Join-Path $env:GITHUB_WORKSPACE 'src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis'
+          $installer = @(Get-ChildItem -LiteralPath $bundleDir -Filter '*-setup.exe' -File)
+          if ($installer.Count -ne 1) {
+            throw "Expected exactly one NSIS installer in $bundleDir; found $($installer.Count)."
+          }
+          $buildDir = Join-Path $env:GITHUB_WORKSPACE 'src-tauri/target/x86_64-pc-windows-msvc/release'
+          $builtBinary = @(Get-ChildItem -LiteralPath $buildDir -Filter '*.exe' -File |
+            Where-Object { $_.Name -notmatch '(?i)(setup|uninstall)' })
+          if ($builtBinary.Count -ne 1) {
+            throw "Expected exactly one built application executable in $buildDir; found $($builtBinary.Count)."
+          }
+
+          $installRoot = Join-Path $env:RUNNER_TEMP 'imageforge-queue-release-smoke'
+          $stateRoot = Join-Path $env:RUNNER_TEMP 'imageforge-queue-release-state'
+          $profile = Join-Path $env:RUNNER_TEMP 'imageforge-queue-release-webview'
+          $output = Join-Path $env:RUNNER_TEMP 'imageforge-queue-release-output'
+          $result = Join-Path $env:RUNNER_TEMP 'imageforge-queue-release-result.txt'
+          $evidence = Join-Path $env:RUNNER_TEMP 'ImageForge-windows-queue-release-smoke.json'
+          $attestation = Join-Path $env:RUNNER_TEMP 'ImageForge-windows-queue-release-attestation.json'
+          $stdout = Join-Path $env:RUNNER_TEMP 'imageforge-queue-release-{0}.stdout'
+          $stderr = Join-Path $env:RUNNER_TEMP 'imageforge-queue-release-{0}.stderr'
+          $appProcess = $null
+          try {
+            foreach ($path in @($installRoot, $stateRoot, $profile, $output)) {
+              if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+              New-Item -ItemType Directory -Path $path -Force | Out-Null
+            }
+            foreach ($path in @($result, $evidence, $attestation)) {
+              Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            }
+            $roaming = Join-Path $stateRoot 'Roaming'
+            $local = Join-Path $stateRoot 'Local'
+            New-Item -ItemType Directory -Path $roaming, $local -Force | Out-Null
+            $installResult = Start-Process -FilePath $installer[0].FullName `
+              -ArgumentList @('/S', "/D=$installRoot") -Wait -PassThru
+            if ($installResult.ExitCode -ne 0) {
+              throw "Queue-release NSIS install failed with exit code $($installResult.ExitCode)."
+            }
+            $installedExe = Join-Path $installRoot $builtBinary[0].Name
+            if (-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) {
+              throw "Installed application executable was not found at $installedExe."
+            }
+
+            $phasePids = @()
+            foreach ($phase in @('run', 'resume', 'relaunch')) {
+              Remove-Item -LiteralPath $result -Force -ErrorAction SilentlyContinue
+              $phaseStdout = $stdout -f $phase
+              $phaseStderr = $stderr -f $phase
+              Remove-Item -LiteralPath $phaseStdout, $phaseStderr -Force -ErrorAction SilentlyContinue
+              $appProcess = Start-Process -FilePath $installedExe -WorkingDirectory $installRoot -PassThru `
+                -RedirectStandardOutput $phaseStdout -RedirectStandardError $phaseStderr -Environment @{
+                  IMAGEFORGE_NATIVE_SMOKE = 'queue-release'
+                  IMAGEFORGE_QUEUE_RELEASE_SMOKE_PHASE = $phase
+                  IMAGEFORGE_NATIVE_SMOKE_RESULT = $result
+                  IMAGEFORGE_QUEUE_RELEASE_SMOKE_EVIDENCE = $evidence
+                  IMAGEFORGE_QUEUE_RELEASE_SMOKE_ATTESTATION = $attestation
+                  IMAGEFORGE_QUEUE_RELEASE_SMOKE_OUTPUT = $output
+                  IMAGEFORGE_NATIVE_SMOKE_PROFILE = $profile
+                  APPDATA = $roaming
+                  LOCALAPPDATA = $local
+                }
+              $windowDeadline = (Get-Date).AddSeconds(30)
+              do {
+                Start-Sleep -Milliseconds 250
+                $appProcess.Refresh()
+                if ($appProcess.HasExited) {
+                  throw "Queue-release $phase process exited before creating a window: $(Get-Content -Raw -LiteralPath $phaseStderr -ErrorAction SilentlyContinue)"
+                }
+              } while ($appProcess.MainWindowHandle -eq 0 -and (Get-Date) -lt $windowDeadline)
+              if ($appProcess.MainWindowHandle -eq 0) { throw "The installed queue-release $phase process did not create a native window." }
+              $smokeDeadline = (Get-Date).AddMinutes(4)
+              while (-not (Test-Path -LiteralPath $result) -and (Get-Date) -lt $smokeDeadline) {
+                $appProcess.Refresh()
+                if ($appProcess.HasExited) { throw "Queue-release $phase process exited before reporting: $(Get-Content -Raw -LiteralPath $phaseStderr -ErrorAction SilentlyContinue)" }
+                Start-Sleep -Milliseconds 500
+              }
+              if (-not (Test-Path -LiteralPath $result)) { throw "The installed Windows queue-release $phase process timed out." }
+              $report = Get-Content -Raw -LiteralPath $result
+              $expectedHeader = if ($phase -eq 'run') { 'PHASE1_PASS' } elseif ($phase -eq 'resume') { 'PHASE2_PASS' } else { 'PASS' }
+              if ($report -notmatch "(?m)^$expectedHeader$") { throw "Installed Windows queue-release $phase failed: $report" }
+              $reportedPid = [regex]::Match($report, '(?m)^pid=(\d+); window=main;').Groups[1].Value
+              if ($reportedPid -ne [string]$appProcess.Id -or $phasePids -contains $reportedPid) { throw "The Windows queue-release $phase report did not come from one distinct installed process." }
+              $phasePids += $reportedPid
+              Stop-Process -Id $appProcess.Id -Force
+              $appProcess.WaitForExit(5000)
+              $appProcess = $null
+            }
+            if (-not (Test-Path -LiteralPath $evidence) -or -not (Test-Path -LiteralPath $attestation)) { throw 'The final Windows queue-release evidence files are missing.' }
+            node scripts/validate-queue-release-smoke.mjs $evidence $attestation $output
+            if ($LASTEXITCODE -ne 0) { throw 'Windows queue-release evidence validation failed.' }
+            Copy-Item -LiteralPath $evidence -Destination (Join-Path $bundleDir 'ImageForge-windows-queue-release-smoke.json') -Force
+            Copy-Item -LiteralPath $attestation -Destination (Join-Path $bundleDir 'ImageForge-windows-queue-release-attestation.json') -Force
+            Copy-Item -LiteralPath $result -Destination (Join-Path $bundleDir 'ImageForge-windows-queue-release-result.txt') -Force
+          }
+          finally {
+            if ($null -ne $appProcess -and -not $appProcess.HasExited) {
+              Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
+              $appProcess.WaitForExit(5000)
+            }
+            if (Test-Path -LiteralPath $installRoot) {
+              $uninstaller = Join-Path $installRoot 'uninstall.exe'
+              if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
+                $uninstallResult = Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait -PassThru
+                if ($uninstallResult.ExitCode -ne 0) {
+                  throw "Queue-release NSIS uninstall failed with exit code $($uninstallResult.ExitCode)."
+                }
+              }
+            }
+            foreach ($path in @($installRoot, $stateRoot, $profile, $output)) {
+              Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+              if (Test-Path -LiteralPath $path) { throw "Queue-release temporary path remained: $path" }
+            }
+          }
+
+      - name: Upload failed Windows queue and two-client smoke diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: imageforge-windows-two-client-smoke-diagnostics-${{ github.run_id }}
+          name: imageforge-windows-native-smoke-diagnostics-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/imageforge-native-smoke-*.txt
             ${{ runner.temp }}/ImageForge-windows-two-client-smoke-audit.json
             ${{ runner.temp }}/imageforge-two-client-server.stdout
             ${{ runner.temp }}/imageforge-two-client-server.stderr
+            ${{ runner.temp }}/imageforge-queue-release-result.txt
+            ${{ runner.temp }}/ImageForge-windows-queue-release-smoke.json
+            ${{ runner.temp }}/ImageForge-windows-queue-release-attestation.json
+            ${{ runner.temp }}/imageforge-queue-release-*.stdout
+            ${{ runner.temp }}/imageforge-queue-release-*.stderr
           if-no-files-found: ignore
 
       - name: Write Windows release metadata
@@ -372,6 +498,9 @@ jobs:
           $twoClientAuditHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $twoClientAudit).Hash.ToLowerInvariant()
           $twoClientResultA = Join-Path $bundleDir 'ImageForge-windows-two-client-A.txt'
           $twoClientResultB = Join-Path $bundleDir 'ImageForge-windows-two-client-B.txt'
+          $queueReleaseEvidence = Join-Path $bundleDir 'ImageForge-windows-queue-release-smoke.json'
+          $queueReleaseAttestation = Join-Path $bundleDir 'ImageForge-windows-queue-release-attestation.json'
+          $queueReleaseResult = Join-Path $bundleDir 'ImageForge-windows-queue-release-result.txt'
           [ordered]@{
             product = 'ImageForge'
             version = [string]$package.version
@@ -392,6 +521,13 @@ jobs:
             two_client_result_a_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $twoClientResultA).Hash.ToLowerInvariant()
             two_client_result_b = 'ImageForge-windows-two-client-B.txt'
             two_client_result_b_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $twoClientResultB).Hash.ToLowerInvariant()
+            queue_release_smoke = 'three distinct installed processes; native restart pause, 450-row DOM caps, 30 trusted OS-key move samples, native JPEG receipts, keep-awake cleanup, Ring-now/audio/snooze relaunch, zero provider mutations'
+            queue_release_evidence = 'ImageForge-windows-queue-release-smoke.json'
+            queue_release_evidence_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $queueReleaseEvidence).Hash.ToLowerInvariant()
+            queue_release_attestation = 'ImageForge-windows-queue-release-attestation.json'
+            queue_release_attestation_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $queueReleaseAttestation).Hash.ToLowerInvariant()
+            queue_release_result = 'ImageForge-windows-queue-release-result.txt'
+            queue_release_result_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $queueReleaseResult).Hash.ToLowerInvariant()
           } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 -LiteralPath (Join-Path $bundleDir 'ImageForge-windows-release-metadata.json')
 
       - name: Upload Windows installer
@@ -404,6 +540,9 @@ jobs:
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ImageForge-windows-two-client-smoke-audit.json
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ImageForge-windows-two-client-A.txt
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ImageForge-windows-two-client-B.txt
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ImageForge-windows-queue-release-smoke.json
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ImageForge-windows-queue-release-attestation.json
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ImageForge-windows-queue-release-result.txt
           if-no-files-found: error
 
   macos:
@@ -424,6 +563,9 @@ jobs:
 
       - name: Validate deterministic two-client fixture
         run: node scripts/native-two-client-smoke-server.mjs --self-test
+
+      - name: Validate queue release evidence contract
+        run: node scripts/validate-queue-release-smoke.mjs --self-test
 
       - name: Run frontend tests
         run: npm test
@@ -667,11 +809,134 @@ jobs:
           printf 'PASS\nUI: %s\nTwo-client: %s | %s\n' "$ui_detail" "$detail_a" "$detail_b" \
             > "$RUNNER_TEMP/imageforge-native-smoke-result.txt"
 
-      - name: Upload failed macOS two-client smoke diagnostics
+      - name: Run installed macOS queue release smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_dir="$GITHUB_WORKSPACE/src-tauri/target/aarch64-apple-darwin/release/bundle"
+          dmg_candidates=()
+          while IFS= read -r candidate; do dmg_candidates+=("$candidate"); done \
+            < <(find "$bundle_dir/dmg" -maxdepth 1 -type f -name 'ImageForge_*_aarch64.dmg' -print)
+          if [ "${#dmg_candidates[@]}" -ne 1 ]; then
+            echo "Expected exactly one ImageForge DMG; found ${#dmg_candidates[@]}." >&2
+            exit 1
+          fi
+          mount_dir="$(mktemp -d "$RUNNER_TEMP/imageforge-queue-dmg.XXXXXX")"
+          install_root="$(mktemp -d "$RUNNER_TEMP/imageforge-queue-installed.XXXXXX")"
+          smoke_home="$(mktemp -d "$RUNNER_TEMP/imageforge-queue-home.XXXXXX")"
+          output="$smoke_home/output"
+          result="$RUNNER_TEMP/imageforge-queue-release-result.txt"
+          evidence="$RUNNER_TEMP/ImageForge-macos-queue-release-smoke.json"
+          attestation="$RUNNER_TEMP/ImageForge-macos-queue-release-attestation.json"
+          log_prefix="$RUNNER_TEMP/imageforge-queue-release"
+          app_pid=""
+          mounted=0
+          stop_app() {
+            if [ -n "$app_pid" ] && kill -0 "$app_pid" 2>/dev/null; then
+              kill "$app_pid" 2>/dev/null || true
+              for _ in $(seq 1 10); do
+                if ! kill -0 "$app_pid" 2>/dev/null; then break; fi
+                sleep 1
+              done
+              if kill -0 "$app_pid" 2>/dev/null; then kill -9 "$app_pid" 2>/dev/null || true; fi
+              wait "$app_pid" 2>/dev/null || true
+            fi
+            app_pid=""
+          }
+          cleanup() {
+            local status=$?
+            stop_app
+            if [ "$mounted" -eq 1 ]; then
+              if hdiutil detach "$mount_dir" -force >/dev/null 2>&1; then mounted=0; else status=1; fi
+            fi
+            if [ "$mounted" -eq 0 ]; then rm -rf "$mount_dir"; fi
+            rm -rf "$install_root" "$smoke_home"
+            trap - EXIT
+            exit "$status"
+          }
+          trap cleanup EXIT
+          rm -f "$result" "$evidence" "$attestation" "$log_prefix"-*.log
+          mkdir -p "$smoke_home/tmp" "$output"
+
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" "${dmg_candidates[0]}" >/dev/null
+          mounted=1
+          app_candidates=()
+          while IFS= read -r candidate; do app_candidates+=("$candidate"); done \
+            < <(find "$mount_dir" -maxdepth 2 -type d -name 'ImageForge.app' -print)
+          if [ "${#app_candidates[@]}" -ne 1 ]; then
+            echo "Expected exactly one ImageForge.app in the mounted DMG; found ${#app_candidates[@]}." >&2
+            exit 1
+          fi
+          installed_app="$install_root/ImageForge.app"
+          ditto "${app_candidates[0]}" "$installed_app"
+          codesign --verify --deep --strict --verbose=2 "$installed_app"
+          binary_candidates=()
+          while IFS= read -r candidate; do binary_candidates+=("$candidate"); done \
+            < <(find "$installed_app/Contents/MacOS" -maxdepth 1 -type f -perm -111 -print)
+          if [ "${#binary_candidates[@]}" -ne 1 ]; then
+            echo "Expected exactly one installed ImageForge executable; found ${#binary_candidates[@]}." >&2
+            exit 1
+          fi
+
+          observed_pids=""
+          for phase in run resume relaunch; do
+            rm -f "$result"
+            log="$log_prefix-$phase.log"
+            HOME="$smoke_home" TMPDIR="$smoke_home/tmp" \
+              IMAGEFORGE_NATIVE_SMOKE=queue-release \
+              IMAGEFORGE_QUEUE_RELEASE_SMOKE_PHASE="$phase" \
+              IMAGEFORGE_NATIVE_SMOKE_RESULT="$result" \
+              IMAGEFORGE_QUEUE_RELEASE_SMOKE_EVIDENCE="$evidence" \
+              IMAGEFORGE_QUEUE_RELEASE_SMOKE_ATTESTATION="$attestation" \
+              IMAGEFORGE_QUEUE_RELEASE_SMOKE_OUTPUT="$output" \
+              "${binary_candidates[0]}" >"$log" 2>&1 &
+            app_pid=$!
+            smoke_deadline=$((SECONDS + 240))
+            while [ ! -f "$result" ] && [ "$SECONDS" -lt "$smoke_deadline" ]; do
+              if ! kill -0 "$app_pid" 2>/dev/null; then
+                cat "$log" >&2 || true
+                echo "The installed queue-release $phase process exited before reporting." >&2
+                exit 1
+              fi
+              sleep 0.5
+            done
+            if [ ! -f "$result" ]; then
+              cat "$log" >&2 || true
+              echo "The installed macOS queue-release $phase process timed out." >&2
+              exit 1
+            fi
+            case "$phase" in
+              run) expected_header=PHASE1_PASS ;;
+              resume) expected_header=PHASE2_PASS ;;
+              relaunch) expected_header=PASS ;;
+            esac
+            if ! grep -q "^$expected_header$" "$result"; then
+              cat "$result" >&2 || true
+              cat "$log" >&2 || true
+              exit 1
+            fi
+            reported_pid="$(sed -n 's/^pid=\([0-9][0-9]*\); window=main;.*/\1/p' "$result")"
+            if [ "$reported_pid" != "$app_pid" ] || [[ " $observed_pids " == *" $reported_pid "* ]]; then
+              echo "The macOS queue-release $phase report did not come from one distinct installed process." >&2
+              exit 1
+            fi
+            observed_pids="$observed_pids $reported_pid"
+            stop_app
+          done
+          if [ ! -f "$evidence" ] || [ ! -f "$attestation" ]; then
+            echo 'The final macOS queue-release evidence files are missing.' >&2
+            exit 1
+          fi
+          node scripts/validate-queue-release-smoke.mjs "$evidence" "$attestation" "$output"
+          cp "$evidence" "$bundle_dir/dmg/ImageForge-macos-queue-release-smoke.json"
+          cp "$attestation" "$bundle_dir/dmg/ImageForge-macos-queue-release-attestation.json"
+          cp "$result" "$bundle_dir/dmg/ImageForge-macos-queue-release-result.txt"
+
+      - name: Upload failed macOS queue and two-client smoke diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: imageforge-macos-two-client-smoke-diagnostics-${{ github.run_id }}
+          name: imageforge-macos-native-smoke-diagnostics-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/imageforge-native-smoke-*.txt
             ${{ runner.temp }}/ImageForge-macos-two-client-smoke-audit.json
@@ -679,6 +944,10 @@ jobs:
             ${{ runner.temp }}/imageforge-two-client-server.stderr
             ${{ runner.temp }}/imageforge-client-a.log
             ${{ runner.temp }}/imageforge-client-b.log
+            ${{ runner.temp }}/imageforge-queue-release-result.txt
+            ${{ runner.temp }}/ImageForge-macos-queue-release-smoke.json
+            ${{ runner.temp }}/ImageForge-macos-queue-release-attestation.json
+            ${{ runner.temp }}/imageforge-queue-release-*.log
           if-no-files-found: ignore
 
       - name: Write macOS release metadata
@@ -695,6 +964,12 @@ jobs:
           two_client_audit_hash="$(shasum -a 256 "$two_client_audit" | awk '{print $1}')"
           two_client_result_a_hash="$(shasum -a 256 "$bundle_dir/dmg/ImageForge-macos-two-client-A.txt" | awk '{print $1}')"
           two_client_result_b_hash="$(shasum -a 256 "$bundle_dir/dmg/ImageForge-macos-two-client-B.txt" | awk '{print $1}')"
+          queue_release_evidence="$bundle_dir/dmg/ImageForge-macos-queue-release-smoke.json"
+          queue_release_attestation="$bundle_dir/dmg/ImageForge-macos-queue-release-attestation.json"
+          queue_release_result="$bundle_dir/dmg/ImageForge-macos-queue-release-result.txt"
+          queue_release_evidence_hash="$(shasum -a 256 "$queue_release_evidence" | awk '{print $1}')"
+          queue_release_attestation_hash="$(shasum -a 256 "$queue_release_attestation" | awk '{print $1}')"
+          queue_release_result_hash="$(shasum -a 256 "$queue_release_result" | awk '{print $1}')"
           cat > "$bundle_dir/dmg/ImageForge-macos-release-metadata.json" <<EOF
           {
             "product": "ImageForge",
@@ -715,7 +990,14 @@ jobs:
             "two_client_result_a": "ImageForge-macos-two-client-A.txt",
             "two_client_result_a_sha256": "$two_client_result_a_hash",
             "two_client_result_b": "ImageForge-macos-two-client-B.txt",
-            "two_client_result_b_sha256": "$two_client_result_b_hash"
+            "two_client_result_b_sha256": "$two_client_result_b_hash",
+            "queue_release_smoke": "three distinct installed processes; native restart pause, 450-row DOM caps, 30 trusted OS-key move samples, native JPEG receipts, keep-awake cleanup, Ring-now/audio/snooze relaunch, zero provider mutations",
+            "queue_release_evidence": "ImageForge-macos-queue-release-smoke.json",
+            "queue_release_evidence_sha256": "$queue_release_evidence_hash",
+            "queue_release_attestation": "ImageForge-macos-queue-release-attestation.json",
+            "queue_release_attestation_sha256": "$queue_release_attestation_hash",
+            "queue_release_result": "ImageForge-macos-queue-release-result.txt",
+            "queue_release_result_sha256": "$queue_release_result_hash"
           }
           EOF
 
@@ -730,4 +1012,7 @@ jobs:
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge-macos-two-client-smoke-audit.json
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge-macos-two-client-A.txt
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge-macos-two-client-B.txt
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge-macos-queue-release-smoke.json
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge-macos-queue-release-attestation.json
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge-macos-queue-release-result.txt
           if-no-files-found: error

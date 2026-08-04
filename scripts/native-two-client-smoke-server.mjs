@@ -695,14 +695,16 @@ export class NativeTwoClientSmokeAuthority {
       this.idleObservers.add(role);
     }
     const owner = active?.ownerRole === role;
+    const stopFinalizing = active === null && this.stopRequest?.state === 'finalizing';
     return success(200, {
       schema_version: 1,
       ready: true,
       active_batch: this.#activeSummary(),
       permissions: {
-        can_create: active === null && this.stopRequest?.state !== 'finalizing',
+        can_create: active === null && !stopFinalizing,
         can_manage_active: owner,
         is_owner: owner,
+        create_block_reason: stopFinalizing ? 'gpu_stop_pending' : null,
       },
     }, active === null ? 'idle' : `active_${active.ownerRole}`);
   }
@@ -1023,6 +1025,11 @@ export class NativeTwoClientSmokeAuthority {
           ? request.finalizationId
           : null,
       },
+      // Keep the fixture Studio projection aligned with the strict renderer
+      // contract. Task-012 has no GPU Switch scenario, so both fields are
+      // explicitly empty/false rather than omitted.
+      gpu_switch_request: null,
+      gpu_switch_can_respond: false,
     };
     this.#markStopStateObserved(currentRole, request?.state ?? 'idle');
     return state;

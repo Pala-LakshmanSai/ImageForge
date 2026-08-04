@@ -130,6 +130,13 @@ pub struct WorkerSessionPin {
 }
 
 impl WorkerSessionPin {
+    /// The exact Pod held by this pin.  This is crate-private so native
+    /// coordination can bind its durable authority to the same immutable
+    /// worker origin without exposing it through renderer IPC.
+    pub(crate) fn pod_id(&self) -> &str {
+        &self.pod_id
+    }
+
     pub fn endpoint(&self, path: &str) -> NativeResult<Url> {
         validate_worker_path(path)?;
         Url::parse(&format!("{}{path}", worker_origin(&self.pod_id))).map_err(|_| {

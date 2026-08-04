@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "qa-gpu-selector-perf-v1",
+  "description": "Installed-only GPU selector performance harness capability",
+  "windows": ["main"],
+  "permissions": [
+    "gpu-selector-perf:allow-arm",
+    "gpu-selector-perf:allow-commit"
+  ]
+}

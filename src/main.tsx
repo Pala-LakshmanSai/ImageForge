@@ -7,11 +7,17 @@ import { createConfiguredInitialState, createInitialState } from './domain/reduc
 import { createNativeProductionPort } from './native/productionPort';
 import { isNativeDesktop } from './native/tauriBridge';
 import { runNativeSmoke } from './native/nativeSmoke';
+import {
+  QueueReleaseSmokeController,
+  QueueReleaseSmokeHarness,
+  runQueueReleaseSmoke,
+} from './native/queueReleaseSmoke';
 import { runTwoClientNativeSmoke } from './native/twoClientNativeSmoke';
 import { createTwoClientSmokePort, type TwoClientSmokeRole } from './native/twoClientSmokePort';
 
 const native = isNativeDesktop();
-const nativeSmoke = native && window.__IMAGEFORGE_NATIVE_SMOKE__ === true;
+const queueReleaseSmoke = native && window.__IMAGEFORGE_QUEUE_RELEASE_SMOKE__ === true;
+const nativeSmoke = native && !queueReleaseSmoke && window.__IMAGEFORGE_NATIVE_SMOKE__ === true;
 const twoClientRole = nativeSmoke && ['A', 'B'].includes(window.__IMAGEFORGE_NATIVE_SMOKE_ROLE__ ?? '')
   ? window.__IMAGEFORGE_NATIVE_SMOKE_ROLE__ as TwoClientSmokeRole
   : null;
@@ -39,14 +45,19 @@ const adapter = twoClientFixture !== null
       recoveredBatch?.name ?? null,
     )
   : undefined;
+const queueReleaseController = queueReleaseSmoke ? new QueueReleaseSmokeController() : null;
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App initialState={initialState} adapter={adapter} />
+    {queueReleaseController
+      ? <QueueReleaseSmokeHarness controller={queueReleaseController} />
+      : <App initialState={initialState} adapter={adapter} />}
   </StrictMode>,
 );
 
-if (twoClientRole !== null && twoClientFixture !== null && adapter?.runtime) {
+if (queueReleaseController !== null) {
+  window.setTimeout(() => void runQueueReleaseSmoke(queueReleaseController), 900);
+} else if (twoClientRole !== null && twoClientFixture !== null && adapter?.runtime) {
   window.setTimeout(
     () => void runTwoClientNativeSmoke(twoClientRole, adapter.runtime!, twoClientFixture),
     1_200,

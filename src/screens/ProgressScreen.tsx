@@ -24,6 +24,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { batchCounts } from '../domain/reducer';
 import type { BatchPrompt, BatchState } from '../domain/types';
 import { aspectRatioOption } from '../domain/aspectRatio';
+import { ACTIVE_PROMPT_VISIBLE_ROW_LIMIT, isQueuePlaceholder } from '../domain/queue';
 import { SimulatedImage } from '../components/SimulatedImage';
 import { PreviewImage } from '../components/PreviewImage';
 import { Button, EmptyState, Eyebrow, LinearProgress, Metric, PhaseBadge, RingProgress } from '../components/primitives';
@@ -125,7 +126,7 @@ function PromptQueue({
     const overscan = 4;
     const start = Math.max(0, Math.floor(scrollTop / PROMPT_ROW_HEIGHT) - overscan);
     const visible = Math.ceil(viewportHeight / PROMPT_ROW_HEIGHT) + overscan * 2;
-    return { start, end: Math.min(prompts.length, start + visible) };
+    return { start, end: Math.min(prompts.length, start + Math.min(ACTIVE_PROMPT_VISIBLE_ROW_LIMIT, visible)) };
   }, [prompts.length, scrollTop, viewportHeight]);
 
   return (
@@ -342,6 +343,13 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
   const revealTarget = batch.prompts.find(
     (prompt) => prompt.status === 'downloaded' && prompt.filename,
   )?.filename;
+  const queueRun = state.queue.document.run;
+  const queueIndex = batch.queueItemId && queueRun
+    ? queueRun.cohortItemIds.indexOf(batch.queueItemId)
+    : -1;
+  const nextQueueRow = queueRun && queueIndex >= 0
+    ? state.queue.document.items.find((row) => row.queueItemId === queueRun.cohortItemIds[queueIndex + 1])
+    : undefined;
 
   return (
     <div className="screen progress-screen">
@@ -391,6 +399,13 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
           {settled ? <Button tone="primary" icon={Sparkles} onClick={() => dispatch({ type: 'NEW_BATCH' })}>New brief</Button> : null}
         </div>
       </section>
+      {queueRun && queueIndex >= 0 ? (
+        <aside className="queue-progress-context" role="status">
+          <span><strong>Batch {queueIndex + 1} of {queueRun.cohortItemIds.length}</strong> in this device queue</span>
+          <span>{nextQueueRow && !isQueuePlaceholder(nextQueueRow) ? `Next: ${nextQueueRow.name} · ${nextQueueRow.prompts.length} prompts` : 'This is the final staged batch.'}</span>
+          <Button compact tone="secondary" onClick={() => dispatch({ type: 'NAVIGATE', view: 'create' })}>View queue</Button>
+        </aside>
+      ) : null}
 
       {isLocked ? (
         <aside className="state-banner state-banner--locked" role="status">

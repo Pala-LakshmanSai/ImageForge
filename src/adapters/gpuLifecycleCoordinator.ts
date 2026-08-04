@@ -1,20 +1,40 @@
 import {
   HttpWorkerHealthProbe as RunPodHealthProbe,
   RunPodLifecycleController,
-  RunPodRestProvider,
+  type GpuAutoSelectionSourceV1,
+  type NativeGpuInventorySnapshotV1,
   type RunPodClientConfig,
   type RunPodClientConfigInput,
   type RunPodSnapshot,
   type StopGuard,
 } from '@imageforge/runpod-client';
-import { NATIVE_RUNPOD_API_KEY_SENTINEL } from '../native/tauriBridge';
 import { IMAGEFORGE_WORKER_IMAGE, parseStudioProfile, type StudioProfile } from './imageForgeAdapter';
+import {
+  NativeGpuInventoryCoordinator,
+  type NativeGpuInventoryPort,
+} from './nativeGpuInventoryCoordinator';
+import type {
+  NativeAutoGpuStartV1,
+  NativeGpuStartPort,
+  NativeGpuStartResultV1,
+  NativeManualGpuActualPriceV1,
+  NativeManualGpuStartV1,
+} from '../native/gpuStartBridge';
+import type {
+  NativeGpuNormalStopResultV1,
+  NativeGpuNormalStopV1,
+  NativeGpuPodObservationV1,
+  NativeGpuPodPort,
+} from '../native/gpuPodBridge';
+import { NativeObservedRunPodProvider } from './nativeRunPodProvider';
 
 const MODEL_REVISION = 'e7b7dc27f91deacad38e78976d1f2b499d76a294';
 
 export interface GpuLifecycleNativePort {
-  runPodFetch: typeof fetch;
   workerHealthFetch: typeof fetch;
+  gpuInventory: NativeGpuInventoryPort;
+  gpuStart: NativeGpuStartPort;
+  gpuPod: NativeGpuPodPort;
   bindProfile(templateId: string, networkVolumeId: string): Promise<void>;
   authorizeStart(allowSlowEmergency: boolean): Promise<void>;
   clearStartAuthorization(): Promise<void>;
@@ -24,7 +44,16 @@ export interface GpuLifecycleNativePort {
 export type LifecycleControllerFactory = (
   config: RunPodClientConfigInput,
   stopGuard?: StopGuard,
+  gpuSelectionSource?: GpuAutoSelectionSourceV1,
 ) => RunPodLifecycleController;
+
+export interface NativeNormalGpuStopAuthority {
+  readonly podId: string;
+  readonly stopRequestId: string;
+  readonly sessionId: string;
+  readonly expectedServerInstanceId: string;
+  readonly expectedCoordinationRevision: number;
+}
 
 function configFor(profile: StudioProfile, allowSlowEmergency: boolean): RunPodClientConfigInput {
   return {
@@ -74,6 +103,8 @@ export class GpuLifecycleCoordinator {
   readonly #port: GpuLifecycleNativePort;
   readonly #factory: LifecycleControllerFactory;
   readonly #stopGuard: StopGuard | undefined;
+  readonly #inventory: NativeGpuInventoryCoordinator;
+  readonly #nativeProvider: NativeObservedRunPodProvider;
   readonly #listeners = new Set<(snapshot: RunPodSnapshot) => void>();
   #controller: RunPodLifecycleController | null = null;
   #fingerprint: string | null = null;
@@ -87,16 +118,15 @@ export class GpuLifecycleCoordinator {
   constructor(port: GpuLifecycleNativePort, factory?: LifecycleControllerFactory, stopGuard?: StopGuard) {
     this.#port = port;
     this.#stopGuard = stopGuard;
-    this.#factory = factory ?? ((config, controllerStopGuard) => {
-      const provider = new RunPodRestProvider({
-        apiKeyProvider: () => NATIVE_RUNPOD_API_KEY_SENTINEL,
-        fetchTransport: port.runPodFetch,
-      });
+    this.#inventory = new NativeGpuInventoryCoordinator(port.gpuInventory);
+    this.#nativeProvider = new NativeObservedRunPodProvider(port.gpuPod);
+    this.#factory = factory ?? ((config, controllerStopGuard, gpuSelectionSource) => {
       return new RunPodLifecycleController({
-        provider,
+        provider: this.#nativeProvider,
         config,
         workerHealthProbe: new RunPodHealthProbe({ fetchTransport: port.workerHealthFetch }),
         stopGuard: controllerStopGuard,
+        gpuSelectionSource,
       });
     });
   }
@@ -111,6 +141,56 @@ export class GpuLifecycleCoordinator {
     return this.#controller?.getSnapshot() ?? null;
   }
 
+  getInventorySnapshot(): NativeGpuInventorySnapshotV1 | null {
+    return this.#inventory.getSnapshot();
+  }
+
+  subscribeInventory(listener: (snapshot: NativeGpuInventorySnapshotV1) => void): () => void {
+    return this.#inventory.subscribe(listener);
+  }
+
+  loadInventory(): Promise<NativeGpuInventorySnapshotV1> {
+    return this.#inventory.load();
+  }
+
+  beginInventoryRefresh(includeEmergencyTier: boolean): Promise<NativeGpuInventorySnapshotV1> {
+    return this.#inventory.beginVisibleRefresh(includeEmergencyTier);
+  }
+
+  async prepareInventory(
+    profileSource: string,
+    allowSlowEmergency: boolean,
+  ): Promise<NativeGpuInventorySnapshotV1> {
+    await this.#ensureController(profileSource, allowSlowEmergency);
+    return this.#inventory.beginVisibleRefresh(allowSlowEmergency);
+  }
+
+  loadStart(): Promise<NativeGpuStartResultV1 | null> {
+    return this.#port.gpuStart.load();
+  }
+
+  async startAuto(
+    profileSource: string,
+    allowSlowEmergency: boolean,
+    input: NativeAutoGpuStartV1,
+  ): Promise<NativeGpuStartResultV1> {
+    await this.#ensureController(profileSource, allowSlowEmergency);
+    return this.#port.gpuStart.startAuto(input);
+  }
+
+  async startSelected(
+    profileSource: string,
+    allowSlowEmergency: boolean,
+    input: NativeManualGpuStartV1,
+  ): Promise<NativeGpuStartResultV1> {
+    await this.#ensureController(profileSource, allowSlowEmergency);
+    return this.#port.gpuStart.startSelected(input);
+  }
+
+  confirmActualPrice(input: NativeManualGpuActualPriceV1): Promise<NativeGpuStartResultV1> {
+    return this.#port.gpuStart.confirmActualPrice(input);
+  }
+
   async refresh(
     profileSource: string,
     expectedImageCount = 450,
@@ -121,7 +201,7 @@ export class GpuLifecycleCoordinator {
     // behind a slow advisory heartbeat. Abort the receipt-free observation;
     // its queued lifecycle work sees the same signal and becomes inert.
     this.#observationAbort?.abort();
-    return controller.refresh({ expectedImageCount });
+    return controller.observePods({ expectedImageCount });
   }
 
   /**
@@ -138,7 +218,7 @@ export class GpuLifecycleCoordinator {
     if (this.#observationPromise !== null) return this.#observationPromise;
     const abort = new AbortController();
     this.#observationAbort = abort;
-    const operation = controller.refresh({
+    const operation = controller.observePods({
       expectedImageCount,
       suppressTransientPhase: true,
       signal: abort.signal,
@@ -200,54 +280,132 @@ export class GpuLifecycleCoordinator {
     return snapshot;
   }
 
-  async stop(podId: string): Promise<RunPodSnapshot & { readonly alreadyStopped: boolean }> {
+  async stop(
+    authority: NativeNormalGpuStopAuthority,
+  ): Promise<RunPodSnapshot & { readonly alreadyStopped: boolean }> {
     const controller = this.#controller;
     if (controller === null) throw new Error('Refresh the ImageForge Pod before stopping it.');
-    const confirmation = controller.requestStopConfirmation({
-      intent: 'stop_gpu',
-      source: 'foreground_user',
-      podId,
-    });
-    let result: RunPodSnapshot;
-    try {
-      result = (await controller.stopGpu({
-        intent: 'confirm_stop_gpu',
-        source: 'foreground_user',
-        podId,
-        confirmationToken: confirmation.token,
-      })).snapshot;
-    } catch (error) {
-      const code = typeof error === 'object' && error !== null && 'code' in error
-        ? error.code
-        : null;
-      // A preflight absence or profile drift is not a completed Stop. Refresh
-      // so every observer sees a replacement/offline truth, but preserve the
-      // failure and the existing worker binding until ordinary offline
-      // reconciliation handles it.
-      if (code === 'termination_target_mismatch') {
-        await controller.refresh({
-          expectedImageCount: controller.getSnapshot().expectedImageCount,
-        });
-        throw error;
-      }
-      // A Pod can disappear in the small gap after the fresh preflight and
-      // before DELETE. Only that typed DELETE absence is safely reconcilable;
-      // auth, timeout, and 5xx errors must remain errors for the operator.
-      if (code !== 'pod_not_found') throw error;
-      const reconciled = await controller.refresh({
-        expectedImageCount: controller.getSnapshot().expectedImageCount,
-      });
-      // `pod_not_found` reaches this branch only after the exact Pod passed
-      // lifecycle revalidation and RunPod then returned DELETE 404. A newly
-      // active replacement must never be collapsed into "already stopped".
-      const anyActive = reconciled.pods.some((pod) =>
-        ['provisioning', 'starting', 'running', 'unknown', 'error'].includes(pod.status));
-      if (anyActive) throw error;
-      await this.#port.clearWorkerSession();
-      return Object.freeze({ ...reconciled, alreadyStopped: true });
+    // The input revision must name the exact current native Pod projection.
+    // Production normally already has this from observe/refresh; a newly
+    // constructed controller may establish it once here before the mutation.
+    const current = this.#nativeProvider.lastObservation ?? await this.#port.gpuPod.observe();
+    if (
+      current.overflow
+      || current.pods.every((pod) => pod.podId !== authority.podId)
+    ) {
+      throw Object.assign(
+        new Error('The confirmed Pod changed before native Stop authorization.'),
+        { code: 'termination_target_mismatch', retryable: false, mayHaveSucceeded: false },
+      );
     }
+
+    const nativeResult = await this.#port.gpuPod.normalStop({
+      ...authority,
+      expectedLifecycleRevision: current.lifecycleRevision,
+    });
+
+    return this.#applyNormalStopResult(authority.podId, nativeResult, current);
+  }
+
+  /**
+   * Replays only the exact input returned by `gpu_normal_stop_load`.
+   * Do not rebuild its process/session/revision fields from renderer state:
+   * native journal identity is the authority that makes this path
+   * observation-only after relaunch.
+   */
+  async recoverStop(
+    input: NativeGpuNormalStopV1,
+  ): Promise<RunPodSnapshot & { readonly alreadyStopped: boolean }> {
+    const controller = this.#controller;
+    if (controller === null) {
+      throw new Error('Refresh the ImageForge Pod before recovering its interrupted Stop.');
+    }
+    const nativeResult = await this.#port.gpuPod.normalStop(input);
+    return this.#applyNormalStopResult(input.podId, nativeResult, null);
+  }
+
+  async #applyNormalStopResult(
+    podId: string,
+    nativeResult: NativeGpuNormalStopResultV1,
+    freshBase: NativeGpuPodObservationV1 | null,
+  ): Promise<RunPodSnapshot & { readonly alreadyStopped: boolean }> {
+    const controller = this.#controller;
+    if (controller === null) {
+      throw new Error('Refresh the ImageForge Pod before applying its native Stop result.');
+    }
+
+    if (nativeResult.disposition === 'delete_uncertain') {
+      // The strict uncertainty result intentionally retains the old Pod. Keep
+      // the already-visible lifecycle projection and worker binding exactly as
+      // they are; an unavailable retained observation is evidence, not fresh
+      // authority, and must not collapse the UI to Offline or trigger retry.
+      this.#nativeProvider.useRetainedStopObservationOnce(nativeResult.observation);
+      try {
+        await controller.observePods({
+          expectedImageCount: controller.getSnapshot().expectedImageCount,
+          suppressTransientPhase: true,
+        });
+      } finally {
+        this.#nativeProvider.clearRetainedStopObservation();
+      }
+      throw Object.assign(
+        new Error('RunPod did not confirm whether termination completed. Check the RunPod dashboard before taking another action.'),
+        {
+          code: 'gpu_stop_delete_uncertain',
+          retryable: false,
+          mayHaveSucceeded: true,
+        },
+      );
+    }
+
+    // A fresh native Stop owns exactly R+1 preflight and R+2 settlement reads.
+    // Consume that R+2 result directly so the renderer cannot add an unbound
+    // third provider GET. Relaunch recovery has no live base; a completed
+    // journal replay therefore remains historical evidence and must obtain a
+    // current projection before clearing the proxy/session binding.
+    const isFreshSettlement = freshBase !== null
+      && nativeResult.observation.processEpochId === freshBase.processEpochId
+      && nativeResult.observation.lifecycleRevision === freshBase.lifecycleRevision + 2;
+    const currentProjection = isFreshSettlement
+      ? nativeResult.observation
+      : await this.#port.gpuPod.observe();
+    const oldPodStillPresent = currentProjection.pods.some(
+      (pod) => pod.podId === podId,
+    );
+    if (
+      currentProjection.state === 'unavailable'
+      || currentProjection.stale
+      || currentProjection.overflow
+      || currentProjection.issue !== null
+      || oldPodStillPresent
+    ) {
+      throw Object.assign(
+        new Error(
+          oldPodStillPresent
+            ? 'Native Stop completed, but the current Pod projection still contains the old Pod. Refresh before continuing.'
+            : 'Native Stop completed, but current Pod state could not be verified. Refresh before continuing.',
+        ),
+        {
+          code: oldPodStillPresent
+            ? 'termination_target_mismatch'
+            : currentProjection.issue?.code ?? 'gpu_pod_observation_invalid',
+          retryable: currentProjection.issue?.retryable === true,
+          mayHaveSucceeded: true,
+        },
+      );
+    }
+    this.#nativeProvider.useObservationOnce(currentProjection);
+    // Either the action-owned R+2 settlement or a post-replay current read is
+    // the authority that permits dropping the old proxy/session binding.
     await this.#port.clearWorkerSession();
-    return Object.freeze({ ...result, alreadyStopped: false });
+    const reconciled = await controller.observePods({
+      expectedImageCount: controller.getSnapshot().expectedImageCount,
+      suppressTransientPhase: true,
+    });
+    return Object.freeze({
+      ...reconciled,
+      alreadyStopped: nativeResult.disposition === 'already_stopped',
+    });
   }
 
   dispose(): void {
@@ -256,6 +414,7 @@ export class GpuLifecycleCoordinator {
     this.#observationPromise = null;
     this.#unsubscribe?.();
     this.#unsubscribe = null;
+    this.#inventory.dispose();
     this.#listeners.clear();
   }
 
@@ -272,11 +431,20 @@ export class GpuLifecycleCoordinator {
     }
 
     await this.#port.bindProfile(profile.templateId, profile.networkVolumeId);
+    this.#nativeProvider.reset();
+    // Native inventory receipts are profile-bound. Recreate the renderer
+    // listener/load baseline only after the native profile-control boundary
+    // has invalidated its private cache, so no old offer can authorize Start.
+    await this.#inventory.resetForProfileChange();
     await this.#port.clearWorkerSession();
     this.#unsubscribe?.();
     const generation = this.#controllerGeneration + 1;
     this.#controllerGeneration = generation;
-    const controller = this.#factory(configFor(profile, allowSlowEmergency), this.#stopGuard);
+    const controller = this.#factory(
+      configFor(profile, allowSlowEmergency),
+      this.#stopGuard,
+      this.#inventory,
+    );
     this.#controller = controller;
     this.#fingerprint = fingerprint;
     this.#allowSlowEmergency = allowSlowEmergency;

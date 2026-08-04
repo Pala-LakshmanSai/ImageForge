@@ -1,4 +1,11 @@
 import type { AspectRatio } from './aspectRatio';
+import type {
+  NativePowerState,
+  NativeQueueDispatchPayloadV1,
+  NativeQueueSnapshotV1,
+  NativeRunnerLease,
+  QueueUiState,
+} from './queue';
 
 export type ViewId = 'create' | 'progress' | 'library' | 'usage' | 'settings';
 
@@ -110,6 +117,7 @@ export interface DraftState {
   destination: string | null;
   references: BatchReference[];
   aspectRatio: AspectRatio;
+  queueReplacementId: string | null;
 }
 
 export interface PodState {
@@ -155,6 +163,9 @@ export interface BatchState {
   statusMessage: string;
   references?: BatchReference[];
   aspectRatio: AspectRatio;
+  queueItemId?: string;
+  clientSubmissionId?: string;
+  admissionMode?: 'foreground' | 'queue';
   reportedProgress?: {
     total: number;
     completed: number;
@@ -217,6 +228,7 @@ export type DialogState =
   | { type: 'cancel-batch' }
   | { type: 'clear-library' }
   | { type: 'resolve-create' }
+  | { type: 'reset-queue' }
   | null;
 
 export interface ToastState {
@@ -284,6 +296,41 @@ export interface StudioStopState {
   } | null;
 }
 
+export type StudioGpuSwitchPhase =
+  | 'pending'
+  | 'approved'
+  | 'pausing'
+  | 'ready_to_delete'
+  | 'delete_intent'
+  | 'replacement_ready'
+  | 'needs_attention';
+
+export interface StudioGpuSwitchState {
+  switchId: string;
+  oldPodId: string;
+  oldGpuId: string;
+  oldGpuDisplayName: string;
+  initialTargetGpuId: string;
+  initialTargetGpuDisplayName: string;
+  requester: StudioParticipant;
+  isRequester: boolean;
+  canRespond: boolean;
+  phase: StudioGpuSwitchPhase;
+  reason: string | null;
+  requestedAt: string;
+  responseDeadline: string;
+  readyToDeleteAt: string | null;
+  waitingFor: StudioParticipant[];
+  approvedBy: StudioParticipant[];
+  deniedBy: StudioParticipant[];
+  batchId: string | null;
+  batchOwner: string | null;
+  batchProgress: { completed: number; total: number } | null;
+  batchStateAtFinalization: 'running' | 'paused' | 'interrupted' | null;
+  replacementPodId: string | null;
+  actualTargetGpuId: string | null;
+}
+
 export interface StudioSyncState {
   connected: boolean;
   serverInstanceId: string | null;
@@ -291,6 +338,7 @@ export interface StudioSyncState {
   currentSession: StudioSession | null;
   sessions: StudioSession[];
   stop: StudioStopState;
+  gpuSwitch: StudioGpuSwitchState | null;
 }
 
 export interface AppState {
@@ -308,6 +356,7 @@ export interface AppState {
   refreshedAt: string | null;
   localSyncIssue: LocalSyncIssue | null;
   studio: StudioSyncState;
+  queue: QueueUiState;
 }
 
 export type AppAction =
@@ -320,7 +369,35 @@ export type AppAction =
   | { type: 'ADD_REFERENCE'; reference: BatchReference }
   | { type: 'REMOVE_REFERENCE'; id: string }
   | { type: 'SET_ASPECT_RATIO'; aspectRatio: AspectRatio }
+  | { type: 'QUEUE_LOADED'; snapshot: NativeQueueSnapshotV1 }
+  | { type: 'QUEUE_LOAD_FAILED'; code: string }
+  | { type: 'QUEUE_COMMITTED'; snapshot: NativeQueueSnapshotV1 }
+  | { type: 'QUEUE_LEASE_CHANGED'; lease: NativeRunnerLease | null }
+  | { type: 'QUEUE_POWER_CHANGED'; power: NativePowerState | null }
+  | { type: 'QUEUE_ALARM_TEST_STATE'; state: QueueUiState['alarmTest'] }
+  | { type: 'QUEUE_NOTIFICATION_PERMISSION'; permission: QueueUiState['notificationPermission'] }
+  | { type: 'SET_QUEUE_KEEP_AWAKE'; enabled: boolean }
+  | { type: 'STAGE_DRAFT' }
+  | { type: 'RUN_QUEUE' }
+  | { type: 'RESUME_QUEUE' }
+  | { type: 'PAUSE_QUEUE' }
+  | { type: 'MOVE_QUEUE_ITEM'; queueItemId: string; direction: -1 | 1 }
+  | { type: 'REMOVE_QUEUE_ITEM'; queueItemId: string }
+  | { type: 'EDIT_QUEUE_ITEM'; queueItemId: string }
+  | { type: 'TEST_QUEUE_ALARM' }
+  | { type: 'CONFIRM_QUEUE_ALARM' }
+  | { type: 'SNOOZE_QUEUE_ALARM' }
+  | { type: 'DISMISS_QUEUE_ALARM' }
+  | { type: 'RING_QUEUE_ALARM' }
+  | { type: 'CLEAR_QUEUE_COMPLETED' }
+  | { type: 'CLEAR_QUEUE_HISTORY' }
+  | { type: 'REQUEST_RESET_QUEUE' }
+  | { type: 'CONFIRM_RESET_QUEUE' }
+  | { type: 'QUEUE_DISPATCH_ITEM'; payload: NativeQueueDispatchPayloadV1; startedAt: string }
+  | { type: 'QUEUE_RELEASE_BATCH' }
+  | { type: 'RESTORE_QUEUE_ITEM_TO_DRAFT'; payload: NativeQueueDispatchPayloadV1; styleSuffix: string | null }
   | { type: 'START_POD' }
+  | { type: 'OPEN_GPU_SELECTOR' }
   | { type: 'SET_POD_PHASE'; phase: PodPhase; progress: number; detail: string; podId?: string; gpu?: string; vram?: string; hourlyRate?: number }
   | { type: 'SYNC_RUNTIME_POD'; pod: PodState }
   | { type: 'SYNC_CREATE_RECOVERY'; marker: PodState['createRecovery'] }
@@ -347,6 +424,7 @@ export type AppAction =
   | { type: 'CLEAR_STUDIO_STOP' }
   | { type: 'RESPOND_STUDIO_STOP'; requestId: string; decision: 'approve' | 'deny' }
   | { type: 'CANCEL_STUDIO_STOP'; requestId: string }
+  | { type: 'RESPOND_STUDIO_GPU_SWITCH'; switchId: string; decision: 'approve' | 'deny' }
   | { type: 'RUNTIME_ERROR'; scope: 'pod' | 'batch'; code?: string; message: string; retryable?: boolean }
   | { type: 'TOGGLE_BATCH_PAUSE' }
   | { type: 'REQUEST_CANCEL_BATCH' }

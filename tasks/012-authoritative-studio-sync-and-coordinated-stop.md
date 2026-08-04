@@ -1,5 +1,11 @@
 # Task 012 — Authoritative studio synchronization and coordinated GPU stop
 
+Task 014 adds a distinct explicit Switch consent/finalization protocol and a
+shared Stop/Switch GPU-control lock. Normal Task 012 Stop behavior remains
+binding outside a Switch. Pending/approved/finalized Switch interactions follow
+Task 014's bidirectional phase matrix; neither protocol may cancel or bypass the
+other implicitly.
+
 ## Problem
 
 Two configured ImageForge desktop clients can observe different GPU and batch

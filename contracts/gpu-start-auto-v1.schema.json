@@ -1,0 +1,281 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://imageforge.local/contracts/gpu-start-auto-v1.schema.json",
+  "title": "ImageForge native Auto GPU Start v1 IPC",
+  "$comment": "Structural schema. Implementations MUST also run validateNativeGpuStartRelationsV1 and the raw-byte numeric-token checks in gpu-start-auto-v1.vectors.json.",
+  "x-imageforge-semanticValidator": "validateNativeGpuStartRelationsV1",
+  "oneOf": [
+    { "$ref": "#/$defs/autoStartInput" },
+    { "$ref": "#/$defs/startResult" }
+  ],
+  "$defs": {
+    "uuidV4": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "zeroRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "positiveRevision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "microUsd": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "autoStartInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observationId",
+        "receiptId",
+        "sessionId",
+        "expectedLifecycleRevision"
+      ],
+      "properties": {
+        "observationId": { "$ref": "#/$defs/uuidV4" },
+        "receiptId": { "$ref": "#/$defs/uuidV4" },
+        "sessionId": { "$ref": "#/$defs/uuidV4" },
+        "expectedLifecycleRevision": { "$ref": "#/$defs/zeroRevision" }
+      }
+    },
+    "pod": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "podId",
+        "gpuId",
+        "gpuDisplayName",
+        "hourlyPriceMicroUsd"
+      ],
+      "properties": {
+        "podId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,56}[A-Za-z0-9])?$"
+        },
+        "gpuId": { "$ref": "gpu-identity-v1.schema.json" },
+        "gpuDisplayName": { "$ref": "gpu-identity-v1.schema.json" },
+        "hourlyPriceMicroUsd": {
+          "oneOf": [
+            { "$ref": "#/$defs/microUsd" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "pricedPod": {
+      "allOf": [
+        { "$ref": "#/$defs/pod" },
+        {
+          "properties": {
+            "hourlyPriceMicroUsd": { "$ref": "#/$defs/microUsd" }
+          }
+        }
+      ]
+    },
+    "unpricedPod": {
+      "allOf": [
+        { "$ref": "#/$defs/pod" },
+        {
+          "properties": {
+            "hourlyPriceMicroUsd": { "type": "null" }
+          }
+        }
+      ]
+    },
+    "issue": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "retryable"],
+          "properties": {
+            "code": { "const": "gpu_start_create_uncertain" },
+            "retryable": { "const": false }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "retryable"],
+          "properties": {
+            "code": { "const": "gpu_actual_price_changed" },
+            "retryable": { "const": false }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "retryable"],
+          "properties": {
+            "code": { "const": "gpu_actual_price_unavailable" },
+            "retryable": { "const": false }
+          }
+        }
+      ]
+    },
+    "resultBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "operationId",
+        "lifecycleRevision",
+        "state",
+        "pod",
+        "confirmedHourlyPriceMicroUsd",
+        "actualHourlyPriceMicroUsd",
+        "issue"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "operationId": { "$ref": "#/$defs/uuidV4" },
+        "lifecycleRevision": { "$ref": "#/$defs/positiveRevision" },
+        "state": {
+          "enum": [
+            "create_intent",
+            "create_uncertain",
+            "provisioning",
+            "ready",
+            "price_attention"
+          ]
+        },
+        "pod": {
+          "oneOf": [
+            { "$ref": "#/$defs/pod" },
+            { "type": "null" }
+          ]
+        },
+        "confirmedHourlyPriceMicroUsd": { "$ref": "#/$defs/microUsd" },
+        "actualHourlyPriceMicroUsd": {
+          "oneOf": [
+            { "$ref": "#/$defs/microUsd" },
+            { "type": "null" }
+          ]
+        },
+        "issue": {
+          "oneOf": [
+            { "$ref": "#/$defs/issue" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "createIntentResult": {
+      "allOf": [
+        { "$ref": "#/$defs/resultBase" },
+        {
+          "properties": {
+            "state": { "const": "create_intent" },
+            "pod": { "type": "null" },
+            "actualHourlyPriceMicroUsd": { "type": "null" },
+            "issue": { "type": "null" }
+          }
+        }
+      ]
+    },
+    "createUncertainResult": {
+      "allOf": [
+        { "$ref": "#/$defs/resultBase" },
+        {
+          "properties": {
+            "state": { "const": "create_uncertain" },
+            "pod": { "type": "null" },
+            "actualHourlyPriceMicroUsd": { "type": "null" },
+            "issue": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "retryable"],
+              "properties": {
+                "code": { "const": "gpu_start_create_uncertain" },
+                "retryable": { "const": false }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "provisioningResult": {
+      "allOf": [
+        { "$ref": "#/$defs/resultBase" },
+        {
+          "properties": {
+            "state": { "const": "provisioning" },
+            "pod": { "$ref": "#/$defs/pricedPod" },
+            "issue": { "type": "null" }
+          }
+        }
+      ]
+    },
+    "readyResult": {
+      "allOf": [
+        { "$ref": "#/$defs/resultBase" },
+        {
+          "properties": {
+            "state": { "const": "ready" },
+            "pod": { "$ref": "#/$defs/pricedPod" },
+            "actualHourlyPriceMicroUsd": { "$ref": "#/$defs/microUsd" },
+            "issue": { "type": "null" }
+          }
+        }
+      ]
+    },
+    "priceAttentionChangedResult": {
+      "allOf": [
+        { "$ref": "#/$defs/resultBase" },
+        {
+          "properties": {
+            "state": { "const": "price_attention" },
+            "pod": { "$ref": "#/$defs/pricedPod" },
+            "actualHourlyPriceMicroUsd": { "$ref": "#/$defs/microUsd" },
+            "issue": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "retryable"],
+              "properties": {
+                "code": { "const": "gpu_actual_price_changed" },
+                "retryable": { "const": false }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "priceAttentionUnavailableResult": {
+      "allOf": [
+        { "$ref": "#/$defs/resultBase" },
+        {
+          "properties": {
+            "state": { "const": "price_attention" },
+            "pod": { "$ref": "#/$defs/unpricedPod" },
+            "actualHourlyPriceMicroUsd": { "type": "null" },
+            "issue": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "retryable"],
+              "properties": {
+                "code": { "const": "gpu_actual_price_unavailable" },
+                "retryable": { "const": false }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "startResult": {
+      "oneOf": [
+        { "$ref": "#/$defs/createIntentResult" },
+        { "$ref": "#/$defs/createUncertainResult" },
+        { "$ref": "#/$defs/provisioningResult" },
+        { "$ref": "#/$defs/readyResult" },
+        { "$ref": "#/$defs/priceAttentionChangedResult" },
+        { "$ref": "#/$defs/priceAttentionUnavailableResult" }
+      ]
+    }
+  }
+}

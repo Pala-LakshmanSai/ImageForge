@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://imageforge.local/contracts/gpu-benchmark-profile-v2.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "gpuId", "policyKey", "measuredAt", "bootDurationMs", "attemptedSampleCount", "successfulSampleCount", "failedSampleCount", "medianDurationUs", "p95DurationUs", "contract", "rawEvidenceSha256"],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "gpuId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9 ._()+:-]{0,126}[A-Za-z0-9])?$" },
+    "policyKey": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_]{0,63}$" },
+    "measuredAt": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
+    "bootDurationMs": { "type": "integer", "minimum": 0, "maximum": 1200000 },
+    "attemptedSampleCount": { "const": 30 }, "successfulSampleCount": { "const": 30 }, "failedSampleCount": { "const": 0 },
+    "medianDurationUs": { "type": "integer", "minimum": 1, "maximum": 3600000000 },
+    "p95DurationUs": { "type": "integer", "minimum": 1, "maximum": 3600000000 },
+    "contract": { "$ref": "gpu-benchmark-raw-v2.schema.json#/$defs/contract" },
+    "rawEvidenceSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

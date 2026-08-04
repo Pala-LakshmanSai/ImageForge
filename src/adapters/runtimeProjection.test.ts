@@ -123,13 +123,13 @@ describe('production runtime projection', () => {
         {
           id: 'podone1', name: 'imageforge-one', status: 'running', gpuId: 'gpu-4090', gpuDisplayName: 'RTX 4090', gpuCount: 1,
           cloud: 'secure', dataCenterId: 'EU-RO-1', templateId: 'template', networkVolumeId: 'volume', networkVolumeMountPath: '/workspace',
-          interruptible: false, hourlyPriceUsd: 0.52, createdAt: '2026-08-01T10:00:00.000Z', startRequestId: 'one', proxyUrl: 'https://podone1-8000.proxy.runpod.net/',
+          interruptible: false, hourlyPriceMicroUsd: 520_000, createdAt: '2026-08-01T10:00:00.000Z', startRequestId: 'one', proxyUrl: 'https://podone1-8000.proxy.runpod.net/',
           lifecyclePhase: 'ready', workerHealth: { schemaVersion: 1, phase: 'ready', phaseProgress: 1 }, healthError: null,
         },
         {
           id: 'podtwo2', name: 'imageforge-two', status: 'provisioning', gpuId: 'gpu-5090', gpuDisplayName: 'RTX 5090', gpuCount: 1,
           cloud: 'secure', dataCenterId: 'EU-RO-1', templateId: 'template', networkVolumeId: 'volume', networkVolumeMountPath: '/workspace',
-          interruptible: false, hourlyPriceUsd: 0.8, createdAt: '2026-08-01T10:00:01.000Z', startRequestId: 'two', proxyUrl: 'https://podtwo2-8000.proxy.runpod.net/',
+          interruptible: false, hourlyPriceMicroUsd: 800_000, createdAt: '2026-08-01T10:00:01.000Z', startRequestId: 'two', proxyUrl: 'https://podtwo2-8000.proxy.runpod.net/',
           lifecyclePhase: 'provisioning', workerHealth: null, healthError: null,
         },
       ],
@@ -243,7 +243,7 @@ describe('production runtime projection', () => {
         pause_requested: false,
         cancel_requested: false,
       },
-      permissions: { can_create: false, can_manage_active: false, is_owner: false },
+      permissions: { can_create: false, can_manage_active: false, is_owner: false, create_block_reason: null },
     });
     const projected = projectBusyBatch(status.activeBatch!);
     expect(projected.prompts).toEqual([]);

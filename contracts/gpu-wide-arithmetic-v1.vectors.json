@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "u128Max": "340282366920938463463374607431768211455",
+  "u128MaxPlusOne": "340282366920938463463374607431768211456",
+  "checkedMultiply": [
+    { "id": "zero_times_max", "left": "0", "right": "340282366920938463463374607431768211455", "expected": "0" },
+    { "id": "max_times_one", "left": "340282366920938463463374607431768211455", "right": "1", "expected": "340282366920938463463374607431768211455" },
+    { "id": "half_floor_times_two", "left": "170141183460469231731687303715884105727", "right": "2", "expected": "340282366920938463463374607431768211454" },
+    { "id": "half_plus_one_times_two_overflow", "left": "170141183460469231731687303715884105728", "right": "2", "expected": null },
+    { "id": "max_times_two_overflow", "left": "340282366920938463463374607431768211455", "right": "2", "expected": null },
+    { "id": "invalid_left_operand", "left": "340282366920938463463374607431768211456", "right": "0", "expected": null },
+    { "id": "negative_operand", "left": "-1", "right": "1", "expected": null }
+  ],
+  "checkedAdd": [
+    { "id": "max_plus_zero", "left": "340282366920938463463374607431768211455", "right": "0", "expected": "340282366920938463463374607431768211455" },
+    { "id": "max_minus_one_plus_one", "left": "340282366920938463463374607431768211454", "right": "1", "expected": "340282366920938463463374607431768211455" },
+    { "id": "max_plus_one_overflow", "left": "340282366920938463463374607431768211455", "right": "1", "expected": null },
+    { "id": "max_minus_one_plus_two_overflow", "left": "340282366920938463463374607431768211454", "right": "2", "expected": null },
+    { "id": "invalid_left_addend", "left": "340282366920938463463374607431768211456", "right": "0", "expected": null },
+    { "id": "negative_addend", "left": "1", "right": "-1", "expected": null }
+  ],
+  "autoProducts": [
+    { "id": "maximum_safe_operands", "price": 9007199254740991, "durationUs": 3600000000, "expected": "32425917317067567600000000" },
+    { "id": "zero", "price": 0, "durationUs": 1, "expected": "0" },
+    { "id": "one_unit_difference_a", "price": 1000000, "durationUs": 1000001, "expected": "1000001000000" },
+    { "id": "one_unit_difference_b", "price": 1000001, "durationUs": 1000000, "expected": "1000001000000" }
+  ],
+  "estimatedCosts": [
+    {
+      "id": "maximum_valid_inputs",
+      "input": { "hourlyPriceMicroUsd": 9007199254740991, "bootDurationMs": 1200000, "medianDurationUs": 3600000000, "remainingImages": 450 },
+      "runtimeUs": "1621200000000",
+      "numerator": "14602471431786094609200000000",
+      "quotient": "4056242064385026280",
+      "remainder": "1200000000",
+      "expected": "4056242064385026280"
+    },
+    { "id": "zero_remaining", "input": { "hourlyPriceMicroUsd": 0, "bootDurationMs": 0, "medianDurationUs": 1, "remainingImages": 0 }, "runtimeUs": "0", "numerator": "0", "quotient": "0", "remainder": "0", "expected": "0" }
+  ],
+  "halfUpNumerators": [
+    { "numerator": "1799999999", "expected": "0" },
+    { "numerator": "1800000000", "expected": "1" },
+    { "numerator": "1800000001", "expected": "1" }
+  ],
+  "canonicalValues": [
+    { "value": "0", "valid": true },
+    { "value": "4056242064385026280", "valid": true },
+    { "value": "340282366920938463463374607431768211455", "valid": true },
+    { "value": "340282366920938463463374607431768211456", "valid": false },
+    { "value": "01", "valid": false },
+    { "value": "+1", "valid": false },
+    { "value": "1e3", "valid": false }
+  ]
+}
