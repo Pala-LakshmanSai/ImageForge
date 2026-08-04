@@ -260,10 +260,19 @@ mod macos {
                             TrustedActivationKind::PrimaryPointerUp,
                             Instant::now(),
                         );
-                        let _ = selector_for_hook.start_native_input(
+                        selector_for_hook.trace_qa("macOS native left mouse up passed to selector host");
+                        let result = selector_for_hook.start_native_input(
                             &window_for_hook,
                             NativeSelectorInputKind::PrimaryMouseUp,
                         );
+                        selector_for_hook.trace_qa(&format!(
+                            "macOS native left mouse up selector result={}",
+                            match result {
+                                Ok(Some(_)) => "accepted",
+                                Ok(None) => "ignored",
+                                Err(_) => "rejected",
+                            }
+                        ));
                     }
                     NSEventType::KeyDown if !event_ref.isARepeat() => {
                         let key = event_ref.keyCode();

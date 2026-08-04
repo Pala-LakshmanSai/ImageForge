@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -295,6 +295,28 @@ async function waitForSamples(path, count, child, description) {
   }
 }
 
+function logOccurrences(path, needle) {
+  if (!existsSync(path)) return 0;
+  const log = readFileSync(path, 'utf8');
+  let count = 0;
+  let offset = 0;
+  while ((offset = log.indexOf(needle, offset)) !== -1) {
+    count += 1;
+    offset += needle.length;
+  }
+  return count;
+}
+
+async function waitForArm(logPath, expectedCount, child, description) {
+  const needle = 'selector arm accepted';
+  const deadline = Date.now() + 10_000;
+  while (logOccurrences(logPath, needle) < expectedCount) {
+    if (child.exitCode !== null) fail(`${description} exited ${child.exitCode} before native arm ${expectedCount}`);
+    if (Date.now() >= deadline) fail(`${description} timed out waiting for native arm ${expectedCount}`);
+    await sleep(50);
+  }
+}
+
 function launch(config, action, width, height, samplesPath, resultPath, logPath) {
   const qaSessionId = randomUUID();
   const session = JSON.stringify({
@@ -325,11 +347,14 @@ function launch(config, action, width, height, samplesPath, resultPath, logPath)
   }
   const child = spawn(config.binary, [], { env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
   const log = [];
-  child.stdout.on('data', (chunk) => log.push(chunk.toString()));
-  child.stderr.on('data', (chunk) => log.push(chunk.toString()));
-  child.on('close', () => {
-    writeFileSync(logPath, log.join(''), 'utf8');
-  });
+  writeFileSync(logPath, '', 'utf8');
+  const appendLog = (chunk) => {
+    const text = chunk.toString();
+    log.push(text);
+    appendFileSync(logPath, text, 'utf8');
+  };
+  child.stdout.on('data', appendLog);
+  child.stderr.on('data', appendLog);
   return child;
 }
 
@@ -355,6 +380,11 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
     const resultPath = join(runRoot, 'result.txt');
     const logPath = join(runRoot, 'app.log');
     const child = launch(config, action, width, height, samplesPath, resultPath, logPath);
+    let expectedArmCount = 0;
+    const waitForNextArm = async () => {
+      expectedArmCount += 1;
+      await waitForArm(logPath, expectedArmCount, child, `${action} ${width}x${height}`);
+    };
     try {
       const windowDeadline = Date.now() + 30_000;
       let metrics;
@@ -370,6 +400,7 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
       await sleep(750);
 
       if (action === 'cold_open') {
+        await waitForNextArm();
         clickAt(config.platform, child.pid, 'center', macInputHelperPath);
         await waitForFile(resultPath, 20_000, child, `${action} launch ${launchIndex + 1}`);
       } else if (action === 'warm_open') {
@@ -385,6 +416,7 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
         clickAt(config.platform, child.pid, 'close', macInputHelperPath);
         await sleep(500);
         for (let ordinal = 1; ordinal <= 30; ordinal += 1) {
+          await waitForNextArm();
           clickAt(config.platform, child.pid, 'center', macInputHelperPath);
           await waitForSamples(samplesPath, ordinal, child, `${action} ${width}x${height}`);
           await sleep(250);
@@ -392,6 +424,7 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
         await waitForFile(resultPath, 10_000, child, `${action} ${width}x${height}`);
       } else if (action === 'refresh_loading') {
         for (let ordinal = 1; ordinal <= 30; ordinal += 1) {
+          await waitForNextArm();
           clickAt(config.platform, child.pid, 'refresh', macInputHelperPath);
           await waitForSamples(samplesPath, ordinal, child, `${action} ${width}x${height}`);
         }
@@ -401,6 +434,7 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
           const key = action === 'keyboard_move'
             ? (ordinal % 2 === 1 ? 'down' : 'up')
             : 'space';
+          await waitForNextArm();
           sendKey(config.platform, child.pid, key, macInputHelperPath);
           await waitForSamples(samplesPath, ordinal, child, `${action} ${width}x${height}`);
         }

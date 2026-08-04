@@ -253,7 +253,25 @@ impl GpuSelectorPerfHost {
         // focus loss still invalidates the arm through the window lifecycle.
         require_main_visible(window)?;
         let native_window_size = native_window_size(window)?;
-        self.arm_inner_with_native_size(input, Instant::now(), Some(native_window_size))
+        let requested_action = input.action;
+        let requested_ordinal = input.ordinal;
+        self.trace_qa(&format!(
+            "selector arm requested action={:?} ordinal={} native_window={:?}",
+            requested_action, requested_ordinal, native_window_size
+        ));
+        let result =
+            self.arm_inner_with_native_size(input, Instant::now(), Some(native_window_size));
+        match &result {
+            Ok(armed) => self.trace_qa(&format!(
+                "selector arm accepted action={:?} ordinal={} armed={}",
+                requested_action, requested_ordinal, armed.armed
+            )),
+            Err(error) => self.trace_qa(&format!(
+                "selector arm rejected code={} message={}",
+                error.code, error.message
+            )),
+        }
+        result
     }
 
     /// Called by the native trusted pointer/keyboard hook.  There is no
@@ -315,6 +333,19 @@ impl GpuSelectorPerfHost {
             }
             Ok(Some(event))
         })();
+        match &result {
+            Ok(Some(event)) => self.trace_qa(&format!(
+                "selector native input accepted action={:?} ordinal={}",
+                event.action, event.ordinal
+            )),
+            Ok(None) => {
+                self.trace_qa("selector native input ignored because no matching arm was available")
+            }
+            Err(error) => self.trace_qa(&format!(
+                "selector native input rejected code={} message={}",
+                error.code, error.message
+            )),
+        }
         if let Err(error) = &result {
             self.report_qa_error(window, error);
         }
