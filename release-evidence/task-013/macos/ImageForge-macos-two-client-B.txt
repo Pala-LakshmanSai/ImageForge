@@ -1,2 +1,2 @@
 PASS
-pid=42768; window=main; B: two installed clients passed status-first recovery, shared busy/progress, veto, approve, deny/timeout, generation race, and bidirectional remote Stop
+pid=46948; window=main; B: two installed clients passed status-first recovery, shared busy/progress, veto, approve, deny/timeout, generation race, and bidirectional remote Stop

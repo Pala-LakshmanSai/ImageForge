@@ -1,28 +1,42 @@
 {
   "product": "ImageForge",
   "version": "0.1.9",
-  "commit": "869dcd447d2ddddc51adec037927892216bebad7",
-  "run_id": "30896874151",
+  "commit": "5488a63fa03cd69eade09567ad7c378eae77b711",
+  "run_id": "30900636992",
   "os": "Windows",
   "architecture": "x86_64",
   "artifact": "ImageForge_0.1.9_x64-setup.exe",
-  "sha256": "0921d7117b740380bcaf90f997e1f8c859a7b2f4d620eb4db15435150bba3c3b",
+  "sha256": "12c35831f47a2c771c52d7727b6f6582a320c5fc72c854fca05be5f545c6dad7",
   "signing": "unsigned beta installer",
   "notarization": "not applicable",
   "native_smoke": "install, WebView2, native launch/window, fake-adapter UI, two installed production-runtime clients, native Rust tests, cleanup",
-  "native_smoke_detail": "UI: pid=5492; window=main; onboarding, reference add/remove/re-add, incremental saves 1->2, fast fake batch, named minimal Library, per-image Download, image detail, and folder reveal passed Two-client: pid=1736; window=main; A: two installed clients passed status-first recovery, shared busy/progress, veto, approve, deny/timeout, generation race, and bidirectional remote Stop | pid=7572; window=main; B: two installed clients passed status-first recovery, shared busy/progress, veto, approve, deny/timeout, generation race, and bidirectional remote Stop",
+  "native_smoke_detail": "UI: pid=8204; window=main; onboarding, reference add/remove/re-add, incremental saves 1->2, fast fake batch, named minimal Library, per-image Download, image detail, and folder reveal passed Two-client: pid=2416; window=main; A: two installed clients passed status-first recovery, shared busy/progress, veto, approve, deny/timeout, generation race, and bidirectional remote Stop | pid=3464; window=main; B: two installed clients passed status-first recovery, shared busy/progress, veto, approve, deny/timeout, generation race, and bidirectional remote Stop",
   "two_client_smoke": "two distinct installed PIDs/windows and WebView profiles; status-first recovery, shared busy/progress, veto, approve, deny/timeout, generation race, exact bidirectional remote Stop",
   "two_client_smoke_audit": "ImageForge-windows-two-client-smoke-audit.json",
-  "two_client_smoke_audit_sha256": "e67e8089297fa86c104f7d6c430ee0f4f6570de3462c6e06ec39059f8715f653",
+  "two_client_smoke_audit_sha256": "b9b8627ffa153c3a573119c59f45cef641ec391fd704d8bfabbcb5d456cf2733",
   "two_client_result_a": "ImageForge-windows-two-client-A.txt",
-  "two_client_result_a_sha256": "c01e7fa5d853097a06a7484ff609fb258185edf0df5096c313262dca567c0de8",
+  "two_client_result_a_sha256": "b8c0324b64664f53f4af89960890b017c7bacb6d89d7ea514f23e91ed7cbef08",
   "two_client_result_b": "ImageForge-windows-two-client-B.txt",
-  "two_client_result_b_sha256": "1619217a8c369600af41222541be7cd662c67888f202c21f199f60c39a331edf",
+  "two_client_result_b_sha256": "d8d34d2a2f2f3daecbd1030b4d5fcb25b1f543c7737e5acf064b7d8ac743afc5",
   "queue_release_smoke": "three distinct installed processes; native restart pause, 450-row DOM caps, 30 trusted OS-key move samples, native JPEG receipts, keep-awake cleanup, Ring-now/audio/snooze relaunch, zero provider mutations",
   "queue_release_evidence": "ImageForge-windows-queue-release-smoke.json",
-  "queue_release_evidence_sha256": "f2b08b3e352c69f72c705b9eeb26676ad6ccccb72038b941e34bef0065d7e955",
+  "queue_release_evidence_sha256": "2febb608e608aa56cc71a1317bc61c320943509dec6038de8dd183bc94c2de00",
   "queue_release_attestation": "ImageForge-windows-queue-release-attestation.json",
-  "queue_release_attestation_sha256": "ef512bbd66ea7774ceea4bc49dc0dad4f91f936f324d5d80ffcfc34826907add",
+  "queue_release_attestation_sha256": "00baff6fdc2fc6742b52f858a516d3abaeaa01782afaaf317c1c692403c26658",
   "queue_release_result": "ImageForge-windows-queue-release-result.txt",
-  "queue_release_result_sha256": "72602eb49d8579e685078c359f1aac08cb6eec82892fd9dc4e74e6be8f77a552"
+  "queue_release_result_sha256": "ec8fa2f658f2ea80723df032db55f6133b731eee6e28e96cf85c5033285a7e78",
+  "queue_release_wrapper_records": [
+    {
+      "sha256": "4c8cb0cc8e21a7f00fc9419eb0be2b8296773e12602c443f6db9c87e43cca237",
+      "name": "ImageForge-windows-queue-release-run.wrapper.result"
+    },
+    {
+      "sha256": "309be566a7683e19f09cfb84ce976c84c1c799b4e3eaa46079f3cac41cf8a4eb",
+      "name": "ImageForge-windows-queue-release-resume.wrapper.result"
+    },
+    {
+      "sha256": "ad3286c25728e36f4c227886ff680d5cf5d50edd1b0ee6bb7a70af4b8af28c91",
+      "name": "ImageForge-windows-queue-release-relaunch.wrapper.result"
+    }
+  ]
 }

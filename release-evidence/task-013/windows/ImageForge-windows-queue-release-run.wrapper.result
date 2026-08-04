@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "wrapper_exit": 0,
+  "app_exit": -1,
+  "app_exit_normalized": true,
+  "phase": "run",
+  "pid": 8424,
+  "artifact_sha256": "12c35831f47a2c771c52d7727b6f6582a320c5fc72c854fca05be5f545c6dad7",
+  "root": "D:\\a\\_temp\\imageforge-queue-release-smoke"
+}

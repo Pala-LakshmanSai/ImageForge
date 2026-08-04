@@ -27,12 +27,12 @@
   "sessions": [
     {
       "role": "A",
-      "sessionId": "29832f53-44d8-49c2-bfde-54a63323573d",
+      "sessionId": "78ce4d02-4e48-40ee-8937-ce02101a49d7",
       "availability": "foreground"
     },
     {
       "role": "B",
-      "sessionId": "b33b6ebf-7283-4d8a-a9fe-591c23a87cc1",
+      "sessionId": "70884393-0474-4be4-947c-74017adbfb4c",
       "availability": "foreground"
     }
   ],
@@ -41,14 +41,14 @@
       "sequence": 194,
       "role": "A",
       "podId": "pod-native-smoke-a",
-      "requestId": "0ced73fe-be19-4ea2-9f8e-4515f56db8ac",
+      "requestId": "52f21df0-49e5-4165-bacf-ba7cc52d7f7f",
       "ordinal": 1
     },
     {
       "sequence": 263,
       "role": "B",
       "podId": "pod-native-smoke-b",
-      "requestId": "f945f925-ca20-4c79-98d1-be24c5dbd465",
+      "requestId": "31685f2d-bb83-40dc-b036-d03e401f834b",
       "ordinal": 2
     }
   ],
@@ -348,14 +348,14 @@
   "operations": [
     {
       "sequence": 1,
-      "role": "B",
+      "role": "A",
       "operation": "runpod_list",
       "status": 200,
       "outcome": "pod-native-smoke-a"
     },
     {
       "sequence": 2,
-      "role": "A",
+      "role": "B",
       "operation": "runpod_list",
       "status": 200,
       "outcome": "pod-native-smoke-a"
@@ -1510,28 +1510,28 @@
     },
     {
       "sequence": 167,
-      "role": "A",
-      "operation": "checkpoint",
-      "status": 200,
-      "outcome": "veto_done"
-    },
-    {
-      "sequence": 168,
       "role": "B",
       "operation": "studio_heartbeat",
       "status": 200,
       "outcome": "heartbeat"
     },
     {
-      "sequence": 169,
+      "sequence": 168,
       "role": "B",
       "operation": "studio_create_stop",
       "status": 423,
       "outcome": "stop_blocked_by_active_batch"
     },
     {
-      "sequence": 170,
+      "sequence": 169,
       "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "veto_done"
+    },
+    {
+      "sequence": 170,
+      "role": "A",
       "operation": "checkpoint",
       "status": 200,
       "outcome": "veto_done"
@@ -1559,38 +1559,38 @@
     },
     {
       "sequence": 174,
-      "role": "B",
-      "operation": "batch_get",
-      "status": 404,
-      "outcome": "batch_not_found"
-    },
-    {
-      "sequence": 175,
       "role": "A",
       "operation": "worker_status",
       "status": 200,
       "outcome": "idle"
+    },
+    {
+      "sequence": 175,
+      "role": "B",
+      "operation": "batch_get",
+      "status": 404,
+      "outcome": "batch_not_found"
     },
     {
       "sequence": 176,
       "role": "B",
-      "operation": "checkpoint",
-      "status": 200,
-      "outcome": "idle_after_release"
-    },
-    {
-      "sequence": 177,
-      "role": "B",
       "operation": "worker_status",
       "status": 200,
       "outcome": "idle"
     },
     {
-      "sequence": 178,
+      "sequence": 177,
       "role": "A",
       "operation": "batch_get",
       "status": 404,
       "outcome": "batch_not_found"
+    },
+    {
+      "sequence": 178,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "idle_after_release"
     },
     {
       "sequence": 179,
@@ -1601,14 +1601,14 @@
     },
     {
       "sequence": 180,
-      "role": "B",
+      "role": "A",
       "operation": "studio_heartbeat",
       "status": 200,
       "outcome": "heartbeat"
     },
     {
       "sequence": 181,
-      "role": "A",
+      "role": "B",
       "operation": "studio_heartbeat",
       "status": 200,
       "outcome": "heartbeat"
@@ -1643,17 +1643,17 @@
     },
     {
       "sequence": 186,
-      "role": "A",
-      "operation": "checkpoint",
-      "status": 200,
-      "outcome": "approval_response_b"
-    },
-    {
-      "sequence": 187,
       "role": "B",
       "operation": "studio_heartbeat",
       "status": 200,
       "outcome": "heartbeat"
+    },
+    {
+      "sequence": 187,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "approval_response_b"
     },
     {
       "sequence": 188,
@@ -1671,24 +1671,24 @@
     },
     {
       "sequence": 190,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "approval_delete_a"
+    },
+    {
+      "sequence": 191,
       "role": "A",
       "operation": "studio_heartbeat",
       "status": 200,
       "outcome": "heartbeat"
     },
     {
-      "sequence": 191,
+      "sequence": 192,
       "role": "A",
       "operation": "runpod_get",
       "status": 200,
       "outcome": "pod-native-smoke-a"
-    },
-    {
-      "sequence": 192,
-      "role": "B",
-      "operation": "checkpoint",
-      "status": 200,
-      "outcome": "approval_delete_a"
     },
     {
       "sequence": 193,
@@ -1734,14 +1734,14 @@
     },
     {
       "sequence": 199,
-      "role": "A",
+      "role": "B",
       "operation": "checkpoint",
       "status": 200,
       "outcome": "offline_a_to_b"
     },
     {
       "sequence": 200,
-      "role": "B",
+      "role": "A",
       "operation": "checkpoint",
       "status": 200,
       "outcome": "offline_a_to_b"
@@ -1762,42 +1762,42 @@
     },
     {
       "sequence": 203,
-      "role": "A",
+      "role": "B",
       "operation": "runpod_list",
       "status": 200,
       "outcome": "pod-native-smoke-b"
     },
     {
       "sequence": 204,
-      "role": "B",
+      "role": "A",
       "operation": "runpod_list",
       "status": 200,
       "outcome": "pod-native-smoke-b"
     },
     {
       "sequence": 205,
-      "role": "A",
-      "operation": "worker_health",
-      "status": 200,
-      "outcome": "ready"
-    },
-    {
-      "sequence": 206,
       "role": "B",
       "operation": "worker_health",
       "status": 200,
       "outcome": "ready"
     },
     {
-      "sequence": 207,
+      "sequence": 206,
       "role": "A",
+      "operation": "worker_health",
+      "status": 200,
+      "outcome": "ready"
+    },
+    {
+      "sequence": 207,
+      "role": "B",
       "operation": "worker_status",
       "status": 200,
       "outcome": "idle"
     },
     {
       "sequence": 208,
-      "role": "A",
+      "role": "B",
       "operation": "studio_heartbeat",
       "status": 200,
       "outcome": "heartbeat"
@@ -1805,13 +1805,13 @@
     {
       "sequence": 209,
       "role": "A",
-      "operation": "checkpoint",
+      "operation": "worker_status",
       "status": 200,
-      "outcome": "ready_second_pod"
+      "outcome": "idle"
     },
     {
       "sequence": 210,
-      "role": "B",
+      "role": "A",
       "operation": "studio_heartbeat",
       "status": 200,
       "outcome": "heartbeat"
@@ -1819,13 +1819,13 @@
     {
       "sequence": 211,
       "role": "B",
-      "operation": "worker_status",
+      "operation": "checkpoint",
       "status": 200,
-      "outcome": "idle"
+      "outcome": "ready_second_pod"
     },
     {
       "sequence": 212,
-      "role": "B",
+      "role": "A",
       "operation": "checkpoint",
       "status": 200,
       "outcome": "ready_second_pod"
@@ -1860,17 +1860,17 @@
     },
     {
       "sequence": 217,
-      "role": "A",
-      "operation": "studio_heartbeat",
-      "status": 200,
-      "outcome": "heartbeat"
-    },
-    {
-      "sequence": 218,
       "role": "B",
       "operation": "checkpoint",
       "status": 200,
       "outcome": "denial_response_a"
+    },
+    {
+      "sequence": 218,
+      "role": "A",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
     },
     {
       "sequence": 219,
@@ -1909,17 +1909,17 @@
     },
     {
       "sequence": 224,
-      "role": "A",
-      "operation": "studio_heartbeat",
-      "status": 200,
-      "outcome": "heartbeat"
-    },
-    {
-      "sequence": 225,
       "role": "B",
       "operation": "checkpoint",
       "status": 200,
       "outcome": "timeout_request_a"
+    },
+    {
+      "sequence": 225,
+      "role": "A",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
     },
     {
       "sequence": 226,
@@ -1937,59 +1937,59 @@
     },
     {
       "sequence": 228,
-      "role": "A",
+      "role": "B",
       "operation": "checkpoint",
       "status": 200,
       "outcome": "expire_timeout"
     },
     {
       "sequence": 229,
-      "role": "B",
+      "role": "A",
       "operation": "checkpoint",
       "status": 200,
       "outcome": "expire_timeout"
     },
     {
       "sequence": 230,
-      "role": "A",
+      "role": "B",
       "operation": "studio_heartbeat",
       "status": 200,
       "outcome": "heartbeat"
     },
     {
       "sequence": 231,
-      "role": "B",
+      "role": "A",
       "operation": "studio_heartbeat",
       "status": 200,
       "outcome": "heartbeat"
     },
     {
       "sequence": 232,
-      "role": "A",
+      "role": "B",
       "operation": "checkpoint",
       "status": 200,
       "outcome": "clear_timeout"
     },
     {
       "sequence": 233,
-      "role": "B",
+      "role": "A",
       "operation": "checkpoint",
       "status": 200,
       "outcome": "clear_timeout"
     },
     {
       "sequence": 234,
-      "role": "B",
-      "operation": "checkpoint",
-      "status": 200,
-      "outcome": "generation_request_a"
-    },
-    {
-      "sequence": 235,
       "role": "A",
       "operation": "studio_heartbeat",
       "status": 200,
       "outcome": "heartbeat"
+    },
+    {
+      "sequence": 235,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "generation_request_a"
     },
     {
       "sequence": 236,
@@ -2022,16 +2022,16 @@
     {
       "sequence": 240,
       "role": "B",
-      "operation": "checkpoint",
+      "operation": "worker_status",
       "status": 200,
-      "outcome": "generation_started_b"
+      "outcome": "active_B"
     },
     {
       "sequence": 241,
       "role": "B",
-      "operation": "worker_status",
+      "operation": "checkpoint",
       "status": 200,
-      "outcome": "active_B"
+      "outcome": "generation_started_b"
     },
     {
       "sequence": 242,
@@ -2049,14 +2049,14 @@
     },
     {
       "sequence": 244,
-      "role": "B",
+      "role": "A",
       "operation": "checkpoint",
       "status": 200,
       "outcome": "release_generated_batch"
     },
     {
       "sequence": 245,
-      "role": "A",
+      "role": "B",
       "operation": "checkpoint",
       "status": 200,
       "outcome": "release_generated_batch"
@@ -2077,31 +2077,31 @@
     },
     {
       "sequence": 248,
-      "role": "A",
-      "operation": "studio_heartbeat",
-      "status": 200,
-      "outcome": "heartbeat"
-    },
-    {
-      "sequence": 249,
-      "role": "A",
-      "operation": "checkpoint",
-      "status": 200,
-      "outcome": "reverse_request_b"
-    },
-    {
-      "sequence": 250,
       "role": "B",
       "operation": "batch_get",
       "status": 404,
       "outcome": "batch_not_found"
     },
     {
-      "sequence": 251,
+      "sequence": 249,
+      "role": "A",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 250,
       "role": "B",
       "operation": "studio_heartbeat",
       "status": 200,
       "outcome": "heartbeat"
+    },
+    {
+      "sequence": 251,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "reverse_request_b"
     },
     {
       "sequence": 252,
@@ -2154,17 +2154,17 @@
     },
     {
       "sequence": 259,
-      "role": "B",
-      "operation": "studio_heartbeat",
-      "status": 200,
-      "outcome": "heartbeat"
-    },
-    {
-      "sequence": 260,
       "role": "A",
       "operation": "checkpoint",
       "status": 200,
       "outcome": "reverse_delete_b"
+    },
+    {
+      "sequence": 260,
+      "role": "B",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
     },
     {
       "sequence": 261,
@@ -2210,17 +2210,17 @@
     },
     {
       "sequence": 267,
-      "role": "A",
-      "operation": "runpod_list",
-      "status": 200,
-      "outcome": "offline"
-    },
-    {
-      "sequence": 268,
       "role": "B",
       "operation": "checkpoint",
       "status": 200,
       "outcome": "offline_b_to_a"
+    },
+    {
+      "sequence": 268,
+      "role": "A",
+      "operation": "runpod_list",
+      "status": 200,
+      "outcome": "offline"
     },
     {
       "sequence": 269,
@@ -2231,22 +2231,22 @@
     },
     {
       "sequence": 270,
-      "role": "A",
+      "role": "B",
       "operation": "checkpoint",
       "status": null,
       "outcome": null
     },
     {
       "sequence": 271,
-      "role": "B",
+      "role": "A",
       "operation": "checkpoint",
       "status": null,
       "outcome": null
     }
   ],
   "operationCounts": {
-    "B:runpod_list": 8,
     "A:runpod_list": 8,
+    "B:runpod_list": 8,
     "A:worker_health": 5,
     "B:worker_health": 5,
     "A:studio_heartbeat": 12,

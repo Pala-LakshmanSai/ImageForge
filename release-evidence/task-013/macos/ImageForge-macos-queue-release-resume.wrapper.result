@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "wrapper_exit": 0,
+  "app_exit": 143,
+  "app_exit_normalized": true,
+  "phase": "resume",
+  "pid": 47459,
+  "artifact_sha256": "04beeaab47958f72de667c9988691e61c7e8f0c7c8b53b472c14116b1be0ce9b",
+  "root": "/Users/runner/work/_temp/imageforge-queue-home.uoKxKm"
+}

@@ -665,3 +665,33 @@ the recovery poll observes it.
 - This is target-native CI evidence, not a public-release claim. Wrapper exit
   records, Task 014 selector-performance files, exact current worker publisher
   digest, and public v0.1.9 tag/asset re-download remain separate open gates.
+
+## Current target-native queue and coordination evidence — CI 30900636992
+
+- Exact source commit `5488a63fa03cd69eade09567ad7c378eae77b711` passed both
+  macOS Apple-silicon and Windows x64 jobs. Frontend tests, TypeScript checks,
+  native Rust tests, installed launch/cleanup, two-client coordination, and
+  queue-release smoke all passed.
+- macOS DMG SHA-256 is
+  `04beeaab47958f72de667c9988691e61c7e8f0c7c8b53b472c14116b1be0ce9b`;
+  embedded app SHA-256 is
+  `334ce7f4f3761b10cd1606f7b2165a11592cc490ac0bd84c1277added467cb48`.
+  `hdiutil verify` is VALID and strict deep codesign passes. Windows NSIS
+  SHA-256 is
+  `12c35831f47a2c771c52d7727b6f6582a320c5fc72c854fca05be5f545c6dad7` and
+  remains explicitly unsigned beta software.
+- Queue evidence passed: 30 trusted Enter samples, p95 `14.0 ms` macOS /
+  `11.5 ms` Windows, three sequential minimized batches, fixed-point receipts,
+  permission-denied alarm fallback, relaunch snooze, and zero RunPod creates
+  or deletes. Evidence and attestation hashes are retained in each platform
+  directory.
+- Both installed two-client audits passed 25/25 checkpoints, exact two ordered
+  deletes, zero unexpected creates/deletes, and final `podId=null`.
+- Per-phase queue wrapper records now persist exact wrapper/app exits and
+  artifact binding. macOS records intentional app exit `143`; Windows records
+  graceful `0` and intentional force-stop `-1` only when fallback was needed.
+  `release-files.sha256` covers all wrapper records.
+- This remains target-native beta evidence, not public-release completion.
+  Task 014 selector-performance files, target-native coordinated Switch audit,
+  current worker publisher/digest, public v0.1.9 tag/assets, and public
+  re-download verification remain open.
