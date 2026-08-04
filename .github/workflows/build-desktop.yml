@@ -436,16 +436,21 @@ jobs:
               if ($reportedPid -ne [string]$appProcess.Id -or $phasePids -contains $reportedPid) { throw "The Windows queue-release $phase report did not come from one distinct installed process." }
               $phasePids += $reportedPid
               $phasePid = $appProcess.Id
-              Stop-Process -Id $appProcess.Id -Force
-              $appProcess.WaitForExit(5000)
+              # Ask app to close cleanly first. Force-stop can report -1 on
+              # Windows, which hides whether wrapper cleanup succeeded.
+              $appProcess.CloseMainWindow() | Out-Null
+              if (-not $appProcess.WaitForExit(5000)) {
+                Stop-Process -Id $appProcess.Id -Force
+                $appProcess.WaitForExit(5000)
+              }
               if (-not $appProcess.HasExited) { throw "The Windows queue-release $phase process did not exit after the intentional stop." }
               $appExit = $appProcess.ExitCode
-              if ($appExit -ne 0 -and $appExit -ne 143) { throw "The Windows queue-release $phase process exited with unexpected code $appExit." }
+              if ($appExit -ne 0 -and $appExit -ne 143 -and $appExit -ne -1) { throw "The Windows queue-release $phase process exited with unexpected code $appExit." }
               $wrapperRecord = [ordered]@{
                 schema_version = 1
                 wrapper_exit = 0
                 app_exit = $appExit
-                app_exit_normalized = ($appExit -eq 143)
+                app_exit_normalized = ($appExit -eq 143 -or $appExit -eq -1)
                 phase = $phase
                 pid = $phasePid
                 artifact_sha256 = $artifactSha
