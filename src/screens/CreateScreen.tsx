@@ -22,7 +22,7 @@ import { queueRunIsActive } from '../domain/queue';
 import { canStartBatch } from '../domain/reducer';
 import { isReferenceMimeType, MAX_BATCH_REFERENCES, MAX_REFERENCE_TOTAL_BYTES, normalizeReferenceName, validateReferenceBytes } from '../domain/references';
 import { ASPECT_RATIOS } from '../domain/aspectRatio';
-import { hasActivePodIdentity, type BatchReference, type ReferenceMimeType, TERMINAL_BATCH_PHASES } from '../domain/types';
+import { podPowerAction, type BatchReference, type ReferenceMimeType, TERMINAL_BATCH_PHASES } from '../domain/types';
 import { Button, Eyebrow, PhaseBadge } from '../components/primitives';
 import { QueueRail } from '../components/QueueRail';
 import type { ScreenProps } from './types';
@@ -36,7 +36,7 @@ function readiness(state: ScreenProps['state']) {
     {
       label: 'GPU ready',
       detail: state.pod.phase === 'ready' ? `${state.pod.gpu} · model ready` : `Currently ${state.pod.phase}`,
-      ready: state.pod.phase === 'ready',
+      ready: state.pod.phase === 'ready' && podPowerAction(state.pod) === 'stop',
     },
     {
       label: 'Prompts ready',
@@ -110,7 +110,7 @@ export function CreateScreen({ state, dispatch, adapter, batchStartPending = fal
   const ownedActiveBatch = activeBatch && state.batch?.canManage === true;
   const destinationLocked = state.batch !== null && !['complete', 'cancelled'].includes(state.batch.phase);
   const terminalBatch = state.batch && TERMINAL_BATCH_PHASES.includes(state.batch.phase);
-  const hasPodIdentity = hasActivePodIdentity(state.pod);
+  const powerAction = podPowerAction(state.pod);
   const checklist = readiness(state);
   const isReady = canStartBatch(state);
   const canStage = state.queue.loadState === 'ready'
@@ -207,16 +207,14 @@ export function CreateScreen({ state, dispatch, adapter, batchStartPending = fal
         <div className="page-heading__actions">
           {terminalBatch ? <Button onClick={() => dispatch({ type: 'NEW_BATCH' })}>New brief</Button> : null}
           <Button icon={WandSparkles} onClick={() => dispatch({ type: 'LOAD_SAMPLE' })}>Load sample brief</Button>
-          {hasPodIdentity ? (
+          {powerAction === 'stop' ? (
             <PhaseBadge tone={state.pod.phase === 'ready' ? 'success' : state.pod.phase === 'error' ? 'danger' : 'warning'}>
               {state.pod.phase === 'ready' ? 'GPU ready' : state.pod.phase === 'stopping' ? 'Stopping GPU' : 'GPU active · review status'}
             </PhaseBadge>
-          ) : state.pod.phase !== 'ready' ? (
-            <Button tone="primary" icon={Zap} pending={!['offline', 'error'].includes(state.pod.phase)} disabled={!['offline', 'error'].includes(state.pod.phase)} onClick={() => dispatch({ type: 'START_POD' })}>
-              {state.pod.phase === 'offline' || state.pod.phase === 'error' ? 'Start GPU' : 'GPU starting'}
-            </Button>
           ) : (
-            <PhaseBadge tone="success">GPU ready</PhaseBadge>
+            <Button tone="primary" icon={Zap} pending={!['offline', 'ready', 'error'].includes(state.pod.phase)} disabled={!['offline', 'error'].includes(state.pod.phase) || state.pod.createRecovery !== null} onClick={() => dispatch({ type: 'START_POD' })}>
+              {state.pod.phase === 'ready' ? 'GPU identity needed' : ['offline', 'error'].includes(state.pod.phase) ? 'Start GPU' : 'GPU starting'}
+            </Button>
           )}
         </div>
       </section>

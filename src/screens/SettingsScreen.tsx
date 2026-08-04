@@ -19,7 +19,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { useState } from 'react';
-import type { CredentialKind, OperationalScenario } from '../domain/types';
+import { podPowerAction, type CredentialKind, type OperationalScenario } from '../domain/types';
 import { aspectRatioOption } from '../domain/aspectRatio';
 import { Button, Eyebrow, PhaseBadge } from '../components/primitives';
 import { SetupAssistant } from '../components/SetupAssistant';
@@ -51,8 +51,9 @@ function SettingSectionTitle({ icon: Icon, eyebrow, title }: { icon: typeof User
 }
 
 export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
+  const powerAction = podPowerAction(state.pod);
   const productionLocked = adapter.mode === 'production' && (
-    state.pod.podId !== null ||
+    powerAction === 'stop' ||
     (state.batch !== null && !['complete', 'partial_failure', 'cancelled', 'error'].includes(state.batch.phase))
   );
   const activeBatch = state.batch !== null && !['complete', 'partial_failure', 'cancelled', 'error'].includes(state.batch.phase);
@@ -151,7 +152,7 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
           <section className="panel settings-panel">
             <SettingSectionTitle icon={Server} eyebrow="GPU control" title="One GPU at a time" />
             <div className="pod-attachment-card">
-              <div className="pod-attachment-card__top"><span><Zap size={20} /></span><div><strong>{state.pod.gpu ?? 'No active compute'}</strong><small>{state.pod.podId ? `${state.pod.hourlyRate === null ? 'Rate unavailable' : `$${state.pod.hourlyRate.toFixed(2)}/hr`} · active compute` : 'Starts only when you click Start GPU.'}</small></div><PhaseBadge tone={state.pod.phase === 'ready' ? 'success' : state.pod.phase === 'error' ? 'danger' : 'neutral'}>{state.pod.phase}</PhaseBadge></div>
+              <div className="pod-attachment-card__top"><span><Zap size={20} /></span><div><strong>{powerAction === 'stop' ? state.pod.gpu ?? 'GPU identity unavailable' : 'No active compute'}</strong><small>{powerAction === 'stop' ? `${state.pod.hourlyRate === null ? 'Rate unavailable' : `$${state.pod.hourlyRate.toFixed(2)}/hr`} · exact Pod attached` : 'Starts only when you click Start GPU.'}</small></div><PhaseBadge tone={state.pod.phase === 'ready' && powerAction === 'stop' ? 'success' : state.pod.phase === 'error' ? 'danger' : 'neutral'}>{state.pod.phase === 'ready' && powerAction === 'start' ? 'identity needed' : state.pod.phase}</PhaseBadge></div>
               <dl><div><dt>Approved GPUs</dt><dd>{state.settings.slowEmergencyGpuEnabled ? '8 types' : '7 types'}</dd></div><div><dt>Region</dt><dd>EU-RO-1 Secure</dd></div><div><dt>Selection</dt><dd>{state.settings.gpuPreference === 'best_value' ? 'Best measured value' : 'Fastest measured'}</dd></div><div><dt>Shutdown</dt><dd>Manual only</dd></div></dl>
             </div>
             <div className="setting-rows pod-preferences">
@@ -162,7 +163,7 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
               <div className="duplicate-pod-card" role="alert"><AlertTriangle size={19} /><div><strong>Duplicate hourly spend detected</strong><small>{state.pod.matchingPodIds.join(' · ')}. Neither Pod will be silently deleted.</small></div></div>
             ) : null}
             <div className="manual-only-card"><ShieldCheck size={18} /><div><strong>GPU stops only when you confirm</strong><small>Finishing a batch, closing the app, idling, or losing connection will not stop it.</small></div></div>
-            {state.pod.podId ? <Button tone="danger" onClick={() => dispatch({ type: 'REQUEST_STOP_POD' })}>Stop GPU with confirmation</Button> : <Button tone="primary" icon={Zap} disabled={!['offline', 'error'].includes(state.pod.phase) || state.pod.createRecovery !== null} onClick={() => dispatch({ type: 'START_POD' })}>Start GPU explicitly</Button>}
+            {powerAction === 'stop' ? <Button tone="danger" onClick={() => dispatch({ type: 'REQUEST_STOP_POD' })}>Stop GPU with confirmation</Button> : <Button tone="primary" icon={Zap} disabled={!['offline', 'error'].includes(state.pod.phase) || state.pod.createRecovery !== null} onClick={() => dispatch({ type: 'START_POD' })}>{state.pod.phase === 'ready' ? 'GPU identity needed' : 'Start GPU explicitly'}</Button>}
             <Button icon={Check} disabled={productionLocked} onClick={() => void testConnection()}>Run read-only connection test</Button>
             <details className="advanced-settings">
               <summary><span><Database size={15} /><strong>Advanced connection details</strong></span><ChevronRight size={15} /></summary>

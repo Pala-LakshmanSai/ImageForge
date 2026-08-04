@@ -6,7 +6,7 @@ import {
   isQueueLocallyRemovableIssue,
   queueCanStartNewRun,
 } from '../domain/queue';
-import type { AppAction, AppState } from '../domain/types';
+import { hasActivePodIdentity, type AppAction, type AppState } from '../domain/types';
 import { Button, IconButton } from './primitives';
 import { QueueAlarm } from './QueueAlarm';
 
@@ -59,7 +59,7 @@ export function QueueRail({ state, dispatch }: QueueRailProps) {
   });
   const canClearHistory = hasHistory && (run === null || (run.runnerState === 'completed' && alarm?.state === 'acknowledged'));
   const nextRun = rows.filter((row) => !isQueuePlaceholder(row) && row.state === 'staged' && row.runRevision === null).length;
-  const canRun = queueCanStartNewRun(document) && state.batch === null && state.pod.phase === 'ready';
+  const canRun = queueCanStartNewRun(document) && state.batch === null && state.pod.phase === 'ready' && hasActivePodIdentity(state.pod);
   const canPause = run?.runnerState === 'running' || run?.runnerState === 'pause_after_current';
   const canResume = run !== null && ['paused', 'needs_attention'].includes(run.runnerState);
   const notificationFallbackVisible = state.queue.notificationPermission !== 'granted'

@@ -1,6 +1,6 @@
 import { Activity, ArrowDownToLine, Clock3, Coins, Gauge, Leaf, ShieldCheck, Zap } from 'lucide-react';
 import { batchCounts } from '../domain/reducer';
-import { hasActivePodIdentity, type UsageRun } from '../domain/types';
+import { podPowerAction, type UsageRun } from '../domain/types';
 import { Button, EmptyState, Eyebrow, PhaseBadge } from '../components/primitives';
 import type { ScreenProps } from './types';
 
@@ -51,8 +51,9 @@ export function UsageScreen({ state, dispatch, adapter }: ScreenProps) {
   const maxCost = Math.max(...chartRuns.map((run) => run.cost), 0.01);
   const avgSeconds = totals.images ? totals.seconds / totals.images : 0;
   const costPerImage = totals.images ? totals.cost / totals.images : 0;
-  const podHasIdentity = hasActivePodIdentity(state.pod);
-  const podStatus = state.pod.phase === 'ready'
+  const powerAction = podPowerAction(state.pod);
+  const podHasIdentity = powerAction === 'stop';
+  const podStatus = state.pod.phase === 'ready' && podHasIdentity
     ? 'Ready'
     : state.pod.phase === 'error'
       ? 'Needs attention'
@@ -68,7 +69,7 @@ export function UsageScreen({ state, dispatch, adapter }: ScreenProps) {
         <div><Eyebrow>Usage</Eyebrow><h1>Usage and cost</h1><p>Recent batches, image counts, and measured GPU cost.</p></div>
         <div className="page-heading__actions">
           <Button icon={ArrowDownToLine} disabled={!chartRuns.length} onClick={() => exportUsage(chartRuns)}>Export usage CSV</Button>
-          <PhaseBadge tone={state.pod.phase === 'ready' ? 'success' : state.pod.phase === 'error' ? 'danger' : podHasIdentity ? 'warning' : 'neutral'}>{state.pod.gpu ? `${state.pod.gpu} · $${state.pod.hourlyRate?.toFixed(2)}/hr` : 'compute offline'}</PhaseBadge>
+          <PhaseBadge tone={state.pod.phase === 'ready' && podHasIdentity ? 'success' : state.pod.phase === 'error' ? 'danger' : podHasIdentity ? 'warning' : 'neutral'}>{podHasIdentity && state.pod.gpu ? `${state.pod.gpu} · $${state.pod.hourlyRate?.toFixed(2)}/hr` : 'compute offline'}</PhaseBadge>
         </div>
       </section>
 
@@ -99,8 +100,8 @@ export function UsageScreen({ state, dispatch, adapter }: ScreenProps) {
           </section>
 
           <aside className="panel live-cost-panel">
-            <header className="panel-heading panel-heading--compact"><div><Eyebrow>GPU cost</Eyebrow><h2>{state.pod.gpu ?? 'GPU offline'}</h2></div><Zap size={20} /></header>
-            {state.pod.gpu ? (
+            <header className="panel-heading panel-heading--compact"><div><Eyebrow>GPU cost</Eyebrow><h2>{podHasIdentity ? state.pod.gpu ?? 'GPU identity unavailable' : 'GPU offline'}</h2></div><Zap size={20} /></header>
+            {powerAction === 'stop' ? (
               <>
                 <div className="live-rate"><span>Live hourly rate</span><strong>${state.pod.hourlyRate?.toFixed(2)}</strong><small>per GPU hour · one GPU</small></div>
                 <dl className="live-cost-details">

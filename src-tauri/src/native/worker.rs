@@ -2804,11 +2804,15 @@ fn map_gpu_switch_runtime_identity_response(
         let identity: NativeWorkerGpuSwitchRuntimeIdentityV1 = strict_gpu_switch_json(bytes)
             .map_err(|_| worker_gpu_switch_runtime_identity_unavailable())?;
         validate_gpu_switch_runtime_identity(&identity, expected_switch_id)?;
-        return Ok(NativeWorkerGpuSwitchRuntimeIdentityResultV1::Found(identity));
+        return Ok(NativeWorkerGpuSwitchRuntimeIdentityResultV1::Found(
+            identity,
+        ));
     }
     let error = parse_gpu_switch_error(status, bytes)
         .map_err(|_| worker_gpu_switch_runtime_identity_unavailable())?;
-    Ok(NativeWorkerGpuSwitchRuntimeIdentityResultV1::Rejected(error))
+    Ok(NativeWorkerGpuSwitchRuntimeIdentityResultV1::Rejected(
+        error,
+    ))
 }
 
 fn gpu_switch_error_spec(code: &str) -> Option<(StatusCode, &'static str)> {
@@ -5112,7 +5116,8 @@ mod tests {
             runtime_pod_id: "replacement-pod-1".to_owned(),
             runtime_volume_id: "ukh207b26r".to_owned(),
             runtime_data_center_id: "EU-RO-1".to_owned(),
-            data_root_binding_sha256: "1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
+            data_root_binding_sha256:
+                "1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
             expected_provider_gpu_id: "NVIDIA GeForce RTX 4090".to_owned(),
             device_count: 1,
             cuda_device: NativeWorkerCudaDeviceIdentityV1 {
@@ -5128,7 +5133,8 @@ mod tests {
             model_id: IMAGEFORGE_MODEL_ID.to_owned(),
             model_revision: IMAGEFORGE_MODEL_REVISION.to_owned(),
             create_contract_revision: 1,
-            create_marker_sha256: "2222222222222222222222222222222222222222222222222222222222222222".to_owned(),
+            create_marker_sha256:
+                "2222222222222222222222222222222222222222222222222222222222222222".to_owned(),
             replacement_attempt_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             replacement_attempt_revision: 1,
         }

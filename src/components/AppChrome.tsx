@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import type { Dispatch } from 'react';
 import { batchCounts } from '../domain/reducer';
-import { hasActivePodIdentity, type AppAction, type AppState, type PodPhase, type ViewId } from '../domain/types';
+import { podPowerAction, type AppAction, type AppState, type PodPhase, type ViewId } from '../domain/types';
 import { BrandMark } from './BrandMark';
 import { Button, IconButton, LinearProgress, StatusDot } from './primitives';
 
@@ -67,7 +67,8 @@ function commandEta(state: AppState): string {
 export function TopBar({ state, dispatch }: { state: AppState; dispatch: Dispatch<AppAction> }) {
   const counts = batchCounts(state.batch);
   const podBusy = !['offline', 'ready', 'error'].includes(state.pod.phase);
-  const hasPodIdentity = hasActivePodIdentity(state.pod);
+  const powerAction = podPowerAction(state.pod);
+  const exactPodReady = state.pod.phase === 'ready' && powerAction === 'stop';
   // An error is not completed work. Keep the track visibly empty so a failed
   // or ambiguous RunPod start cannot be mistaken for a successful 100% run.
   const needsAction = state.pod.phase === 'error' || state.pod.createRecovery !== null;
@@ -83,8 +84,8 @@ export function TopBar({ state, dispatch }: { state: AppState; dispatch: Dispatc
       <div className="command-track" aria-label="Current status">
         <div className="command-track__title">
           <span className={`command-track__phase command-track__phase--${phaseTone(state.pod.phase)}`}>
-            <StatusDot tone={phaseTone(state.pod.phase)} pulse={state.pod.phase === 'ready' || podBusy} />
-            {state.batch?.phase === 'running' ? 'generating' : podLabel(state.pod.phase)}
+            <StatusDot tone={exactPodReady ? phaseTone(state.pod.phase) : powerAction === 'start' && state.pod.phase === 'ready' ? 'neutral' : phaseTone(state.pod.phase)} pulse={exactPodReady || podBusy} />
+            {state.batch?.phase === 'running' ? 'generating' : powerAction === 'start' && state.pod.phase === 'ready' ? 'identity needed' : podLabel(state.pod.phase)}
           </span>
           <strong>{commandTitle(state)}</strong>
         </div>
@@ -103,7 +104,7 @@ export function TopBar({ state, dispatch }: { state: AppState; dispatch: Dispatc
           onClick={() => dispatch({ type: 'OPEN_GPU_SELECTOR' })}
         >
           <span>GPU</span>
-          <strong>{state.pod.gpu ?? 'offline'}</strong>
+          <strong>{powerAction === 'stop' ? state.pod.gpu ?? 'GPU identity unavailable' : 'offline'}</strong>
         </button>
         <div className="top-instrument top-instrument--health">
           <StatusDot tone={state.pod.health === 'healthy' ? 'success' : state.pod.health === 'degraded' ? 'danger' : 'neutral'} />
@@ -125,7 +126,7 @@ export function TopBar({ state, dispatch }: { state: AppState; dispatch: Dispatc
             })
           }
         />
-        {hasPodIdentity ? (
+        {powerAction === 'stop' ? (
           <Button compact tone="danger" icon={Square} onClick={() => dispatch({ type: 'REQUEST_STOP_POD' })}>
             Stop GPU
           </Button>
@@ -135,10 +136,10 @@ export function TopBar({ state, dispatch }: { state: AppState; dispatch: Dispatc
             tone="primary"
             icon={Sparkles}
             pending={podBusy}
-            disabled={podBusy || state.pod.createRecovery !== null}
+            disabled={podBusy || state.pod.createRecovery !== null || state.pod.phase === 'ready'}
             onClick={() => dispatch({ type: 'START_POD' })}
           >
-            {state.pod.phase === 'selecting' ? 'Refreshing' : podBusy ? 'Starting' : 'Start GPU'}
+            {state.pod.phase === 'selecting' ? 'Refreshing' : state.pod.phase === 'ready' ? 'GPU identity needed' : podBusy ? 'Starting' : 'Start GPU'}
           </Button>
         )}
       </div>

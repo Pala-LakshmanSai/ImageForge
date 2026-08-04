@@ -474,6 +474,7 @@ describe('ImageForge shell', () => {
     render(<App initialState={state} adapter={immediateAdapter()} />);
 
     expect(screen.queryByRole('button', { name: 'Start GPU' })).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Stop GPU' }).length).toBeGreaterThan(0);
     expect(screen.getByText('GPU active · review status')).toBeVisible();
   });
 
@@ -494,6 +495,66 @@ describe('ImageForge shell', () => {
 
     expect(screen.getByText('GPU needs attention')).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Start GPU' })).not.toBeInTheDocument();
+  });
+
+  it.each(['create', 'progress', 'settings'] as const)('uses the exact Pod identity for %s power controls when health is degraded', (view) => {
+    const state = createConfiguredInitialState();
+    state.activeView = view;
+    state.pod = {
+      ...state.pod,
+      phase: 'error',
+      health: 'degraded',
+      statusDetail: 'The worker status is temporarily unavailable; the Pod may still be billed.',
+      errorMessage: 'The worker status is temporarily unavailable.',
+      podId: 'pod-degraded-014',
+      matchingPodIds: ['pod-degraded-014'],
+      gpu: 'RTX 4090',
+    };
+
+    render(<App initialState={state} adapter={immediateAdapter()} />);
+
+    expect(screen.queryByRole('button', { name: 'Start GPU' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Start GPU explicitly' })).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Stop GPU' }).length).toBeGreaterThan(0);
+    if (view === 'settings') expect(screen.getByRole('button', { name: 'Stop GPU with confirmation' })).toBeVisible();
+  });
+
+  it('keeps Stop authoritative through an unknown-style reconnecting state', () => {
+    const state = createConfiguredInitialState();
+    state.activeView = 'progress';
+    state.pod = {
+      ...state.pod,
+      phase: 'reconnecting',
+      health: 'checking',
+      statusDetail: 'The exact worker status is unknown while reconnecting.',
+      podId: 'pod-unknown-014',
+      matchingPodIds: ['pod-unknown-014'],
+      gpu: 'RTX 4090',
+    };
+
+    render(<App initialState={state} adapter={immediateAdapter()} />);
+
+    expect(screen.getAllByRole('button', { name: 'Stop GPU' }).length).toBeGreaterThan(0);
+    expect(screen.queryByRole('button', { name: 'Start GPU' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Restart GPU to resume' })).not.toBeInTheDocument();
+  });
+
+  it('fails closed when a Ready phase has no exact Pod identity', () => {
+    const state = createConfiguredInitialState();
+    state.pod = {
+      ...state.pod,
+      phase: 'ready',
+      health: 'degraded',
+      statusDetail: 'The worker identity is unavailable.',
+      podId: null,
+      matchingPodIds: [],
+      gpu: 'RTX 4090',
+    };
+
+    render(<App initialState={state} adapter={immediateAdapter()} />);
+
+    expect(screen.queryByRole('button', { name: 'Stop GPU' })).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'GPU identity needed' }).every((button) => (button as HTMLButtonElement).disabled)).toBe(true);
   });
 
   it('shows a peer GPU-switch consent prompt and records only the explicit decision', async () => {

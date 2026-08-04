@@ -1,6 +1,6 @@
 import { BellRing, Clock3 } from 'lucide-react';
 import { createPortal } from 'react-dom';
-import { hasActivePodIdentity, type AppAction, type AppState } from '../domain/types';
+import { podPowerAction, type AppAction, type AppState } from '../domain/types';
 import { Button } from './primitives';
 
 interface QueueAlarmProps {
@@ -49,7 +49,7 @@ export function QueueAlarm({ state, dispatch, currentCohortArchived }: QueueAlar
         {alarm.state !== 'acknowledged' ? <Button compact onClick={() => dispatch({ type: 'DISMISS_QUEUE_ALARM' })}>{alarm.state === 'disarmed' ? 'Acknowledge completion' : 'Dismiss alarm'}</Button> : null}
         {alarm.state === 'acknowledged' && !currentCohortArchived ? <Button compact tone="secondary" onClick={() => dispatch({ type: 'CLEAR_QUEUE_COMPLETED' })}>Clear completed from queue</Button> : null}
         {alarm.state === 'acknowledged' && currentCohortArchived ? <Button compact tone="danger" onClick={() => dispatch({ type: 'CLEAR_QUEUE_HISTORY' })}>Clear history</Button> : null}
-        {hasActivePodIdentity(state.pod) ? <Button compact tone="danger" onClick={() => dispatch({ type: 'REQUEST_STOP_POD' })}>Stop GPU…</Button> : null}
+        {podPowerAction(state.pod) === 'stop' ? <Button compact tone="danger" onClick={() => dispatch({ type: 'REQUEST_STOP_POD' })}>Stop GPU…</Button> : null}
       </div>
     </aside>
   );

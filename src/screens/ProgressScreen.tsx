@@ -22,7 +22,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { batchCounts } from '../domain/reducer';
-import { hasActivePodIdentity, type BatchPrompt, type BatchState } from '../domain/types';
+import { podPowerAction, type BatchPrompt, type BatchState } from '../domain/types';
 import { aspectRatioOption } from '../domain/aspectRatio';
 import { ACTIVE_PROMPT_VISIBLE_ROW_LIMIT, isQueuePlaceholder } from '../domain/queue';
 import { SimulatedImage } from '../components/SimulatedImage';
@@ -207,8 +207,9 @@ async function exportManifest(
 }
 
 function NoBatch({ state, dispatch }: Pick<ScreenProps, 'state' | 'dispatch'>) {
-  const transitioning = !['offline', 'ready', 'error'].includes(state.pod.phase);
-  const hasPodIdentity = hasActivePodIdentity(state.pod);
+  const powerAction = podPowerAction(state.pod);
+  const exactPodReady = state.pod.phase === 'ready' && powerAction === 'stop';
+  const transitioning = powerAction === 'start' && !['offline', 'ready', 'error'].includes(state.pod.phase);
   if (transitioning) {
     return (
       <div className="screen progress-screen">
@@ -226,15 +227,15 @@ function NoBatch({ state, dispatch }: Pick<ScreenProps, 'state' | 'dispatch'>) {
 
   return (
     <div className="screen progress-screen">
-      <section className="page-heading"><div><Eyebrow>Progress</Eyebrow><h1>No batch running</h1><p>{state.pod.phase === 'ready' ? 'The GPU is ready for a new batch.' : 'Start a GPU when you are ready. ImageForge never starts compute in the background.'}</p></div></section>
+      <section className="page-heading"><div><Eyebrow>Progress</Eyebrow><h1>No batch running</h1><p>{powerAction === 'stop' ? 'The exact GPU remains attached while its status is reviewed.' : exactPodReady ? 'The GPU is ready for a new batch.' : 'Start a GPU when you are ready. ImageForge never starts compute in the background.'}</p></div></section>
       <section className="panel empty-progress-panel">
         <EmptyState
-          icon={state.pod.phase === 'ready' ? Sparkles : WifiOff}
-          title={state.pod.phase === 'ready' ? 'Ready for a new batch' : state.pod.phase === 'error' ? 'GPU needs attention' : 'GPU safely offline'}
-          copy={state.pod.errorMessage ?? (state.pod.phase === 'ready' ? 'Add prompts and choose an output folder in Create.' : 'No compute is running and no hourly GPU cost is accruing.')}
+          icon={exactPodReady ? Sparkles : WifiOff}
+          title={powerAction === 'stop' ? state.pod.phase === 'error' ? 'GPU needs attention' : 'GPU status needs review' : exactPodReady ? 'Ready for a new batch' : 'GPU identity needed'}
+          copy={state.pod.errorMessage ?? (powerAction === 'stop' ? 'The exact GPU Pod remains attached. Review status before generating or stopping it.' : exactPodReady ? 'Add prompts and choose an output folder in Create.' : 'The worker reported ready without an exact Pod identity. Refresh status before generating.')}
           action={
             <div className="empty-state__actions">
-              {!hasPodIdentity && state.pod.phase !== 'ready' ? <Button tone="primary" icon={Zap} onClick={() => dispatch({ type: 'START_POD' })}>Start GPU</Button> : null}
+              {powerAction === 'start' ? <Button tone="primary" icon={Zap} pending={transitioning} disabled={transitioning || state.pod.phase === 'ready' || state.pod.createRecovery !== null} onClick={() => dispatch({ type: 'START_POD' })}>{state.pod.phase === 'ready' ? 'GPU identity needed' : 'Start GPU'}</Button> : null}
               <Button icon={ArrowRight} onClick={() => dispatch({ type: 'NAVIGATE', view: 'create' })}>Open Create</Button>
             </div>
           }
@@ -371,7 +372,7 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
           ) : null}
           {batch.phase === 'partial_failure' ? <Button tone="primary" icon={RotateCw} onClick={() => dispatch({ type: 'RETRY_FAILED' })}>Retry {counts.failed} failed</Button> : null}
           {canResolveInterrupted && state.pod.phase === 'ready' ? <Button tone="primary" icon={Play} onClick={() => dispatch({ type: 'RESUME_INTERRUPTED_BATCH' })}>Resume interrupted batch</Button> : null}
-          {canResolveInterrupted && ['offline', 'error'].includes(state.pod.phase) ? <Button tone="primary" icon={Zap} onClick={() => dispatch({ type: 'START_POD' })}>Restart GPU to resume</Button> : null}
+          {canResolveInterrupted && podPowerAction(state.pod) === 'start' && ['offline', 'error'].includes(state.pod.phase) ? <Button tone="primary" icon={Zap} onClick={() => dispatch({ type: 'START_POD' })}>Restart GPU to resume</Button> : null}
           {settled || isInterrupted ? <Button icon={FileDown} onClick={() => void exportManifest(batch.prompts, batch.id, batch.name, adapter, dispatch)}>Export CSV</Button> : null}
           <Button
             icon={FolderOpen}

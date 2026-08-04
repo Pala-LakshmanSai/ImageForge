@@ -45,6 +45,20 @@ describe('QueueRail', () => {
     expect(screen.getByLabelText('450 local queue batches')).toBeInTheDocument();
   });
 
+  it('does not enable Run queue for a ready phase without an exact Pod identity', () => {
+    const state = createConfiguredInitialState();
+    state.pod = { ...state.pod, phase: 'ready', podId: null, gpu: 'RTX 4090', health: 'degraded' };
+    state.queue = {
+      ...state.queue,
+      loadState: 'ready',
+      document: { schemaVersion: 1, items: [item(1)], run: null, alarm: null },
+    };
+
+    render(<QueueRail state={state} dispatch={vi.fn()} />);
+
+    expect(screen.getByRole('button', { name: 'Run queue' })).toBeDisabled();
+  });
+
   it('offers an explicit reset confirmation entry only for an unrecoverable store', () => {
     const dispatch = vi.fn();
     const state = createConfiguredInitialState();

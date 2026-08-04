@@ -21,6 +21,7 @@ use native::profile_control::{profile_control_lease_busy, ProfileControlLease};
 use native::queue::QueueItemPayloadPurpose;
 use native::queue_release_smoke::QueueReleaseProviderMutationKind;
 use native::runpod::{NativeRunPodDeleteDispositionV1, NativeRunPodMutationKind};
+use native::trusted_input::TrustedInputBroker;
 use native::worker::{
     gpu_switch_runtime_identity_sha256, NativeWorkerGpuSwitchCreateRequestV1,
     NativeWorkerGpuSwitchCreateResultV1, NativeWorkerGpuSwitchOwnerActionResultV1,
@@ -72,6 +73,7 @@ struct NativeState {
     gpu_inventory: GpuInventoryService,
     gpu_pod: GpuPodService,
     gpu_start_foreground: StartForegroundGate,
+    trusted_input: TrustedInputBroker,
     gpu_switch: GpuSwitchService,
     worker: WorkerApi,
     downloader: Downloader,
@@ -115,7 +117,9 @@ impl NativeState {
         }
         let gpu_inventory = GpuInventoryService::new()?;
         let gpu_pod = GpuPodService::new(gpu_inventory.process_epoch_id());
-        let gpu_start_foreground = StartForegroundGate::new(gpu_inventory.process_epoch_id());
+        let trusted_input = TrustedInputBroker::default();
+        let gpu_start_foreground =
+            StartForegroundGate::new(gpu_inventory.process_epoch_id(), trusted_input.clone());
         let gpu_switch = GpuSwitchService::new(gpu_inventory.process_epoch_id().to_owned())?;
         let worker = WorkerApi::new(vault.clone(), session.clone())?;
         let downloader = Downloader::new(worker.clone(), destination.clone());
@@ -129,6 +133,7 @@ impl NativeState {
             gpu_inventory,
             gpu_pod,
             gpu_start_foreground,
+            trusted_input,
             gpu_switch,
             worker,
             downloader,
@@ -175,15 +180,17 @@ struct StartForegroundPermit {
 struct StartForegroundGate {
     pending: Arc<Mutex<Option<StartForegroundPermit>>>,
     process_epoch_id: String,
+    trusted_input: TrustedInputBroker,
     #[cfg(test)]
     test_decision: Arc<Mutex<Option<bool>>>,
 }
 
 impl StartForegroundGate {
-    fn new(process_epoch_id: String) -> Self {
+    fn new(process_epoch_id: String, trusted_input: TrustedInputBroker) -> Self {
         Self {
             pending: Arc::new(Mutex::new(None)),
             process_epoch_id,
+            trusted_input,
             #[cfg(test)]
             test_decision: Arc::new(Mutex::new(None)),
         }
@@ -200,8 +207,14 @@ impl StartForegroundGate {
         if !window_is_foreground(window)? {
             return Err(gpu_start_foreground_required());
         }
+        // Consume the native activation before opening the modal confirmation;
+        // a user may deliberate longer than the one-second serial lifetime.
+        // The post-dialog foreground check below still prevents a background
+        // or focus-stolen confirmation from minting authority.
+        let _activation_kind = self.trusted_input.consume(window.label(), Instant::now())?;
         let accepted = self.show_native_confirmation(window, action, &description);
         if !accepted || !window_is_foreground(window)? {
+            self.trusted_input.invalidate();
             return Err(gpu_start_foreground_required());
         }
         let permit = StartForegroundPermit {
@@ -4120,11 +4133,46 @@ pub fn run() {
                 .on_new_window(|_, _| NewWindowResponse::Deny)
                 .build()?;
             let selector_perf = app.state::<NativeState>().gpu_selector_perf.clone();
+            let trusted_input = app.state::<NativeState>().trusted_input.clone();
+            let native_input_hook = native::trusted_input::install(
+                &window,
+                trusted_input.clone(),
+                selector_perf.clone(),
+            )
+            .ok();
             window.on_window_event(move |event| match event {
-                WindowEvent::Focused(false)
-                | WindowEvent::Resized(_)
-                | WindowEvent::ScaleFactorChanged { .. }
-                | WindowEvent::Destroyed => selector_perf.invalidate_native_sample(),
+                WindowEvent::Focused(false) => {
+                    selector_perf.invalidate_native_sample();
+                    trusted_input.invalidate();
+                    if let Some(hook) = &native_input_hook {
+                        hook.invalidate();
+                    }
+                }
+                WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                    selector_perf.invalidate_native_sample();
+                    trusted_input.invalidate();
+                    if let Some(hook) = &native_input_hook {
+                        hook.invalidate();
+                        // Resizing/scaling invalidates the old activation and
+                        // selector sample, but does not imply that focus was
+                        // lost.  Re-arm the already-registered native hook;
+                        // each platform callback still checks foreground,
+                        // visibility, and focus before recording evidence.
+                        hook.activate();
+                    }
+                }
+                WindowEvent::Focused(true) => {
+                    if let Some(hook) = &native_input_hook {
+                        hook.activate();
+                    }
+                }
+                WindowEvent::Destroyed => {
+                    selector_perf.invalidate_native_sample();
+                    trusted_input.invalidate();
+                    if let Some(hook) = &native_input_hook {
+                        hook.remove_on_main_thread();
+                    }
+                }
                 _ => {}
             });
             Ok(())

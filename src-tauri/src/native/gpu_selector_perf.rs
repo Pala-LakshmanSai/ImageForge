@@ -50,18 +50,16 @@ pub enum GpuSelectorPerfActionV1 {
 /// only the kind; action, viewport, UUID, and monotonic start stay native.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NativeSelectorInputKind {
-    KeyDown,
+    KeyboardMove,
+    KeyboardSelect,
     PrimaryMouseUp,
 }
 
 impl NativeSelectorInputKind {
     fn matches(self, action: GpuSelectorPerfActionV1) -> bool {
         match self {
-            Self::KeyDown => matches!(
-                action,
-                GpuSelectorPerfActionV1::KeyboardMove
-                    | GpuSelectorPerfActionV1::KeyboardSelect
-            ),
+            Self::KeyboardMove => action == GpuSelectorPerfActionV1::KeyboardMove,
+            Self::KeyboardSelect => action == GpuSelectorPerfActionV1::KeyboardSelect,
             Self::PrimaryMouseUp => matches!(
                 action,
                 GpuSelectorPerfActionV1::ColdOpen
@@ -744,10 +742,32 @@ mod tests {
             .unwrap()
             .is_none());
         let started = host
-            .start_native_inner(NativeSelectorInputKind::KeyDown, Instant::now())
+            .start_native_inner(NativeSelectorInputKind::KeyboardMove, Instant::now())
             .unwrap()
             .expect("matching native key should start the sample");
         assert_eq!(started.action, GpuSelectorPerfActionV1::KeyboardMove);
+    }
+
+    #[test]
+    fn native_input_kind_is_action_exact() {
+        assert!(
+            NativeSelectorInputKind::KeyboardMove.matches(GpuSelectorPerfActionV1::KeyboardMove)
+        );
+        assert!(
+            !NativeSelectorInputKind::KeyboardMove.matches(GpuSelectorPerfActionV1::KeyboardSelect)
+        );
+        assert!(NativeSelectorInputKind::KeyboardSelect
+            .matches(GpuSelectorPerfActionV1::KeyboardSelect));
+        assert!(
+            !NativeSelectorInputKind::KeyboardSelect.matches(GpuSelectorPerfActionV1::KeyboardMove)
+        );
+        assert!(NativeSelectorInputKind::PrimaryMouseUp.matches(GpuSelectorPerfActionV1::ColdOpen));
+        assert!(NativeSelectorInputKind::PrimaryMouseUp.matches(GpuSelectorPerfActionV1::WarmOpen));
+        assert!(NativeSelectorInputKind::PrimaryMouseUp
+            .matches(GpuSelectorPerfActionV1::RefreshLoading));
+        assert!(
+            !NativeSelectorInputKind::PrimaryMouseUp.matches(GpuSelectorPerfActionV1::KeyboardMove)
+        );
     }
 
     #[test]

@@ -152,7 +152,7 @@ async function runRole(
   invariant(authoritative?.phase === 'loading', `${role} did not project the loading lifecycle`);
   invariant(authoritative.podId === FIRST_POD_ID, `${role} projected the wrong loading Pod`);
   await waitFor(
-    () => renderedTextIncludes('Currently loading', 'GPU starting'),
+    () => renderedTextIncludes('Currently loading', 'GPU active · review status'),
     `${role} did not render the loading lifecycle`,
   );
   await controls.checkpoint('lifecycle_loading');
@@ -161,7 +161,7 @@ async function runRole(
   authoritative = runtime.getAuthoritativePodState?.();
   invariant(authoritative?.phase === 'warming', `${role} did not project the warming lifecycle`);
   await waitFor(
-    () => renderedTextIncludes('Currently warming', 'GPU starting'),
+    () => renderedTextIncludes('Currently warming', 'GPU active · review status'),
     `${role} did not render the warming lifecycle`,
   );
   await controls.checkpoint('lifecycle_warming');

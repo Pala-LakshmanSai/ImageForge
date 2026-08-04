@@ -151,6 +151,13 @@ export function hasActivePodIdentity(pod: Pick<PodState, 'podId'>): boolean {
   return pod.podId !== null;
 }
 
+export type PodPowerAction = 'start' | 'stop';
+
+/** Start/Stop presentation is an exact-Pod decision, never a phase decision. */
+export function podPowerAction(pod: Pick<PodState, 'podId'>): PodPowerAction {
+  return hasActivePodIdentity(pod) ? 'stop' : 'start';
+}
+
 export interface BatchState {
   id: string;
   name: string;

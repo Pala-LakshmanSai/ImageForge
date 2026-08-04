@@ -14,6 +14,7 @@ pub mod queue_release_smoke;
 pub mod runpod;
 pub mod session;
 pub mod smoke;
+pub mod trusted_input;
 pub mod vault;
 pub mod worker;
 

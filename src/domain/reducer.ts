@@ -3,6 +3,7 @@ import { MAX_BATCH_REFERENCES } from './references';
 import { DEFAULT_ASPECT_RATIO } from './aspectRatio';
 import { createInitialQueueUiState, queueRunIsActive } from './queue';
 import { DEFAULT_STUDIO_PROFILE, emptyCredentialMetadata } from '../adapters/imageForgeAdapter';
+import { hasActivePodIdentity } from './types';
 import type {
   AppAction,
   AppState,
@@ -350,6 +351,7 @@ export function canStartBatch(state: AppState): boolean {
   return (
     state.setup.completed &&
     state.pod.phase === 'ready' &&
+    hasActivePodIdentity(state.pod) &&
     state.batch === null &&
     state.draft.prompts.length > 0 &&
     state.draft.destination !== null &&
@@ -1315,7 +1317,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         !state.batch ||
         state.batch.phase !== 'interrupted' ||
         (state.batch.canManage === false || (state.batch.canManage === undefined && state.batch.owner !== state.settings.userName)) ||
-        state.pod.phase !== 'ready'
+        state.pod.phase !== 'ready' ||
+        !hasActivePodIdentity(state.pod)
       ) return state;
       let started = false;
       const prompts = state.batch.prompts.map((prompt) => {
