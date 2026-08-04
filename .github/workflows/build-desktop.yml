@@ -369,11 +369,12 @@ jobs:
           $result = Join-Path $env:RUNNER_TEMP 'imageforge-queue-release-result.txt'
           $evidence = Join-Path $env:RUNNER_TEMP 'ImageForge-windows-queue-release-smoke.json'
           $attestation = Join-Path $env:RUNNER_TEMP 'ImageForge-windows-queue-release-attestation.json'
+          $wrapperDir = Join-Path $env:RUNNER_TEMP 'imageforge-queue-release-wrapper'
           $stdout = Join-Path $env:RUNNER_TEMP 'imageforge-queue-release-{0}.stdout'
           $stderr = Join-Path $env:RUNNER_TEMP 'imageforge-queue-release-{0}.stderr'
           $appProcess = $null
           try {
-            foreach ($path in @($installRoot, $stateRoot, $profile, $output)) {
+            foreach ($path in @($installRoot, $stateRoot, $profile, $output, $wrapperDir)) {
               if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
               New-Item -ItemType Directory -Path $path -Force | Out-Null
             }
@@ -392,6 +393,7 @@ jobs:
             if (-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) {
               throw "Installed application executable was not found at $installedExe."
             }
+            $artifactSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer[0].FullName).Hash.ToLowerInvariant()
 
             $phasePids = @()
             foreach ($phase in @('run', 'resume', 'relaunch')) {
@@ -433,8 +435,24 @@ jobs:
               $reportedPid = [regex]::Match($report, '(?m)^pid=(\d+); window=main;').Groups[1].Value
               if ($reportedPid -ne [string]$appProcess.Id -or $phasePids -contains $reportedPid) { throw "The Windows queue-release $phase report did not come from one distinct installed process." }
               $phasePids += $reportedPid
+              $phasePid = $appProcess.Id
               Stop-Process -Id $appProcess.Id -Force
               $appProcess.WaitForExit(5000)
+              if (-not $appProcess.HasExited) { throw "The Windows queue-release $phase process did not exit after the intentional stop." }
+              $appExit = $appProcess.ExitCode
+              if ($appExit -ne 0 -and $appExit -ne 143) { throw "The Windows queue-release $phase process exited with unexpected code $appExit." }
+              $wrapperRecord = [ordered]@{
+                schema_version = 1
+                wrapper_exit = 0
+                app_exit = $appExit
+                app_exit_normalized = ($appExit -eq 143)
+                phase = $phase
+                pid = $phasePid
+                artifact_sha256 = $artifactSha
+                root = $installRoot
+              }
+              $wrapperRecord | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 -LiteralPath (Join-Path $wrapperDir "ImageForge-windows-queue-release-$phase.wrapper.result")
+              Copy-Item -LiteralPath (Join-Path $wrapperDir "ImageForge-windows-queue-release-$phase.wrapper.result") -Destination (Join-Path $bundleDir "ImageForge-windows-queue-release-$phase.wrapper.result") -Force
               $appProcess = $null
             }
             if (-not (Test-Path -LiteralPath $evidence) -or -not (Test-Path -LiteralPath $attestation)) { throw 'The final Windows queue-release evidence files are missing.' }
@@ -458,7 +476,7 @@ jobs:
                 }
               }
             }
-            foreach ($path in @($installRoot, $stateRoot, $profile, $output)) {
+            foreach ($path in @($installRoot, $stateRoot, $profile, $output, $wrapperDir)) {
               Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
               if (Test-Path -LiteralPath $path) { throw "Queue-release temporary path remained: $path" }
             }
@@ -477,6 +495,7 @@ jobs:
             ${{ runner.temp }}/imageforge-queue-release-result.txt
             ${{ runner.temp }}/ImageForge-windows-queue-release-smoke.json
             ${{ runner.temp }}/ImageForge-windows-queue-release-attestation.json
+            ${{ runner.temp }}/imageforge-queue-release-wrapper/*.wrapper.result
             ${{ runner.temp }}/imageforge-queue-release-*.stdout
             ${{ runner.temp }}/imageforge-queue-release-*.stderr
           if-no-files-found: ignore
@@ -501,6 +520,9 @@ jobs:
           $queueReleaseEvidence = Join-Path $bundleDir 'ImageForge-windows-queue-release-smoke.json'
           $queueReleaseAttestation = Join-Path $bundleDir 'ImageForge-windows-queue-release-attestation.json'
           $queueReleaseResult = Join-Path $bundleDir 'ImageForge-windows-queue-release-result.txt'
+          $queueWrapperRun = Join-Path $bundleDir 'ImageForge-windows-queue-release-run.wrapper.result'
+          $queueWrapperResume = Join-Path $bundleDir 'ImageForge-windows-queue-release-resume.wrapper.result'
+          $queueWrapperRelaunch = Join-Path $bundleDir 'ImageForge-windows-queue-release-relaunch.wrapper.result'
           [ordered]@{
             product = 'ImageForge'
             version = [string]$package.version
@@ -528,6 +550,11 @@ jobs:
             queue_release_attestation_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $queueReleaseAttestation).Hash.ToLowerInvariant()
             queue_release_result = 'ImageForge-windows-queue-release-result.txt'
             queue_release_result_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $queueReleaseResult).Hash.ToLowerInvariant()
+            queue_release_wrapper_records = @(
+              @{ name = 'ImageForge-windows-queue-release-run.wrapper.result'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $queueWrapperRun).Hash.ToLowerInvariant() },
+              @{ name = 'ImageForge-windows-queue-release-resume.wrapper.result'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $queueWrapperResume).Hash.ToLowerInvariant() },
+              @{ name = 'ImageForge-windows-queue-release-relaunch.wrapper.result'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $queueWrapperRelaunch).Hash.ToLowerInvariant() }
+            )
           } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 -LiteralPath (Join-Path $bundleDir 'ImageForge-windows-release-metadata.json')
 
       - name: Upload Windows installer
@@ -543,6 +570,7 @@ jobs:
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ImageForge-windows-queue-release-smoke.json
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ImageForge-windows-queue-release-attestation.json
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ImageForge-windows-queue-release-result.txt
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ImageForge-windows-queue-release-*.wrapper.result
           if-no-files-found: error
 
   macos:
@@ -828,20 +856,34 @@ jobs:
           result="$RUNNER_TEMP/imageforge-queue-release-result.txt"
           evidence="$RUNNER_TEMP/ImageForge-macos-queue-release-smoke.json"
           attestation="$RUNNER_TEMP/ImageForge-macos-queue-release-attestation.json"
+          wrapper_dir="$RUNNER_TEMP/imageforge-queue-release-wrapper"
           log_prefix="$RUNNER_TEMP/imageforge-queue-release"
           app_pid=""
+          last_app_exit=0
           mounted=0
           stop_app() {
-            if [ -n "$app_pid" ] && kill -0 "$app_pid" 2>/dev/null; then
-              kill "$app_pid" 2>/dev/null || true
+            local pid="$app_pid"
+            if [ -z "$pid" ]; then
+              last_app_exit=0
+              return 0
+            fi
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+              kill "$pid" 2>/dev/null || true
               for _ in $(seq 1 10); do
-                if ! kill -0 "$app_pid" 2>/dev/null; then break; fi
+                if ! kill -0 "$pid" 2>/dev/null; then break; fi
                 sleep 1
               done
-              if kill -0 "$app_pid" 2>/dev/null; then kill -9 "$app_pid" 2>/dev/null || true; fi
-              wait "$app_pid" 2>/dev/null || true
+              if kill -0 "$pid" 2>/dev/null; then kill -9 "$pid" 2>/dev/null || true; fi
             fi
+            set +e
+            wait "$pid" 2>/dev/null
+            last_app_exit=$?
+            set -e
             app_pid=""
+            if [ "$last_app_exit" -ne 0 ] && [ "$last_app_exit" -ne 143 ]; then
+              echo "The installed queue-release process exited with unexpected code $last_app_exit." >&2
+              return 1
+            fi
           }
           cleanup() {
             local status=$?
@@ -856,7 +898,7 @@ jobs:
           }
           trap cleanup EXIT
           rm -f "$result" "$evidence" "$attestation" "$log_prefix"-*.log
-          mkdir -p "$smoke_home/tmp" "$output"
+          mkdir -p "$smoke_home/tmp" "$output" "$wrapper_dir"
 
           hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" "${dmg_candidates[0]}" >/dev/null
           mounted=1
@@ -877,6 +919,7 @@ jobs:
             echo "Expected exactly one installed ImageForge executable; found ${#binary_candidates[@]}." >&2
             exit 1
           fi
+          artifact_sha256="$(shasum -a 256 "${dmg_candidates[0]}" | awk '{print $1}')"
 
           observed_pids=""
           for phase in run resume relaunch; do
@@ -921,7 +964,23 @@ jobs:
               exit 1
             fi
             observed_pids="$observed_pids $reported_pid"
+            phase_pid="$app_pid"
             stop_app
+            node -e '
+              const fs = require("node:fs");
+              const [phase, pid, appExit, artifactSha, root, out] = process.argv.slice(1);
+              fs.writeFileSync(out, JSON.stringify({
+                schema_version: 1,
+                wrapper_exit: 0,
+                app_exit: Number(appExit),
+                app_exit_normalized: Number(appExit) === 143,
+                phase,
+                pid: Number(pid),
+                artifact_sha256: artifactSha,
+                root,
+              }, null, 2) + "\n");
+            ' "$phase" "$phase_pid" "$last_app_exit" "$artifact_sha256" "$smoke_home" "$wrapper_dir/ImageForge-macos-queue-release-$phase.wrapper.result"
+            cp "$wrapper_dir/ImageForge-macos-queue-release-$phase.wrapper.result" "$bundle_dir/dmg/ImageForge-macos-queue-release-$phase.wrapper.result"
           done
           if [ ! -f "$evidence" ] || [ ! -f "$attestation" ]; then
             echo 'The final macOS queue-release evidence files are missing.' >&2
@@ -947,6 +1006,7 @@ jobs:
             ${{ runner.temp }}/imageforge-queue-release-result.txt
             ${{ runner.temp }}/ImageForge-macos-queue-release-smoke.json
             ${{ runner.temp }}/ImageForge-macos-queue-release-attestation.json
+            ${{ runner.temp }}/imageforge-queue-release-wrapper/*.wrapper.result
             ${{ runner.temp }}/imageforge-queue-release-*.log
           if-no-files-found: ignore
 
@@ -970,6 +1030,12 @@ jobs:
           queue_release_evidence_hash="$(shasum -a 256 "$queue_release_evidence" | awk '{print $1}')"
           queue_release_attestation_hash="$(shasum -a 256 "$queue_release_attestation" | awk '{print $1}')"
           queue_release_result_hash="$(shasum -a 256 "$queue_release_result" | awk '{print $1}')"
+          queue_wrapper_run="$bundle_dir/dmg/ImageForge-macos-queue-release-run.wrapper.result"
+          queue_wrapper_resume="$bundle_dir/dmg/ImageForge-macos-queue-release-resume.wrapper.result"
+          queue_wrapper_relaunch="$bundle_dir/dmg/ImageForge-macos-queue-release-relaunch.wrapper.result"
+          queue_wrapper_run_hash="$(shasum -a 256 "$queue_wrapper_run" | awk '{print $1}')"
+          queue_wrapper_resume_hash="$(shasum -a 256 "$queue_wrapper_resume" | awk '{print $1}')"
+          queue_wrapper_relaunch_hash="$(shasum -a 256 "$queue_wrapper_relaunch" | awk '{print $1}')"
           cat > "$bundle_dir/dmg/ImageForge-macos-release-metadata.json" <<EOF
           {
             "product": "ImageForge",
@@ -997,7 +1063,12 @@ jobs:
             "queue_release_attestation": "ImageForge-macos-queue-release-attestation.json",
             "queue_release_attestation_sha256": "$queue_release_attestation_hash",
             "queue_release_result": "ImageForge-macos-queue-release-result.txt",
-            "queue_release_result_sha256": "$queue_release_result_hash"
+            "queue_release_result_sha256": "$queue_release_result_hash",
+            "queue_release_wrapper_records": [
+              {"name": "ImageForge-macos-queue-release-run.wrapper.result", "sha256": "$queue_wrapper_run_hash"},
+              {"name": "ImageForge-macos-queue-release-resume.wrapper.result", "sha256": "$queue_wrapper_resume_hash"},
+              {"name": "ImageForge-macos-queue-release-relaunch.wrapper.result", "sha256": "$queue_wrapper_relaunch_hash"}
+            ]
           }
           EOF
 
@@ -1015,4 +1086,5 @@ jobs:
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge-macos-queue-release-smoke.json
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge-macos-queue-release-attestation.json
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge-macos-queue-release-result.txt
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge-macos-queue-release-*.wrapper.result
           if-no-files-found: error

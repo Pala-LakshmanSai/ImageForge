@@ -643,3 +643,25 @@ the recovery poll observes it.
 - Runtime identity fake-transport coverage is current and green: valid
   response, response loss, typed 404, malformed response, and mismatched
   switch identity all pass in the worker test slice.
+
+## Current target-native queue and coordination evidence — CI 30896874151
+
+- Exact source commit `869dcd447d2ddddc51adec037927892216bebad7` passed the
+  macOS Apple-silicon and Windows x64 jobs. Both ran frontend checks, TypeScript,
+  all 234 native Rust tests, installed launch/cleanup, two-client coordination,
+  and the queue-release smoke.
+- macOS DMG SHA-256 is
+  `ead0fe85a19c3e1041b64b5c7d7a721bf2e44457d759bca1423ef39ae3ccd8ce`;
+  Windows NSIS SHA-256 is
+  `0921d7117b740380bcaf90f997e1f8c859a7b2f4d620eb4db15435150bba3c3b`.
+  Workflow metadata and raw evidence are retained under
+  `release-evidence/task-013/{macos,windows}/`.
+- Queue evidence passed on both platforms: 30 trusted Enter samples, p95
+  `14.0 ms` macOS / `12.8 ms` Windows, three sequential minimized batches,
+  fixed-point receipts, permission-denied in-app alarm fallback, one snooze
+  surviving relaunch, and zero RunPod creates/deletes.
+- Both installed two-client audits passed 25/25 checkpoints, with exactly two
+  ordered deletes, no unexpected creates/deletes, and final `podId=null`.
+- This is target-native CI evidence, not a public-release claim. Wrapper exit
+  records, Task 014 selector-performance files, exact current worker publisher
+  digest, and public v0.1.9 tag/asset re-download remain separate open gates.

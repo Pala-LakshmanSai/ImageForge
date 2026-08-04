@@ -1,0 +1,1 @@
+{"passed":true,"platform":"windows","architecture":"x86_64","p95Ms":12.8,"trustedSamples":30,"batchCount":3,"evidenceSha256":"f2b08b3e352c69f72c705b9eeb26676ad6ccccb72038b941e34bef0065d7e955","attestationSha256":"ef512bbd66ea7774ceea4bc49dc0dad4f91f936f324d5d80ffcfc34826907add","artifactFiles":3,"workflowRunId":"30896874151","gitHead":"869dcd447d2ddddc51adec037927892216bebad7"}

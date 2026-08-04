@@ -1,0 +1,2286 @@
+{
+  "schemaVersion": 1,
+  "product": "ImageForge",
+  "gate": "Task 012 AC-13",
+  "fixture": "native-two-client-loopback-authority",
+  "passed": true,
+  "failures": [],
+  "principals": [
+    "Lakshman",
+    "Sujal"
+  ],
+  "workerVersion": "0.1.3",
+  "workerEpochs": [
+    "22222222-2222-4222-8222-222222222222",
+    "33333333-3333-4333-8333-333333333333"
+  ],
+  "pods": [
+    "pod-native-smoke-a",
+    "pod-native-smoke-b"
+  ],
+  "deletes": [
+    "pod-native-smoke-a",
+    "pod-native-smoke-b"
+  ],
+  "unexpectedCreates": 0,
+  "unexpectedDeletes": 0,
+  "sessions": [
+    {
+      "role": "A",
+      "sessionId": "79f7996e-1d45-4073-b67e-597fe6336e80",
+      "availability": "foreground"
+    },
+    {
+      "role": "B",
+      "sessionId": "5b5969ab-f91a-4b41-a2d0-93bba8b2f2c0",
+      "availability": "foreground"
+    }
+  ],
+  "deleteEvents": [
+    {
+      "sequence": 195,
+      "role": "A",
+      "podId": "pod-native-smoke-a",
+      "requestId": "78c19e71-ccd5-4b55-9d32-157fae16136c",
+      "ordinal": 1
+    },
+    {
+      "sequence": 263,
+      "role": "B",
+      "podId": "pod-native-smoke-b",
+      "requestId": "7ba5308c-b1c4-4d93-84b3-62a3370713e6",
+      "ordinal": 2
+    }
+  ],
+  "checkpoints": [
+    {
+      "index": 1,
+      "name": "lifecycle_loading",
+      "passed": true,
+      "podId": "pod-native-smoke-a",
+      "activeBatchOwner": "A",
+      "stopState": null,
+      "deleteCount": 0
+    },
+    {
+      "index": 2,
+      "name": "lifecycle_warming",
+      "passed": true,
+      "podId": "pod-native-smoke-a",
+      "activeBatchOwner": "A",
+      "stopState": null,
+      "deleteCount": 0
+    },
+    {
+      "index": 3,
+      "name": "startup",
+      "passed": true,
+      "podId": "pod-native-smoke-a",
+      "activeBatchOwner": "A",
+      "stopState": null,
+      "deleteCount": 0
+    },
+    {
+      "index": 4,
+      "name": "veto_done",
+      "passed": true,
+      "podId": "pod-native-smoke-a",
+      "activeBatchOwner": "A",
+      "stopState": null,
+      "deleteCount": 0
+    },
+    {
+      "index": 5,
+      "name": "release_initial_batch",
+      "passed": true,
+      "podId": "pod-native-smoke-a",
+      "activeBatchOwner": null,
+      "stopState": null,
+      "deleteCount": 0
+    },
+    {
+      "index": 6,
+      "name": "idle_after_release",
+      "passed": true,
+      "podId": "pod-native-smoke-a",
+      "activeBatchOwner": null,
+      "stopState": null,
+      "deleteCount": 0
+    },
+    {
+      "index": 7,
+      "name": "approval_request_a",
+      "passed": true,
+      "podId": "pod-native-smoke-a",
+      "activeBatchOwner": null,
+      "stopState": "pending",
+      "deleteCount": 0
+    },
+    {
+      "index": 8,
+      "name": "approval_response_b",
+      "passed": true,
+      "podId": "pod-native-smoke-a",
+      "activeBatchOwner": null,
+      "stopState": "approved",
+      "deleteCount": 0
+    },
+    {
+      "index": 9,
+      "name": "approval_delete_a",
+      "passed": true,
+      "podId": null,
+      "activeBatchOwner": null,
+      "stopState": "finalizing",
+      "deleteCount": 1
+    },
+    {
+      "index": 10,
+      "name": "offline_a_to_b",
+      "passed": true,
+      "podId": null,
+      "activeBatchOwner": null,
+      "stopState": "finalizing",
+      "deleteCount": 1
+    },
+    {
+      "index": 11,
+      "name": "reset_second_pod",
+      "passed": true,
+      "podId": "pod-native-smoke-b",
+      "activeBatchOwner": null,
+      "stopState": null,
+      "deleteCount": 1
+    },
+    {
+      "index": 12,
+      "name": "ready_second_pod",
+      "passed": true,
+      "podId": "pod-native-smoke-b",
+      "activeBatchOwner": null,
+      "stopState": null,
+      "deleteCount": 1
+    },
+    {
+      "index": 13,
+      "name": "denial_request_b",
+      "passed": true,
+      "podId": "pod-native-smoke-b",
+      "activeBatchOwner": null,
+      "stopState": "pending",
+      "deleteCount": 1
+    },
+    {
+      "index": 14,
+      "name": "denial_response_a",
+      "passed": true,
+      "podId": "pod-native-smoke-b",
+      "activeBatchOwner": null,
+      "stopState": "denied",
+      "deleteCount": 1
+    },
+    {
+      "index": 15,
+      "name": "clear_denial",
+      "passed": true,
+      "podId": "pod-native-smoke-b",
+      "activeBatchOwner": null,
+      "stopState": null,
+      "deleteCount": 1
+    },
+    {
+      "index": 16,
+      "name": "timeout_request_a",
+      "passed": true,
+      "podId": "pod-native-smoke-b",
+      "activeBatchOwner": null,
+      "stopState": "pending",
+      "deleteCount": 1
+    },
+    {
+      "index": 17,
+      "name": "expire_timeout",
+      "passed": true,
+      "podId": "pod-native-smoke-b",
+      "activeBatchOwner": null,
+      "stopState": "expired",
+      "deleteCount": 1
+    },
+    {
+      "index": 18,
+      "name": "clear_timeout",
+      "passed": true,
+      "podId": "pod-native-smoke-b",
+      "activeBatchOwner": null,
+      "stopState": null,
+      "deleteCount": 1
+    },
+    {
+      "index": 19,
+      "name": "generation_request_a",
+      "passed": true,
+      "podId": "pod-native-smoke-b",
+      "activeBatchOwner": null,
+      "stopState": "pending",
+      "deleteCount": 1
+    },
+    {
+      "index": 20,
+      "name": "generation_started_b",
+      "passed": true,
+      "podId": "pod-native-smoke-b",
+      "activeBatchOwner": "B",
+      "stopState": "cancelled",
+      "deleteCount": 1
+    },
+    {
+      "index": 21,
+      "name": "release_generated_batch",
+      "passed": true,
+      "podId": "pod-native-smoke-b",
+      "activeBatchOwner": null,
+      "stopState": null,
+      "deleteCount": 1
+    },
+    {
+      "index": 22,
+      "name": "reverse_request_b",
+      "passed": true,
+      "podId": "pod-native-smoke-b",
+      "activeBatchOwner": null,
+      "stopState": "pending",
+      "deleteCount": 1
+    },
+    {
+      "index": 23,
+      "name": "reverse_response_a",
+      "passed": true,
+      "podId": "pod-native-smoke-b",
+      "activeBatchOwner": null,
+      "stopState": "approved",
+      "deleteCount": 1
+    },
+    {
+      "index": 24,
+      "name": "reverse_delete_b",
+      "passed": true,
+      "podId": null,
+      "activeBatchOwner": null,
+      "stopState": "finalizing",
+      "deleteCount": 2
+    },
+    {
+      "index": 25,
+      "name": "offline_b_to_a",
+      "passed": true,
+      "podId": null,
+      "activeBatchOwner": null,
+      "stopState": "finalizing",
+      "deleteCount": 2
+    }
+  ],
+  "assertions": [
+    {
+      "name": "both_roles_converged_loading_warming_ready",
+      "passed": true
+    },
+    {
+      "name": "both_roles_observed_initial_batch_450",
+      "passed": true
+    },
+    {
+      "name": "initial_owner_streamed_137_artifacts",
+      "passed": true
+    },
+    {
+      "name": "active_batch_stop_vetoed_without_delete",
+      "passed": true
+    },
+    {
+      "name": "both_roles_observed_idle_release",
+      "passed": true
+    },
+    {
+      "name": "a_requested_b_approved_first_stop",
+      "passed": true
+    },
+    {
+      "name": "b_observed_first_remote_offline",
+      "passed": true
+    },
+    {
+      "name": "second_pod_new_worker_epoch",
+      "passed": true
+    },
+    {
+      "name": "b_requested_a_denied_without_delete",
+      "passed": true
+    },
+    {
+      "name": "timeout_failed_closed",
+      "passed": true
+    },
+    {
+      "name": "b_generation_cancelled_a_pending_stop",
+      "passed": true
+    },
+    {
+      "name": "b_requested_a_approved_reverse_stop",
+      "passed": true
+    },
+    {
+      "name": "a_observed_second_remote_offline",
+      "passed": true
+    },
+    {
+      "name": "exact_delete_sequence",
+      "passed": true
+    },
+    {
+      "name": "no_unexpected_lifecycle_mutations",
+      "passed": true
+    },
+    {
+      "name": "all_stop_scenarios_created_once",
+      "passed": true
+    }
+  ],
+  "operations": [
+    {
+      "sequence": 1,
+      "role": "A",
+      "operation": "runpod_list",
+      "status": 200,
+      "outcome": "pod-native-smoke-a"
+    },
+    {
+      "sequence": 2,
+      "role": "B",
+      "operation": "runpod_list",
+      "status": 200,
+      "outcome": "pod-native-smoke-a"
+    },
+    {
+      "sequence": 3,
+      "role": "B",
+      "operation": "worker_health",
+      "status": 200,
+      "outcome": "gpu_load"
+    },
+    {
+      "sequence": 4,
+      "role": "A",
+      "operation": "worker_health",
+      "status": 200,
+      "outcome": "gpu_load"
+    },
+    {
+      "sequence": 5,
+      "role": "B",
+      "operation": "runpod_list",
+      "status": 200,
+      "outcome": "pod-native-smoke-a"
+    },
+    {
+      "sequence": 6,
+      "role": "B",
+      "operation": "worker_health",
+      "status": 200,
+      "outcome": "gpu_load"
+    },
+    {
+      "sequence": 7,
+      "role": "A",
+      "operation": "runpod_list",
+      "status": 200,
+      "outcome": "pod-native-smoke-a"
+    },
+    {
+      "sequence": 8,
+      "role": "A",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 9,
+      "role": "A",
+      "operation": "worker_health",
+      "status": 200,
+      "outcome": "gpu_load"
+    },
+    {
+      "sequence": 10,
+      "role": "B",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 11,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "lifecycle_loading"
+    },
+    {
+      "sequence": 12,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "lifecycle_loading"
+    },
+    {
+      "sequence": 13,
+      "role": "B",
+      "operation": "runpod_list",
+      "status": 200,
+      "outcome": "pod-native-smoke-a"
+    },
+    {
+      "sequence": 14,
+      "role": "B",
+      "operation": "worker_health",
+      "status": 200,
+      "outcome": "warmup"
+    },
+    {
+      "sequence": 15,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "lifecycle_warming"
+    },
+    {
+      "sequence": 16,
+      "role": "A",
+      "operation": "runpod_list",
+      "status": 200,
+      "outcome": "pod-native-smoke-a"
+    },
+    {
+      "sequence": 17,
+      "role": "A",
+      "operation": "worker_health",
+      "status": 200,
+      "outcome": "warmup"
+    },
+    {
+      "sequence": 18,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "lifecycle_warming"
+    },
+    {
+      "sequence": 19,
+      "role": "A",
+      "operation": "runpod_list",
+      "status": 200,
+      "outcome": "pod-native-smoke-a"
+    },
+    {
+      "sequence": 20,
+      "role": "B",
+      "operation": "runpod_list",
+      "status": 200,
+      "outcome": "pod-native-smoke-a"
+    },
+    {
+      "sequence": 21,
+      "role": "B",
+      "operation": "worker_health",
+      "status": 200,
+      "outcome": "ready"
+    },
+    {
+      "sequence": 22,
+      "role": "A",
+      "operation": "worker_health",
+      "status": 200,
+      "outcome": "ready"
+    },
+    {
+      "sequence": 23,
+      "role": "B",
+      "operation": "worker_status",
+      "status": 200,
+      "outcome": "active_A"
+    },
+    {
+      "sequence": 24,
+      "role": "A",
+      "operation": "worker_status",
+      "status": 200,
+      "outcome": "active_A"
+    },
+    {
+      "sequence": 25,
+      "role": "A",
+      "operation": "batch_get",
+      "status": 200,
+      "outcome": "active_A"
+    },
+    {
+      "sequence": 26,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_1"
+    },
+    {
+      "sequence": 27,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_2"
+    },
+    {
+      "sequence": 28,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_3"
+    },
+    {
+      "sequence": 29,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_4"
+    },
+    {
+      "sequence": 30,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_5"
+    },
+    {
+      "sequence": 31,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_6"
+    },
+    {
+      "sequence": 32,
+      "role": "B",
+      "operation": "worker_status",
+      "status": 200,
+      "outcome": "active_A"
+    },
+    {
+      "sequence": 33,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "startup"
+    },
+    {
+      "sequence": 34,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_7"
+    },
+    {
+      "sequence": 35,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_8"
+    },
+    {
+      "sequence": 36,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_9"
+    },
+    {
+      "sequence": 37,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_10"
+    },
+    {
+      "sequence": 38,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_11"
+    },
+    {
+      "sequence": 39,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_12"
+    },
+    {
+      "sequence": 40,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_13"
+    },
+    {
+      "sequence": 41,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_14"
+    },
+    {
+      "sequence": 42,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_15"
+    },
+    {
+      "sequence": 43,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_16"
+    },
+    {
+      "sequence": 44,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_17"
+    },
+    {
+      "sequence": 45,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_18"
+    },
+    {
+      "sequence": 46,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_19"
+    },
+    {
+      "sequence": 47,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_20"
+    },
+    {
+      "sequence": 48,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_21"
+    },
+    {
+      "sequence": 49,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_22"
+    },
+    {
+      "sequence": 50,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_23"
+    },
+    {
+      "sequence": 51,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_24"
+    },
+    {
+      "sequence": 52,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_25"
+    },
+    {
+      "sequence": 53,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_26"
+    },
+    {
+      "sequence": 54,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_27"
+    },
+    {
+      "sequence": 55,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_28"
+    },
+    {
+      "sequence": 56,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_29"
+    },
+    {
+      "sequence": 57,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_30"
+    },
+    {
+      "sequence": 58,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_31"
+    },
+    {
+      "sequence": 59,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_32"
+    },
+    {
+      "sequence": 60,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_33"
+    },
+    {
+      "sequence": 61,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_34"
+    },
+    {
+      "sequence": 62,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_35"
+    },
+    {
+      "sequence": 63,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_36"
+    },
+    {
+      "sequence": 64,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_37"
+    },
+    {
+      "sequence": 65,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_38"
+    },
+    {
+      "sequence": 66,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_39"
+    },
+    {
+      "sequence": 67,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_40"
+    },
+    {
+      "sequence": 68,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_41"
+    },
+    {
+      "sequence": 69,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_42"
+    },
+    {
+      "sequence": 70,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_43"
+    },
+    {
+      "sequence": 71,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_44"
+    },
+    {
+      "sequence": 72,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_45"
+    },
+    {
+      "sequence": 73,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_46"
+    },
+    {
+      "sequence": 74,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_47"
+    },
+    {
+      "sequence": 75,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_48"
+    },
+    {
+      "sequence": 76,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_49"
+    },
+    {
+      "sequence": 77,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_50"
+    },
+    {
+      "sequence": 78,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_51"
+    },
+    {
+      "sequence": 79,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_52"
+    },
+    {
+      "sequence": 80,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_53"
+    },
+    {
+      "sequence": 81,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_54"
+    },
+    {
+      "sequence": 82,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_55"
+    },
+    {
+      "sequence": 83,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_56"
+    },
+    {
+      "sequence": 84,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_57"
+    },
+    {
+      "sequence": 85,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_58"
+    },
+    {
+      "sequence": 86,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_59"
+    },
+    {
+      "sequence": 87,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_60"
+    },
+    {
+      "sequence": 88,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_61"
+    },
+    {
+      "sequence": 89,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_62"
+    },
+    {
+      "sequence": 90,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_63"
+    },
+    {
+      "sequence": 91,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_64"
+    },
+    {
+      "sequence": 92,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_65"
+    },
+    {
+      "sequence": 93,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_66"
+    },
+    {
+      "sequence": 94,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_67"
+    },
+    {
+      "sequence": 95,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_68"
+    },
+    {
+      "sequence": 96,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_69"
+    },
+    {
+      "sequence": 97,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_70"
+    },
+    {
+      "sequence": 98,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_71"
+    },
+    {
+      "sequence": 99,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_72"
+    },
+    {
+      "sequence": 100,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_73"
+    },
+    {
+      "sequence": 101,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_74"
+    },
+    {
+      "sequence": 102,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_75"
+    },
+    {
+      "sequence": 103,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_76"
+    },
+    {
+      "sequence": 104,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_77"
+    },
+    {
+      "sequence": 105,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_78"
+    },
+    {
+      "sequence": 106,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_79"
+    },
+    {
+      "sequence": 107,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_80"
+    },
+    {
+      "sequence": 108,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_81"
+    },
+    {
+      "sequence": 109,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_82"
+    },
+    {
+      "sequence": 110,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_83"
+    },
+    {
+      "sequence": 111,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_84"
+    },
+    {
+      "sequence": 112,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_85"
+    },
+    {
+      "sequence": 113,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_86"
+    },
+    {
+      "sequence": 114,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_87"
+    },
+    {
+      "sequence": 115,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_88"
+    },
+    {
+      "sequence": 116,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_89"
+    },
+    {
+      "sequence": 117,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_90"
+    },
+    {
+      "sequence": 118,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_91"
+    },
+    {
+      "sequence": 119,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_92"
+    },
+    {
+      "sequence": 120,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_93"
+    },
+    {
+      "sequence": 121,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_94"
+    },
+    {
+      "sequence": 122,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_95"
+    },
+    {
+      "sequence": 123,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_96"
+    },
+    {
+      "sequence": 124,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_97"
+    },
+    {
+      "sequence": 125,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_98"
+    },
+    {
+      "sequence": 126,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_99"
+    },
+    {
+      "sequence": 127,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_100"
+    },
+    {
+      "sequence": 128,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_101"
+    },
+    {
+      "sequence": 129,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_102"
+    },
+    {
+      "sequence": 130,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_103"
+    },
+    {
+      "sequence": 131,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_104"
+    },
+    {
+      "sequence": 132,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_105"
+    },
+    {
+      "sequence": 133,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_106"
+    },
+    {
+      "sequence": 134,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_107"
+    },
+    {
+      "sequence": 135,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_108"
+    },
+    {
+      "sequence": 136,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_109"
+    },
+    {
+      "sequence": 137,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_110"
+    },
+    {
+      "sequence": 138,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_111"
+    },
+    {
+      "sequence": 139,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_112"
+    },
+    {
+      "sequence": 140,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_113"
+    },
+    {
+      "sequence": 141,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_114"
+    },
+    {
+      "sequence": 142,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_115"
+    },
+    {
+      "sequence": 143,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_116"
+    },
+    {
+      "sequence": 144,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_117"
+    },
+    {
+      "sequence": 145,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_118"
+    },
+    {
+      "sequence": 146,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_119"
+    },
+    {
+      "sequence": 147,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_120"
+    },
+    {
+      "sequence": 148,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_121"
+    },
+    {
+      "sequence": 149,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_122"
+    },
+    {
+      "sequence": 150,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_123"
+    },
+    {
+      "sequence": 151,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_124"
+    },
+    {
+      "sequence": 152,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_125"
+    },
+    {
+      "sequence": 153,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_126"
+    },
+    {
+      "sequence": 154,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_127"
+    },
+    {
+      "sequence": 155,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_128"
+    },
+    {
+      "sequence": 156,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_129"
+    },
+    {
+      "sequence": 157,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_130"
+    },
+    {
+      "sequence": 158,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_131"
+    },
+    {
+      "sequence": 159,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_132"
+    },
+    {
+      "sequence": 160,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_133"
+    },
+    {
+      "sequence": 161,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_134"
+    },
+    {
+      "sequence": 162,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_135"
+    },
+    {
+      "sequence": 163,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_136"
+    },
+    {
+      "sequence": 164,
+      "role": "A",
+      "operation": "artifact_download",
+      "status": 200,
+      "outcome": "artifact_137"
+    },
+    {
+      "sequence": 165,
+      "role": "A",
+      "operation": "batch_get",
+      "status": 200,
+      "outcome": "active_A"
+    },
+    {
+      "sequence": 166,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "startup"
+    },
+    {
+      "sequence": 167,
+      "role": "B",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 168,
+      "role": "B",
+      "operation": "studio_create_stop",
+      "status": 423,
+      "outcome": "stop_blocked_by_active_batch"
+    },
+    {
+      "sequence": 169,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "veto_done"
+    },
+    {
+      "sequence": 170,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "veto_done"
+    },
+    {
+      "sequence": 171,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "release_initial_batch"
+    },
+    {
+      "sequence": 172,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "release_initial_batch"
+    },
+    {
+      "sequence": 173,
+      "role": "B",
+      "operation": "worker_status",
+      "status": 200,
+      "outcome": "idle"
+    },
+    {
+      "sequence": 174,
+      "role": "B",
+      "operation": "batch_get",
+      "status": 404,
+      "outcome": "batch_not_found"
+    },
+    {
+      "sequence": 175,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "idle_after_release"
+    },
+    {
+      "sequence": 176,
+      "role": "B",
+      "operation": "worker_status",
+      "status": 200,
+      "outcome": "idle"
+    },
+    {
+      "sequence": 177,
+      "role": "A",
+      "operation": "worker_status",
+      "status": 200,
+      "outcome": "idle"
+    },
+    {
+      "sequence": 178,
+      "role": "A",
+      "operation": "batch_get",
+      "status": 404,
+      "outcome": "batch_not_found"
+    },
+    {
+      "sequence": 179,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "idle_after_release"
+    },
+    {
+      "sequence": 180,
+      "role": "A",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 181,
+      "role": "A",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 182,
+      "role": "A",
+      "operation": "studio_create_stop",
+      "status": 201,
+      "outcome": "pending"
+    },
+    {
+      "sequence": 183,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "approval_request_a"
+    },
+    {
+      "sequence": 184,
+      "role": "A",
+      "operation": "worker_status",
+      "status": 200,
+      "outcome": "idle"
+    },
+    {
+      "sequence": 185,
+      "role": "B",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 186,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "approval_request_a"
+    },
+    {
+      "sequence": 187,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "approval_response_b"
+    },
+    {
+      "sequence": 188,
+      "role": "B",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 189,
+      "role": "B",
+      "operation": "studio_respond",
+      "status": 200,
+      "outcome": "approved"
+    },
+    {
+      "sequence": 190,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "approval_response_b"
+    },
+    {
+      "sequence": 191,
+      "role": "A",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 192,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "approval_delete_a"
+    },
+    {
+      "sequence": 193,
+      "role": "A",
+      "operation": "runpod_get",
+      "status": 200,
+      "outcome": "pod-native-smoke-a"
+    },
+    {
+      "sequence": 194,
+      "role": "A",
+      "operation": "studio_finalize",
+      "status": 200,
+      "outcome": "finalizing"
+    },
+    {
+      "sequence": 195,
+      "role": "A",
+      "operation": "runpod_delete",
+      "status": 204,
+      "outcome": "pod-native-smoke-a"
+    },
+    {
+      "sequence": 196,
+      "role": "A",
+      "operation": "runpod_list",
+      "status": 200,
+      "outcome": "offline"
+    },
+    {
+      "sequence": 197,
+      "role": "A",
+      "operation": "runpod_list",
+      "status": 200,
+      "outcome": "offline"
+    },
+    {
+      "sequence": 198,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "approval_delete_a"
+    },
+    {
+      "sequence": 199,
+      "role": "B",
+      "operation": "runpod_list",
+      "status": 200,
+      "outcome": "offline"
+    },
+    {
+      "sequence": 200,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "offline_a_to_b"
+    },
+    {
+      "sequence": 201,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "offline_a_to_b"
+    },
+    {
+      "sequence": 202,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "reset_second_pod"
+    },
+    {
+      "sequence": 203,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "reset_second_pod"
+    },
+    {
+      "sequence": 204,
+      "role": "B",
+      "operation": "runpod_list",
+      "status": 200,
+      "outcome": "pod-native-smoke-b"
+    },
+    {
+      "sequence": 205,
+      "role": "A",
+      "operation": "runpod_list",
+      "status": 200,
+      "outcome": "pod-native-smoke-b"
+    },
+    {
+      "sequence": 206,
+      "role": "B",
+      "operation": "worker_health",
+      "status": 200,
+      "outcome": "ready"
+    },
+    {
+      "sequence": 207,
+      "role": "A",
+      "operation": "worker_health",
+      "status": 200,
+      "outcome": "ready"
+    },
+    {
+      "sequence": 208,
+      "role": "A",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 209,
+      "role": "B",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 210,
+      "role": "B",
+      "operation": "worker_status",
+      "status": 200,
+      "outcome": "idle"
+    },
+    {
+      "sequence": 211,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "ready_second_pod"
+    },
+    {
+      "sequence": 212,
+      "role": "A",
+      "operation": "worker_status",
+      "status": 200,
+      "outcome": "idle"
+    },
+    {
+      "sequence": 213,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "ready_second_pod"
+    },
+    {
+      "sequence": 214,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "denial_request_b"
+    },
+    {
+      "sequence": 215,
+      "role": "B",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 216,
+      "role": "B",
+      "operation": "studio_create_stop",
+      "status": 201,
+      "outcome": "pending"
+    },
+    {
+      "sequence": 217,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "denial_request_b"
+    },
+    {
+      "sequence": 218,
+      "role": "A",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 219,
+      "role": "A",
+      "operation": "studio_respond",
+      "status": 200,
+      "outcome": "denied"
+    },
+    {
+      "sequence": 220,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "denial_response_a"
+    },
+    {
+      "sequence": 221,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "denial_response_a"
+    },
+    {
+      "sequence": 222,
+      "role": "B",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 223,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "clear_denial"
+    },
+    {
+      "sequence": 224,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "clear_denial"
+    },
+    {
+      "sequence": 225,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "timeout_request_a"
+    },
+    {
+      "sequence": 226,
+      "role": "A",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 227,
+      "role": "A",
+      "operation": "studio_create_stop",
+      "status": 201,
+      "outcome": "pending"
+    },
+    {
+      "sequence": 228,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "timeout_request_a"
+    },
+    {
+      "sequence": 229,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "expire_timeout"
+    },
+    {
+      "sequence": 230,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "expire_timeout"
+    },
+    {
+      "sequence": 231,
+      "role": "B",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 232,
+      "role": "A",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 233,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "clear_timeout"
+    },
+    {
+      "sequence": 234,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "clear_timeout"
+    },
+    {
+      "sequence": 235,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "generation_request_a"
+    },
+    {
+      "sequence": 236,
+      "role": "A",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 237,
+      "role": "A",
+      "operation": "studio_create_stop",
+      "status": 201,
+      "outcome": "pending"
+    },
+    {
+      "sequence": 238,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "generation_request_a"
+    },
+    {
+      "sequence": 239,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "generation_started_b"
+    },
+    {
+      "sequence": 240,
+      "role": "B",
+      "operation": "batch_create",
+      "status": 201,
+      "outcome": "generation_started"
+    },
+    {
+      "sequence": 241,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "generation_started_b"
+    },
+    {
+      "sequence": 242,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "release_generated_batch"
+    },
+    {
+      "sequence": 243,
+      "role": "B",
+      "operation": "worker_status",
+      "status": 200,
+      "outcome": "active_B"
+    },
+    {
+      "sequence": 244,
+      "role": "A",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 245,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "release_generated_batch"
+    },
+    {
+      "sequence": 246,
+      "role": "A",
+      "operation": "worker_status",
+      "status": 200,
+      "outcome": "idle"
+    },
+    {
+      "sequence": 247,
+      "role": "A",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 248,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "reverse_request_b"
+    },
+    {
+      "sequence": 249,
+      "role": "B",
+      "operation": "batch_get",
+      "status": 404,
+      "outcome": "batch_not_found"
+    },
+    {
+      "sequence": 250,
+      "role": "B",
+      "operation": "worker_status",
+      "status": 200,
+      "outcome": "idle"
+    },
+    {
+      "sequence": 251,
+      "role": "B",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 252,
+      "role": "B",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 253,
+      "role": "B",
+      "operation": "studio_create_stop",
+      "status": 201,
+      "outcome": "pending"
+    },
+    {
+      "sequence": 254,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "reverse_request_b"
+    },
+    {
+      "sequence": 255,
+      "role": "A",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 256,
+      "role": "A",
+      "operation": "studio_respond",
+      "status": 200,
+      "outcome": "approved"
+    },
+    {
+      "sequence": 257,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "reverse_response_a"
+    },
+    {
+      "sequence": 258,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "reverse_response_a"
+    },
+    {
+      "sequence": 259,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "reverse_delete_b"
+    },
+    {
+      "sequence": 260,
+      "role": "B",
+      "operation": "studio_heartbeat",
+      "status": 200,
+      "outcome": "heartbeat"
+    },
+    {
+      "sequence": 261,
+      "role": "B",
+      "operation": "runpod_get",
+      "status": 200,
+      "outcome": "pod-native-smoke-b"
+    },
+    {
+      "sequence": 262,
+      "role": "B",
+      "operation": "studio_finalize",
+      "status": 200,
+      "outcome": "finalizing"
+    },
+    {
+      "sequence": 263,
+      "role": "B",
+      "operation": "runpod_delete",
+      "status": 204,
+      "outcome": "pod-native-smoke-b"
+    },
+    {
+      "sequence": 264,
+      "role": "B",
+      "operation": "runpod_list",
+      "status": 200,
+      "outcome": "offline"
+    },
+    {
+      "sequence": 265,
+      "role": "B",
+      "operation": "runpod_list",
+      "status": 200,
+      "outcome": "offline"
+    },
+    {
+      "sequence": 266,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "reverse_delete_b"
+    },
+    {
+      "sequence": 267,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "offline_b_to_a"
+    },
+    {
+      "sequence": 268,
+      "role": "A",
+      "operation": "runpod_list",
+      "status": 200,
+      "outcome": "offline"
+    },
+    {
+      "sequence": 269,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": 200,
+      "outcome": "offline_b_to_a"
+    },
+    {
+      "sequence": 270,
+      "role": "A",
+      "operation": "checkpoint",
+      "status": null,
+      "outcome": null
+    },
+    {
+      "sequence": 271,
+      "role": "B",
+      "operation": "checkpoint",
+      "status": null,
+      "outcome": null
+    }
+  ],
+  "operationCounts": {
+    "A:runpod_list": 8,
+    "B:runpod_list": 8,
+    "B:worker_health": 5,
+    "A:worker_health": 5,
+    "A:studio_heartbeat": 12,
+    "B:studio_heartbeat": 11,
+    "B:checkpoint": 26,
+    "A:checkpoint": 26,
+    "B:worker_status": 7,
+    "A:worker_status": 5,
+    "A:batch_get": 3,
+    "A:artifact_download": 137,
+    "B:studio_create_stop": 3,
+    "B:batch_get": 2,
+    "A:studio_create_stop": 3,
+    "B:studio_respond": 1,
+    "A:runpod_get": 1,
+    "A:studio_finalize": 1,
+    "A:runpod_delete": 1,
+    "A:studio_respond": 2,
+    "B:batch_create": 1,
+    "B:runpod_get": 1,
+    "B:studio_finalize": 1,
+    "B:runpod_delete": 1
+  },
+  "security": {
+    "loopbackOnly": true,
+    "randomAuthorizationRequired": true,
+    "requestBodiesRecorded": false,
+    "authenticationRejections": 0,
+    "validationRejections": 0
+  },
+  "finalState": {
+    "podId": null,
+    "activeBatchOwner": null,
+    "stopState": "finalizing",
+    "deleteCount": 2
+  }
+}

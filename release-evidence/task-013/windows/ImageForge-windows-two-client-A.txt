@@ -1,0 +1,2 @@
+PASS
+pid=1736; window=main; A: two installed clients passed status-first recovery, shared busy/progress, veto, approve, deny/timeout, generation race, and bidirectional remote Stop
