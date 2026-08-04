@@ -118,6 +118,23 @@ describe('NativeGpuInventoryCoordinator', () => {
     coordinator.dispose();
   });
 
+  it('waits for the exact native terminal event before returning visible selector rows', async () => {
+    const port = fakePort();
+    const coordinator = new NativeGpuInventoryCoordinator(port);
+    const pending = coordinator.refreshForVisibleSelector(false);
+
+    await vi.waitFor(() => expect(port.beginRefresh).toHaveBeenCalledTimes(1));
+    expect(coordinator.getSnapshot()?.state).toBe('loading');
+    port.emit(terminalEvent());
+
+    await expect(pending).resolves.toMatchObject({
+      state: 'ready',
+      receipt: { receiptId: RECEIPT },
+    });
+    expect(coordinator.getSnapshot()?.state).toBe('ready');
+    coordinator.dispose();
+  });
+
   it('rejects a superseded observation and never turns it into mutation authority', async () => {
     const port = fakePort();
     const coordinator = new NativeGpuInventoryCoordinator(port);

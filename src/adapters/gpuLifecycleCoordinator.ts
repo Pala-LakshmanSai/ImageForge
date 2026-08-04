@@ -162,7 +162,7 @@ export class GpuLifecycleCoordinator {
     allowSlowEmergency: boolean,
   ): Promise<NativeGpuInventorySnapshotV1> {
     await this.#ensureController(profileSource, allowSlowEmergency);
-    return this.#inventory.beginVisibleRefresh(allowSlowEmergency);
+    return this.#inventory.refreshForVisibleSelector(allowSlowEmergency);
   }
 
   loadStart(): Promise<NativeGpuStartResultV1 | null> {

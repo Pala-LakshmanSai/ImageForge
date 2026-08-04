@@ -100,6 +100,20 @@ export class NativeGpuInventoryCoordinator implements GpuAutoSelectionSourceV1 {
     return immediate;
   }
 
+  /**
+   * Begin the explicit selector refresh and wait for its matching terminal
+   * receipt. The loading projection is still accepted/published immediately,
+   * so the UI can render progress, but the caller is never left dependent on
+   * receiving the app event in order to obtain the live rows.
+   */
+  async refreshForVisibleSelector(
+    includeEmergencyTier: boolean,
+  ): Promise<NativeGpuInventorySnapshotV1> {
+    const immediate = await this.beginVisibleRefresh(includeEmergencyTier);
+    if (immediate.state !== 'loading') return immediate;
+    return this.#waitForTerminalObservation(immediate, includeEmergencyTier);
+  }
+
   async refreshForAutoStart(input: {
     readonly expectedImageCount: number;
     readonly includeEmergencyTier: boolean;
@@ -111,24 +125,7 @@ export class NativeGpuInventoryCoordinator implements GpuAutoSelectionSourceV1 {
     if (input.signal.aborted) throw aborted();
     const immediate = await this.beginVisibleRefresh(input.includeEmergencyTier);
     if (immediate.state !== 'loading') return immediate;
-    return new Promise<NativeGpuInventorySnapshotV1>((resolve, reject) => {
-      const onAbort = () => {
-        this.#pending.delete(immediate.observationId);
-        reject(aborted());
-      };
-      input.signal.addEventListener('abort', onAbort, { once: true });
-      this.#pending.set(immediate.observationId, {
-        observationId: immediate.observationId,
-        includeEmergencyTier: input.includeEmergencyTier,
-        resolve,
-        reject,
-        removeAbort: () => input.signal.removeEventListener('abort', onAbort),
-      });
-      // Native may emit the terminal event between resolving beginRefresh and
-      // installing this renderer waiter. Reconcile immediately from the strict
-      // projection so a non-replayed event can never strand Auto Start.
-      if (this.#snapshot !== null) this.#settlePendingFromSnapshot(this.#snapshot);
-    });
+    return this.#waitForTerminalObservation(immediate, input.includeEmergencyTier, input.signal);
   }
 
   dispose(): void {
@@ -233,6 +230,33 @@ export class NativeGpuInventoryCoordinator implements GpuAutoSelectionSourceV1 {
       // Preserve the last strict snapshot. Explicit refresh or a later mount
       // can recover; malformed native data never replaces renderer state.
     }
+  }
+
+  #waitForTerminalObservation(
+    immediate: NativeGpuInventorySnapshotV1,
+    includeEmergencyTier: boolean,
+    signal?: AbortSignal,
+  ): Promise<NativeGpuInventorySnapshotV1> {
+    if (signal?.aborted) return Promise.reject(aborted());
+    return new Promise<NativeGpuInventorySnapshotV1>((resolve, reject) => {
+      const onAbort = () => {
+        this.#pending.delete(immediate.observationId);
+        reject(aborted());
+      };
+      if (signal !== undefined) signal.addEventListener('abort', onAbort, { once: true });
+      this.#pending.set(immediate.observationId, {
+        observationId: immediate.observationId,
+        includeEmergencyTier,
+        resolve,
+        reject,
+        removeAbort: () => signal?.removeEventListener('abort', onAbort),
+      });
+      // Native may emit the terminal event between resolving beginRefresh and
+      // installing this renderer waiter. Reconcile immediately from the strict
+      // projection so a non-replayed event can never strand a selector or Auto
+      // Start request.
+      if (this.#snapshot !== null) this.#settlePendingFromSnapshot(this.#snapshot);
+    });
   }
 
   #onEvent(event: NativeGpuInventoryEventV1): void {
