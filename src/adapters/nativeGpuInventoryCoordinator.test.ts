@@ -12,13 +12,21 @@ const EPOCH = '018f3d31-b082-4f61-81d2-4f6de88fd714';
 const OBSERVATION = '028f3d31-b082-4f61-81d2-4f6de88fd714';
 const RECEIPT = '038f3d31-b082-4f61-81d2-4f6de88fd714';
 const NEXT_OBSERVATION = '048f3d31-b082-4f61-81d2-4f6de88fd714';
+const LATER_OBSERVATION = '058f3d31-b082-4f61-81d2-4f6de88fd714';
 
 function snapshot(
   state: NativeGpuInventorySnapshotV1['state'],
 ): NativeGpuInventorySnapshotV1 {
+  return snapshotFor(OBSERVATION, state);
+}
+
+function snapshotFor(
+  observationId: string,
+  state: NativeGpuInventorySnapshotV1['state'],
+): NativeGpuInventorySnapshotV1 {
   return {
     schemaVersion: 1,
-    observationId: OBSERVATION,
+    observationId,
     processEpochId: EPOCH,
     includeEmergencyTier: false,
     state,
@@ -64,7 +72,7 @@ function terminalEvent(
     schemaVersion: 1,
     event: 'gpu-inventory-v1',
     processEpochId: EPOCH,
-    observationId: OBSERVATION,
+    observationId: terminal.observationId,
     eventSequence: 1,
     superseded,
     snapshot: terminal,
@@ -152,6 +160,74 @@ describe('NativeGpuInventoryCoordinator', () => {
     });
     expect(port.listen).toHaveBeenCalledTimes(1);
     expect(loads).toBeGreaterThanOrEqual(3);
+    coordinator.dispose();
+  });
+
+  it('times out reconciliation even when every native journal read fails', async () => {
+    vi.useFakeTimers();
+    try {
+      const port = fakePort();
+      let loadCount = 0;
+      vi.mocked(port.load).mockImplementation(async () => {
+        loadCount += 1;
+        if (loadCount <= 2) return snapshot('loading');
+        throw new Error('native journal unavailable');
+      });
+      const coordinator = new NativeGpuInventoryCoordinator(port);
+      const pending = coordinator.refreshForVisibleSelector(false);
+      const rejection = expect(pending).rejects.toThrow('did not reach a terminal state in time');
+
+      await vi.waitFor(() => expect(port.beginRefresh).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(30_000);
+      await rejection;
+      coordinator.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not let a delayed older journal read overwrite a newer observation', async () => {
+    const olderRead: {
+      resolve?: (value: NativeGpuInventorySnapshotV1) => void;
+    } = {};
+    const older = snapshot('loading');
+    const newer = snapshotFor(LATER_OBSERVATION, 'loading');
+    const newerReady = snapshotFor(LATER_OBSERVATION, 'ready');
+    const port = fakePort(older);
+    vi.mocked(port.beginRefresh).mockResolvedValue(newer);
+    let loadCount = 0;
+    vi.mocked(port.load).mockImplementation(async () => {
+      loadCount += 1;
+      if (loadCount <= 2) return older;
+      return new Promise((resolve) => { olderRead.resolve = resolve; });
+    });
+    const coordinator = new NativeGpuInventoryCoordinator(port);
+    const pending = coordinator.refreshForVisibleSelector(false);
+    await vi.waitFor(() => expect(port.beginRefresh).toHaveBeenCalledTimes(1));
+
+    port.emit(terminalEvent(newerReady));
+    olderRead.resolve?.(older);
+    await expect(pending).resolves.toMatchObject({ observationId: LATER_OBSERVATION, state: 'ready' });
+    expect(coordinator.getSnapshot()).toMatchObject({ observationId: LATER_OBSERVATION, state: 'ready' });
+    coordinator.dispose();
+  });
+
+  it('supersedes an older concurrent waiter without disturbing the newest waiter', async () => {
+    const newer = snapshotFor(LATER_OBSERVATION, 'loading');
+    const newerReady = snapshotFor(LATER_OBSERVATION, 'ready');
+    const port = fakePort();
+    vi.mocked(port.beginRefresh)
+      .mockResolvedValueOnce(snapshot('loading'))
+      .mockResolvedValueOnce(newer);
+    const coordinator = new NativeGpuInventoryCoordinator(port);
+    const first = coordinator.refreshForVisibleSelector(false);
+    await vi.waitFor(() => expect(port.beginRefresh).toHaveBeenCalledTimes(1));
+    const second = coordinator.refreshForVisibleSelector(false);
+    await vi.waitFor(() => expect(port.beginRefresh).toHaveBeenCalledTimes(2));
+
+    port.emit(terminalEvent(newerReady));
+    await expect(first).rejects.toThrow('superseded');
+    await expect(second).resolves.toMatchObject({ observationId: LATER_OBSERVATION, state: 'ready' });
     coordinator.dispose();
   });
 

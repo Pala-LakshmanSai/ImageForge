@@ -49,6 +49,8 @@ export class NativeGpuInventoryCoordinator implements GpuAutoSelectionSourceV1 {
   #initializing: Promise<NativeGpuInventorySnapshotV1> | null = null;
   #recovering: Promise<void> | null = null;
   #bindingGeneration = 0;
+  #observationOrder = new Map<string, number>();
+  #nextObservationOrder = 0;
   #disposed = false;
 
   constructor(port: NativeGpuInventoryPort) {
@@ -75,6 +77,8 @@ export class NativeGpuInventoryCoordinator implements GpuAutoSelectionSourceV1 {
     this.#unlisten?.();
     this.#unlisten = null;
     this.#snapshot = null;
+    this.#observationOrder.clear();
+    this.#nextObservationOrder = 0;
     this.#initializing = null;
     this.#recovering = null;
     for (const pending of this.#pending.values()) {
@@ -99,8 +103,11 @@ export class NativeGpuInventoryCoordinator implements GpuAutoSelectionSourceV1 {
     ) {
       return acceptedDuringInvoke;
     }
-    this.#accept(immediate);
-    return immediate;
+    this.#markObservation(immediate.observationId);
+    if (!this.#accept(immediate)) {
+      throw new Error('The requested GPU inventory observation was superseded.');
+    }
+    return this.#snapshot ?? immediate;
   }
 
   /**
@@ -166,6 +173,7 @@ export class NativeGpuInventoryCoordinator implements GpuAutoSelectionSourceV1 {
       throw new Error('GPU inventory profile changed during initialization.');
     }
     await this.#installListener(initial.processEpochId, bindingGeneration);
+    this.#markObservation(initial.observationId);
     this.#accept(initial);
     // Close the listener-registration race: an event emitted after the first
     // load but before listen attached is recovered from the native journal.
@@ -173,9 +181,8 @@ export class NativeGpuInventoryCoordinator implements GpuAutoSelectionSourceV1 {
     if (bindingGeneration !== this.#bindingGeneration) {
       throw new Error('GPU inventory profile changed during initialization.');
     }
-    this.#accept(current);
-    this.#settlePendingFromSnapshot(current);
-    return current;
+    if (this.#accept(current)) this.#settlePendingFromSnapshot(current);
+    return this.#snapshot ?? current;
   }
 
   async #installListener(processEpochId: string, bindingGeneration: number): Promise<void> {
@@ -219,16 +226,14 @@ export class NativeGpuInventoryCoordinator implements GpuAutoSelectionSourceV1 {
     try {
       const recovered = await this.#port.load(processEpochId);
       if (bindingGeneration !== this.#bindingGeneration) return;
-      this.#accept(recovered);
-      this.#settlePendingFromSnapshot(recovered);
+      if (this.#accept(recovered)) this.#settlePendingFromSnapshot(recovered);
       await this.#installListener(processEpochId, bindingGeneration);
       // Close the same load/listen race as initial mount. If the missing event
       // completed the pending observation, the durable terminal snapshot is
       // sufficient; renderer waits never depend on a replayed event.
       const current = await this.#port.load(processEpochId);
       if (bindingGeneration !== this.#bindingGeneration) return;
-      this.#accept(current);
-      this.#settlePendingFromSnapshot(current);
+      if (this.#accept(current)) this.#settlePendingFromSnapshot(current);
     } catch {
       // Preserve the last strict snapshot. Explicit refresh or a later mount
       // can recover; malformed native data never replaces renderer state.
@@ -243,6 +248,7 @@ export class NativeGpuInventoryCoordinator implements GpuAutoSelectionSourceV1 {
     if (signal?.aborted) return Promise.reject(aborted());
     return new Promise<NativeGpuInventorySnapshotV1>((resolve, reject) => {
       let timer: ReturnType<typeof setTimeout> | null = null;
+      let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
       let reconciliationInFlight = false;
       const startedAt = Date.now();
       const observationId = immediate.observationId;
@@ -260,6 +266,10 @@ export class NativeGpuInventoryCoordinator implements GpuAutoSelectionSourceV1 {
           clearTimeout(timer);
           timer = null;
         }
+        if (deadlineTimer !== null) {
+          clearTimeout(deadlineTimer);
+          deadlineTimer = null;
+        }
         signal?.removeEventListener('abort', onAbort);
       };
       const pending: PendingObservation = {
@@ -270,6 +280,13 @@ export class NativeGpuInventoryCoordinator implements GpuAutoSelectionSourceV1 {
         cleanup,
       };
       this.#pending.set(observationId, pending);
+      const expire = () => {
+        if (this.#pending.get(observationId) !== pending) return;
+        this.#pending.delete(observationId);
+        pending.cleanup();
+        reject(new Error('The native GPU inventory observation did not reach a terminal state in time.'));
+      };
+      deadlineTimer = setTimeout(expire, TERMINAL_RECONCILIATION_TIMEOUT_MS);
       // Native may emit the terminal event between resolving beginRefresh and
       // installing this renderer waiter. Reconcile immediately from the strict
       // projection so a non-replayed event can never strand a selector or Auto
@@ -287,19 +304,16 @@ export class NativeGpuInventoryCoordinator implements GpuAutoSelectionSourceV1 {
         try {
           const loaded = await this.#port.load(immediate.processEpochId);
           if (this.#pending.get(observationId) !== pending) return;
-          this.#accept(loaded);
-          this.#settlePendingFromSnapshot(loaded);
+          if (this.#accept(loaded)) this.#settlePendingFromSnapshot(loaded);
+        } catch {
+          // Keep listening. A transient native read failure must not replace a
+          // strict terminal snapshot or turn an unavailable read into rows.
           if (
             this.#pending.get(observationId) === pending
             && Date.now() - startedAt >= TERMINAL_RECONCILIATION_TIMEOUT_MS
           ) {
-            this.#pending.delete(observationId);
-            pending.cleanup();
-            reject(new Error('The native GPU inventory observation did not reach a terminal state in time.'));
+            expire();
           }
-        } catch {
-          // Keep listening. A transient native read failure must not replace a
-          // strict terminal snapshot or turn an unavailable read into rows.
         } finally {
           reconciliationInFlight = false;
           if (this.#pending.get(observationId) === pending) {
@@ -313,11 +327,22 @@ export class NativeGpuInventoryCoordinator implements GpuAutoSelectionSourceV1 {
 
   #onEvent(event: NativeGpuInventoryEventV1): void {
     const pending = this.#pending.get(event.observationId);
-    if (!event.superseded) this.#accept(event.snapshot);
-    if (pending === undefined) return;
+    const accepted = !event.superseded && this.#accept(event.snapshot);
+    if (pending === undefined) {
+      if (accepted) this.#settlePendingFromSnapshot(event.snapshot);
+      return;
+    }
+    if (accepted && event.snapshot.state !== 'loading') {
+      this.#settlePendingFromSnapshot(event.snapshot);
+      return;
+    }
     this.#pending.delete(event.observationId);
     pending.cleanup();
-    if (event.superseded || event.snapshot.includeEmergencyTier !== pending.includeEmergencyTier) {
+    if (
+      event.superseded
+      || !accepted
+      || event.snapshot.includeEmergencyTier !== pending.includeEmergencyTier
+    ) {
       pending.reject(new Error('The requested GPU inventory observation was superseded.'));
       return;
     }
@@ -340,8 +365,29 @@ export class NativeGpuInventoryCoordinator implements GpuAutoSelectionSourceV1 {
     }
   }
 
-  #accept(snapshot: NativeGpuInventorySnapshotV1): void {
+  #markObservation(observationId: string): void {
+    if (!this.#observationOrder.has(observationId)) {
+      this.#nextObservationOrder += 1;
+      this.#observationOrder.set(observationId, this.#nextObservationOrder);
+    }
+  }
+
+  #accept(snapshot: NativeGpuInventorySnapshotV1): boolean {
+    this.#markObservation(snapshot.observationId);
+    const current = this.#snapshot;
+    if (current !== null && current.processEpochId === snapshot.processEpochId) {
+      const currentOrder = this.#observationOrder.get(current.observationId);
+      const candidateOrder = this.#observationOrder.get(snapshot.observationId);
+      if (
+        currentOrder !== undefined
+        && candidateOrder !== undefined
+        && candidateOrder < currentOrder
+      ) {
+        return false;
+      }
+    }
     this.#snapshot = snapshot;
     for (const listener of this.#listeners) listener(snapshot);
+    return true;
   }
 }

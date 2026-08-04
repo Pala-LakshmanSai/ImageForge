@@ -22,21 +22,21 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2Controller, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN, COREWEBVIEW2_PHYSICAL_KEY_STATUS,
 };
 use windows_sys::Win32::Foundation::{
-    CloseHandle, FreeLibrary, HANDLE, HINSTANCE, HMODULE, INVALID_HANDLE_VALUE, LPARAM, LRESULT,
-    POINT, WPARAM,
+    CloseHandle, HANDLE, HINSTANCE, HMODULE, INVALID_HANDLE_VALUE, LPARAM, LRESULT, POINT, WPARAM,
 };
-use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows_sys::Win32::System::LibraryLoader::{FreeLibrary, GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::System::Memory::{
-    CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE,
+    CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS,
+    MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CallWindowProcW, GetAncestor, GetForegroundWindow, GetGUIThreadInfo, GetParent,
-    GetWindow, GetWindowThreadProcessId, IsChild, IsIconic, IsWindow, IsWindowEnabled,
+    GetWindow, GetWindowLongPtrW, GetWindowThreadProcessId, IsChild, IsIconic, IsWindow,
     IsWindowVisible, SetWindowLongPtrW, SetWindowsHookExW, UnhookWindowsHookEx, GA_ROOT,
-    GA_ROOTOWNER, GUITHREADINFO, GWLP_WNDPROC, GW_CHILD, GW_HWNDNEXT, HC_ACTION, MOUSEHOOKSTRUCT,
-    WH_MOUSE, WM_APP, WM_LBUTTONUP, WNDPROC,
+    GA_ROOTOWNER, GUITHREADINFO, GWLP_WNDPROC, GWL_STYLE, GW_CHILD, GW_HWNDNEXT, HC_ACTION,
+    MOUSEHOOKSTRUCT, WH_MOUSE, WM_APP, WM_LBUTTONUP, WNDPROC, WS_DISABLED,
 };
 
 const VK_RETURN: u32 = 0x0D;
@@ -47,6 +47,8 @@ const TRUSTED_INPUT_MESSAGE: u32 = WM_APP + 0x4f;
 const TRUSTED_INPUT_MAGIC: u32 = 0x4946_4754;
 const TRUSTED_INPUT_VERSION: u32 = 1;
 const TRUSTED_INPUT_HOOK_DLL: &str = "imageforge-trusted-input-hook.dll";
+const HOOK_EVENT_EMPTY: i32 = 0;
+const HOOK_EVENT_READY: i32 = 2;
 
 #[repr(C)]
 struct HookConfig {
@@ -55,6 +57,11 @@ struct HookConfig {
     receiver_hwnd: usize,
     expected_hwnd: usize,
     active: i32,
+    event_state: i32,
+    event_sequence: u64,
+    event_target: usize,
+    event_x: i32,
+    event_y: i32,
 }
 
 #[derive(Clone)]
@@ -98,6 +105,7 @@ struct HostWindowState {
     hwnd: usize,
     context: Arc<MouseHookContext>,
     original_window_proc: isize,
+    mapping_view: usize,
 }
 
 thread_local! {
@@ -116,6 +124,7 @@ impl NativeInputHook {
         if let Ok(registration) = self.registration.lock() {
             if let Some(registration) = registration.as_ref() {
                 set_mapping_active(registration.mapping_view as *mut HookConfig, false);
+                clear_mapping_event(registration.mapping_view as *mut HookConfig);
             }
         }
     }
@@ -133,6 +142,7 @@ impl NativeInputHook {
             self.active.store(true, Ordering::Release);
             if let Ok(registration) = self.registration.lock() {
                 if let Some(registration) = registration.as_ref() {
+                    clear_mapping_event(registration.mapping_view as *mut HookConfig);
                     set_mapping_active(registration.mapping_view as *mut HookConfig, true);
                 }
             }
@@ -276,6 +286,7 @@ pub(crate) fn install(
             hwnd: expected_hwnd,
             context: context.clone(),
             original_window_proc,
+            mapping_view: 0,
         }) {
             unsafe {
                 let _ = SetWindowLongPtrW(
@@ -468,6 +479,21 @@ pub(crate) fn install(
             // Transfer one COM reference only after the registration lock is
             // acquired; the poisoned-lock cleanup path below therefore has
             // no raw reference to release.
+            if !set_host_window_mapping(expected_hwnd, mapping_view as usize) {
+                selector_for_hook.trace_qa("windows native input rejected hook mapping binding");
+                MOUSE_HOOK_CONTEXT.with(|context_slot| {
+                    *context_slot.borrow_mut() = None;
+                });
+                unsafe {
+                    let _ = UnhookWindowsHookEx(host_mouse_hook);
+                    let _ = UnhookWindowsHookEx(browser_mouse_hook);
+                    let _ = FreeLibrary(hook_module);
+                    let _ = controller.remove_AcceleratorKeyPressed(accelerator_token);
+                    close_hook_mapping(mapping, mapping_view);
+                }
+                restore_failed_setup(expected_hwnd, original_window_proc);
+                return;
+            }
             let controller_raw = controller.clone().into_raw() as usize;
             *slot = Some(Registration {
                 controller: controller_raw,
@@ -530,18 +556,24 @@ unsafe extern "system" fn trusted_window_proc(
     hwnd: windows_sys::Win32::Foundation::HWND,
     message: u32,
     w_param: WPARAM,
-    l_param: LPARAM,
+    _l_param: LPARAM,
 ) -> LRESULT {
     if message == TRUSTED_INPUT_MESSAGE {
-        let context = host_window_state().lock().ok().and_then(|state| {
+        // The browser helper's WM_APP is only a wake-up carrying a one-use
+        // sequence. Target/coordinates in the message are deliberately
+        // ignored: the host accepts a pointer event only after consuming the
+        // hook-written shared slot with an interlocked transition.
+        let native_event = host_window_state().lock().ok().and_then(|state| {
             state
                 .as_ref()
                 .filter(|state| state.hwnd == hwnd as usize)
-                .map(|state| state.context.clone())
+                .and_then(|state| {
+                    consume_hook_event(state.mapping_view as *mut HookConfig, w_param as u64)
+                        .map(|event| (state.context.clone(), event))
+                })
         });
-        if let Some(context) = context {
-            let point = unpack_point(l_param);
-            handle_pointer_up(&context, w_param as usize, point, "browser-thread");
+        if let Some((context, (target, point))) = native_event {
+            handle_pointer_up(&context, target, point, "browser-thread");
             return 0;
         }
     }
@@ -648,7 +680,7 @@ fn window_is_authorized(
     unsafe {
         if IsWindow(expected) == 0
             || IsWindowVisible(expected) == 0
-            || IsWindowEnabled(expected) == 0
+            || !window_is_enabled(expected)
             || IsIconic(expected) != 0
             || GetForegroundWindow() != expected
         {
@@ -697,7 +729,7 @@ fn controller_parent_is_authorized(
         if IsWindow(expected) == 0
             || IsWindow(controller) == 0
             || IsWindowVisible(controller) == 0
-            || IsWindowEnabled(controller) == 0
+            || !window_is_enabled(controller)
             || GetAncestor(controller, GA_ROOT) != expected
             || IsChild(expected, controller) == 0
         {
@@ -707,6 +739,10 @@ fn controller_parent_is_authorized(
         let owner_thread_id = GetWindowThreadProcessId(controller, &mut process_id);
         owner_thread_id == expected_thread_id && process_id == GetCurrentProcessId()
     }
+}
+
+unsafe fn window_is_enabled(hwnd: windows_sys::Win32::Foundation::HWND) -> bool {
+    (GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_DISABLED) == 0
 }
 
 fn is_window_or_descendant(expected_hwnd: usize, target_hwnd: usize) -> bool {
@@ -772,6 +808,20 @@ fn set_host_window_state(state: HostWindowState) -> bool {
     true
 }
 
+fn set_host_window_mapping(hwnd: usize, mapping_view: usize) -> bool {
+    let Ok(mut slot) = host_window_state().lock() else {
+        return false;
+    };
+    let Some(state) = slot.as_mut() else {
+        return false;
+    };
+    if state.hwnd != hwnd || mapping_view == 0 || state.mapping_view != 0 {
+        return false;
+    }
+    state.mapping_view = mapping_view;
+    true
+}
+
 fn clear_host_window_state(hwnd: usize) {
     if let Ok(mut slot) = host_window_state().lock() {
         if slot.as_ref().is_some_and(|state| state.hwnd == hwnd) {
@@ -808,7 +858,7 @@ fn create_hook_mapping(
     if mapping.is_null() {
         return None;
     }
-    let view = unsafe {
+    let view_address = unsafe {
         MapViewOfFile(
             mapping,
             FILE_MAP_ALL_ACCESS,
@@ -816,7 +866,8 @@ fn create_hook_mapping(
             0,
             std::mem::size_of::<HookConfig>(),
         )
-    } as *mut HookConfig;
+    };
+    let view = view_address.Value as *mut HookConfig;
     if view.is_null() {
         unsafe {
             let _ = CloseHandle(mapping);
@@ -832,6 +883,11 @@ fn create_hook_mapping(
                 receiver_hwnd: expected_hwnd,
                 expected_hwnd,
                 active: 0,
+                event_state: HOOK_EVENT_EMPTY,
+                event_sequence: 0,
+                event_target: 0,
+                event_x: 0,
+                event_y: 0,
             },
         );
     }
@@ -843,16 +899,59 @@ fn set_mapping_active(view: *mut HookConfig, active: bool) {
         return;
     }
     unsafe {
-        std::ptr::write_volatile(
+        windows_sys::Win32::System::Threading::InterlockedExchange(
             std::ptr::addr_of_mut!((*view).active),
             if active { 1 } else { 0 },
         );
     }
 }
 
+fn clear_mapping_event(view: *mut HookConfig) {
+    if view.is_null() {
+        return;
+    }
+    unsafe {
+        windows_sys::Win32::System::Threading::InterlockedExchange(
+            std::ptr::addr_of_mut!((*view).event_state),
+            HOOK_EVENT_EMPTY,
+        );
+    }
+}
+
+fn consume_hook_event(view: *mut HookConfig, sequence: u64) -> Option<(usize, POINT)> {
+    if view.is_null() || sequence == 0 {
+        return None;
+    }
+    unsafe {
+        if std::ptr::read_volatile(std::ptr::addr_of!((*view).magic)) != TRUSTED_INPUT_MAGIC
+            || std::ptr::read_volatile(std::ptr::addr_of!((*view).version)) != TRUSTED_INPUT_VERSION
+            || std::ptr::read_volatile(std::ptr::addr_of!((*view).active)) == 0
+            || std::ptr::read_volatile(std::ptr::addr_of!((*view).event_state)) != HOOK_EVENT_READY
+            || std::ptr::read_volatile(std::ptr::addr_of!((*view).event_sequence)) != sequence
+        {
+            return None;
+        }
+        let target = std::ptr::read_volatile(std::ptr::addr_of!((*view).event_target));
+        let point = POINT {
+            x: std::ptr::read_volatile(std::ptr::addr_of!((*view).event_x)),
+            y: std::ptr::read_volatile(std::ptr::addr_of!((*view).event_y)),
+        };
+        if target == 0
+            || windows_sys::Win32::System::Threading::InterlockedCompareExchange(
+                std::ptr::addr_of_mut!((*view).event_state),
+                HOOK_EVENT_EMPTY,
+                HOOK_EVENT_READY,
+            ) != HOOK_EVENT_READY
+        {
+            return None;
+        }
+        Some((target, point))
+    }
+}
+
 unsafe fn close_hook_mapping(mapping: HANDLE, view: *mut HookConfig) {
     if !view.is_null() {
-        let _ = UnmapViewOfFile(view as _);
+        let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: view.cast() });
     }
     if !mapping.is_null() {
         let _ = CloseHandle(mapping);
@@ -873,12 +972,4 @@ fn load_hook_module(path: &Path) -> Option<HMODULE> {
 fn hook_proc(module: HMODULE) -> Option<HookProc> {
     let proc = unsafe { GetProcAddress(module, b"imageforge_trusted_mouse_hook\0".as_ptr()) }?;
     Some(unsafe { std::mem::transmute(proc) })
-}
-
-fn unpack_point(value: LPARAM) -> POINT {
-    let packed = value as u64;
-    POINT {
-        x: (packed as u32) as i32,
-        y: ((packed >> 32) as u32) as i32,
-    }
 }
