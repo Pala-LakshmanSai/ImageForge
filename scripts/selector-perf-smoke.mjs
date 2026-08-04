@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 const FIXTURE_SHA256 = '102cfe7267c269a1344d3758ef1deea4cfbe5d469d2de9b996f5c06499eacf68';
@@ -72,6 +73,100 @@ function macFocus(pid) {
   run('osascript', ['-e', macProcessScript(pid, 'set frontmost to true')]);
 }
 
+const MAC_INPUT_HELPER_SOURCE = String.raw`
+#include <CoreGraphics/CoreGraphics.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+static int parse_number(const char *value, long minimum, long maximum, long *parsed) {
+  char *end = NULL;
+  errno = 0;
+  long candidate = strtol(value, &end, 10);
+  if (errno != 0 || end == value || *end != 0 || candidate < minimum || candidate > maximum) return 0;
+  *parsed = candidate;
+  return 1;
+}
+
+static int post_click(double x, double y) {
+  CGPoint point = CGPointMake(x, y);
+  CGEventRef down = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseDown, point, kCGMouseButtonLeft);
+  CGEventRef up = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseUp, point, kCGMouseButtonLeft);
+  if (down == NULL || up == NULL) {
+    if (down != NULL) CFRelease(down);
+    if (up != NULL) CFRelease(up);
+    return 1;
+  }
+  CGEventPost(kCGHIDEventTap, down);
+  usleep(1000);
+  CGEventPost(kCGHIDEventTap, up);
+  CFRelease(down);
+  CFRelease(up);
+  return 0;
+}
+
+static int post_key(long key_code) {
+  CGEventRef down = CGEventCreateKeyboardEvent(NULL, (CGKeyCode)key_code, true);
+  CGEventRef up = CGEventCreateKeyboardEvent(NULL, (CGKeyCode)key_code, false);
+  if (down == NULL || up == NULL) {
+    if (down != NULL) CFRelease(down);
+    if (up != NULL) CFRelease(up);
+    return 1;
+  }
+  CGEventPost(kCGHIDEventTap, down);
+  usleep(1000);
+  CGEventPost(kCGHIDEventTap, up);
+  CFRelease(down);
+  CFRelease(up);
+  return 0;
+}
+
+int main(int argc, char **argv) {
+  if (argc == 4 && strcmp(argv[1], "click") == 0) {
+    char *x_end = NULL;
+    char *y_end = NULL;
+    errno = 0;
+    double x = strtod(argv[2], &x_end);
+    double y = strtod(argv[3], &y_end);
+    if (errno != 0 || x_end == argv[2] || *x_end != 0 || y_end == argv[3] || *y_end != 0) {
+      fprintf(stderr, "invalid click coordinates\n");
+      return 2;
+    }
+    return post_click(x, y);
+  }
+  if (argc == 3 && strcmp(argv[1], "key") == 0) {
+    long key_code = 0;
+    if (!parse_number(argv[2], 0, 255, &key_code)) {
+      fprintf(stderr, "invalid key code\n");
+      return 2;
+    }
+    return post_key(key_code);
+  }
+  fprintf(stderr, "usage: %s click <x> <y> | key <key-code>\n", argv[0]);
+  return 2;
+}
+`;
+
+function createMacInputHelper() {
+  const root = mkdtempSync(join(tmpdir(), 'imageforge-selector-input-'));
+  const sourcePath = join(root, 'input.c');
+  const binaryPath = join(root, 'input');
+  writeFileSync(sourcePath, MAC_INPUT_HELPER_SOURCE, 'utf8');
+  try {
+    run('clang', ['-O2', sourcePath, '-framework', 'CoreGraphics', '-o', binaryPath]);
+    if (!existsSync(binaryPath)) fail(`macOS input helper was not created at ${binaryPath}`);
+  } catch (error) {
+    rmSync(root, { recursive: true, force: true });
+    throw error;
+  }
+  return {
+    path: binaryPath,
+    cleanup: () => rmSync(root, { recursive: true, force: true }),
+  };
+}
+
 function macMetrics(pid) {
   const output = run('osascript', ['-e', macProcessScript(pid, 'set p to position of window 1\n    set s to size of window 1\n    return (item 1 of p as text) & "," & (item 2 of p as text) & "," & (item 1 of s as text) & "," & (item 2 of s as text)')]);
   const values = output.split(',').map((value) => Number(value));
@@ -79,13 +174,14 @@ function macMetrics(pid) {
   return { left: values[0], top: values[1], width: values[2], height: values[3] };
 }
 
-function macClick(pid, location) {
+function macClick(pid, location, inputHelperPath) {
   macFocus(pid);
-  run('osascript', ['-e', `tell application "System Events" to click at {${Math.round(location.x)}, ${Math.round(location.y)}}`]);
+  run(inputHelperPath, ['click', String(Math.round(location.x)), String(Math.round(location.y))]);
 }
 
-function macKey(pid, keyCode) {
-  run('osascript', ['-e', macProcessScript(pid, `key code ${keyCode}`)]);
+function macKey(pid, keyCode, inputHelperPath) {
+  macFocus(pid);
+  run(inputHelperPath, ['key', String(keyCode)]);
 }
 
 const WINDOWS_HELPER = `
@@ -137,7 +233,7 @@ function focusWindow(platform, pid) {
   else windowsCommand(pid, '');
 }
 
-function clickAt(platform, pid, kind) {
+function clickAt(platform, pid, kind, macInputHelperPath) {
   // Resize is asynchronous in the renderer. Re-read the native frame for
   // every click so titlebar/content movement cannot send a sample to stale
   // coordinates.
@@ -149,14 +245,14 @@ function clickAt(platform, pid, kind) {
   };
   const location = locations[kind];
   if (!location) fail(`unknown click target ${kind}`);
-  if (platform === 'macos-arm64') macClick(pid, location);
+  if (platform === 'macos-arm64') macClick(pid, location, macInputHelperPath);
   else windowsClick(pid, location);
 }
 
-function sendKey(platform, pid, key) {
+function sendKey(platform, pid, key, macInputHelperPath) {
   if (platform === 'macos-arm64') {
     const codes = { up: 126, down: 125, space: 49 };
-    macKey(pid, codes[key]);
+    macKey(pid, codes[key], macInputHelperPath);
   } else {
     const codes = { up: 0x26, down: 0x28, space: 0x20 };
     windowsKey(pid, codes[key]);
@@ -249,7 +345,7 @@ async function stopChild(config, child) {
   if (child.exitCode === null) child.kill('SIGKILL');
 }
 
-async function runGroup(config, action, width, height, groupRoot) {
+async function runGroup(config, action, width, height, groupRoot, macInputHelperPath) {
   const allSamples = [];
   const launches = action === 'cold_open' ? 30 : 1;
   for (let launchIndex = 0; launchIndex < launches; launchIndex += 1) {
@@ -274,29 +370,29 @@ async function runGroup(config, action, width, height, groupRoot) {
       await sleep(750);
 
       if (action === 'cold_open') {
-        clickAt(config.platform, child.pid, 'center');
+        clickAt(config.platform, child.pid, 'center', macInputHelperPath);
         await waitForFile(resultPath, 20_000, child, `${action} launch ${launchIndex + 1}`);
       } else if (action === 'warm_open') {
         // Three close/open cycles are intentionally unrecorded warm-ups. The
         // harness arms only after the final close, so those clicks cannot mint
         // selector samples.
         for (let warmup = 0; warmup < 3; warmup += 1) {
-          clickAt(config.platform, child.pid, 'close');
+          clickAt(config.platform, child.pid, 'close', macInputHelperPath);
           await sleep(250);
-          clickAt(config.platform, child.pid, 'center');
+          clickAt(config.platform, child.pid, 'center', macInputHelperPath);
           await sleep(400);
         }
-        clickAt(config.platform, child.pid, 'close');
+        clickAt(config.platform, child.pid, 'close', macInputHelperPath);
         await sleep(500);
         for (let ordinal = 1; ordinal <= 30; ordinal += 1) {
-          clickAt(config.platform, child.pid, 'center');
+          clickAt(config.platform, child.pid, 'center', macInputHelperPath);
           await waitForSamples(samplesPath, ordinal, child, `${action} ${width}x${height}`);
           await sleep(250);
         }
         await waitForFile(resultPath, 10_000, child, `${action} ${width}x${height}`);
       } else if (action === 'refresh_loading') {
         for (let ordinal = 1; ordinal <= 30; ordinal += 1) {
-          clickAt(config.platform, child.pid, 'refresh');
+          clickAt(config.platform, child.pid, 'refresh', macInputHelperPath);
           await waitForSamples(samplesPath, ordinal, child, `${action} ${width}x${height}`);
         }
         await waitForFile(resultPath, 10_000, child, `${action} ${width}x${height}`);
@@ -305,7 +401,7 @@ async function runGroup(config, action, width, height, groupRoot) {
           const key = action === 'keyboard_move'
             ? (ordinal % 2 === 1 ? 'down' : 'up')
             : 'space';
-          sendKey(config.platform, child.pid, key);
+          sendKey(config.platform, child.pid, key, macInputHelperPath);
           await waitForSamples(samplesPath, ordinal, child, `${action} ${width}x${height}`);
         }
         await waitForFile(resultPath, 10_000, child, `${action} ${width}x${height}`);
@@ -382,16 +478,21 @@ async function main() {
   const config = parseArgs(process.argv.slice(2));
   const runRoot = join(config.outputRoot, '.selector-perf-runs', `${config.platform}-${config.commitSha}-${config.artifactSha256}`);
   mkdirSync(runRoot, { recursive: true });
-  const samples = [];
-  for (const [width, height] of VIEWPORTS) {
-    for (const action of ACTIONS) {
-      const groupRoot = join(runRoot, `${width}x${height}`, action);
-      mkdirSync(groupRoot, { recursive: true });
-      samples.push(...await runGroup(config, action, width, height, groupRoot));
+  const macInputHelper = config.platform === 'macos-arm64' ? createMacInputHelper() : null;
+  try {
+    const samples = [];
+    for (const [width, height] of VIEWPORTS) {
+      for (const action of ACTIONS) {
+        const groupRoot = join(runRoot, `${width}x${height}`, action);
+        mkdirSync(groupRoot, { recursive: true });
+        samples.push(...await runGroup(config, action, width, height, groupRoot, macInputHelper?.path));
+      }
     }
+    const evidence = validateAndWriteEvidence(config, samples);
+    console.log(JSON.stringify({ platform: config.platform, appVersion: config.appVersion, commitSha: config.commitSha, artifactSha256: config.artifactSha256, sampleCount: samples.length, evidencePath: evidence.evidencePath, evidenceSha256: evidence.evidenceSha256, p95Us: evidence.groups.map((group) => ({ viewport: `${group.viewportWidth}x${group.viewportHeight}`, action: group.action, p95Us: group.p95Us })) }, null, 2));
+  } finally {
+    macInputHelper?.cleanup();
   }
-  const evidence = validateAndWriteEvidence(config, samples);
-  console.log(JSON.stringify({ platform: config.platform, appVersion: config.appVersion, commitSha: config.commitSha, artifactSha256: config.artifactSha256, sampleCount: samples.length, evidencePath: evidence.evidencePath, evidenceSha256: evidence.evidenceSha256, p95Us: evidence.groups.map((group) => ({ viewport: `${group.viewportWidth}x${group.viewportHeight}`, action: group.action, p95Us: group.p95Us })) }, null, 2));
 }
 
 main().catch((error) => {
