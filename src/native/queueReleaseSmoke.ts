@@ -527,20 +527,38 @@ async function measureCanonicalViewports(
   setFullscreen?: (fullscreen: boolean) => Promise<void>,
 ): Promise<QueueReleaseViewportObservation[]> {
   const observations: QueueReleaseViewportObservation[] = [];
+  const clippedActionDetails: string[] = [];
   for (const [width, height] of [[1280, 720], [1440, 900], [1920, 1080]] as const) {
     // A 1920×1080 logical client can exceed the non-fullscreen work area on
     // CI Macs (the title/menu bars consume the remaining vertical pixels).
     // Use fullscreen only for this canonical target; the CSS client-size gate
     // below remains exact and still rejects any clamped viewport.
-    if (setFullscreen !== undefined) await setFullscreen(height === 1080);
+    if (setFullscreen !== undefined) {
+      await setFullscreen(height === 1080);
+      // Tauri resolves the fullscreen transition before WebKit has finished
+      // committing its new CSS viewport. Let that transition settle before
+      // requesting the exact logical size; otherwise the first exact sample
+      // can be stale while the layout is still expanding to the display.
+      await animationFrame();
+      await animationFrame();
+    }
     await setSize(new LogicalSize(width, height));
-    const measureExact = () => waitFor(() => {
-      const measuredWidth = window.innerWidth;
-      const measuredHeight = window.innerHeight;
-      return Math.abs(measuredWidth - width) <= 1 && Math.abs(measuredHeight - height) <= 1
-        ? { width: measuredWidth, height: measuredHeight }
-        : null;
-    }, `the ${width}×${height} canonical viewport`);
+    const measureExact = () => {
+      let exactSince: number | null = null;
+      return waitFor(() => {
+        const measuredWidth = window.innerWidth;
+        const measuredHeight = window.innerHeight;
+        const exact = Math.abs(measuredWidth - width) <= 1 && Math.abs(measuredHeight - height) <= 1;
+        if (!exact) {
+          exactSince = null;
+          return null;
+        }
+        exactSince ??= performance.now();
+        return performance.now() - exactSince >= 120
+          ? { width: measuredWidth, height: measuredHeight }
+          : null;
+      }, `the stable ${width}×${height} canonical viewport`);
+    };
     let measured: { width: number; height: number } | undefined;
     try {
       measured = await measureExact();
@@ -594,7 +612,16 @@ async function measureCanonicalViewports(
     const clippedAction = Array.from(document.querySelectorAll<HTMLElement>('.queue-rail button, .queue-alarm-card button'))
       .some((control) => {
         const bounds = control.getBoundingClientRect();
-        return bounds.width > 0 && (bounds.left < -1 || bounds.right > measuredWidth + 1 || control.scrollWidth > control.clientWidth + 1);
+        const clipped = bounds.width > 0 && (bounds.left < -1 || bounds.right > measuredWidth + 1 || control.scrollWidth > control.clientWidth + 1);
+        if (clipped) {
+          const label = (control.getAttribute('aria-label') ?? control.textContent ?? '<unnamed>')
+            .replace(/\s+/gu, ' ')
+            .trim();
+          clippedActionDetails.push(
+            `${width}x${height} ${label}: bounds ${Math.round(bounds.left)},${Math.round(bounds.right)} width ${Math.round(bounds.width)}; client ${control.clientWidth}; scroll ${control.scrollWidth}; class ${String(control.className)}`,
+          );
+        }
+        return clipped;
       });
     observations.push({
       width,
@@ -606,7 +633,10 @@ async function measureCanonicalViewports(
     });
   }
   if (observations.some((value) => value.horizontalOverflowPx !== 0 || value.clippedAction)) {
-    throw new Error('A canonical queue viewport overflowed or clipped an action.');
+    const detail = clippedActionDetails.length > 0
+      ? ` Details: ${clippedActionDetails.slice(0, 8).join(' | ')}`
+      : '';
+    throw new Error(`A canonical queue viewport overflowed or clipped an action.${detail}`);
   }
   return observations;
 }
