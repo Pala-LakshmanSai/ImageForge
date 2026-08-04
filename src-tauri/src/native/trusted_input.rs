@@ -108,16 +108,23 @@ mod macos {
     use objc2::{rc::Retained, MainThreadMarker};
     use objc2_app_kit::{NSApplication, NSEvent, NSEventMask, NSEventType, NSWindow};
     use std::ptr::NonNull;
+    use std::rc::Rc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
     use tauri::WebviewWindow;
 
+    #[derive(Debug, Default)]
+    struct MonitorTokens {
+        local: Option<usize>,
+        global: Option<usize>,
+    }
+
     #[derive(Clone, Debug)]
     pub(crate) struct NativeInputHook {
         active: Arc<AtomicBool>,
         destroyed: Arc<AtomicBool>,
-        monitor: Arc<Mutex<Option<usize>>>,
+        monitor: Arc<Mutex<MonitorTokens>>,
     }
 
     impl NativeInputHook {
@@ -134,11 +141,19 @@ mod macos {
         pub(crate) fn remove_on_main_thread(&self) {
             self.destroyed.store(true, Ordering::Release);
             self.active.store(false, Ordering::Release);
-            let raw = self.monitor.lock().ok().and_then(|mut slot| slot.take());
-            let Some(raw) = raw else { return };
+            let tokens = self
+                .monitor
+                .lock()
+                .ok()
+                .map(|mut slots| (slots.local.take(), slots.global.take()));
+            let Some((local, global)) = tokens else {
+                return;
+            };
             unsafe {
-                if let Some(token) = Retained::<AnyObject>::from_raw(raw as *mut AnyObject) {
-                    NSEvent::removeMonitor(&token);
+                for raw in [local, global].into_iter().flatten() {
+                    if let Some(token) = Retained::<AnyObject>::from_raw(raw as *mut AnyObject) {
+                        NSEvent::removeMonitor(&token);
+                    }
                 }
             }
         }
@@ -151,13 +166,14 @@ mod macos {
     ) -> tauri::Result<NativeInputHook> {
         let active = Arc::new(AtomicBool::new(true));
         let destroyed = Arc::new(AtomicBool::new(false));
-        let monitor = Arc::new(Mutex::new(None));
+        let monitor = Arc::new(Mutex::new(MonitorTokens::default()));
         let window_label = window.label().to_owned();
         let window_for_hook = window.clone();
         let window_for_setup = window.clone();
         let active_for_hook = active.clone();
         let active_for_setup = active.clone();
         let destroyed_for_setup = destroyed.clone();
+        let destroyed_for_hook = destroyed.clone();
         let monitor_for_setup = monitor.clone();
         let broker_for_hook = broker.clone();
         let selector_for_hook = selector_perf.clone();
@@ -194,15 +210,17 @@ mod macos {
             *window_ptr_for_setup.lock().expect("window pointer lock") = Some(ns_window as usize);
 
             let event_mask = NSEventMask::LeftMouseUp | NSEventMask::KeyDown;
-            let block = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+            let handle_event: Rc<dyn Fn(NonNull<NSEvent>)> = Rc::new(move |event: NonNull<NSEvent>| {
                 let event_ref = unsafe { event.as_ref() };
-                if !active_for_hook.load(Ordering::Acquire) {
+                if destroyed_for_hook.load(Ordering::Acquire)
+                    || !active_for_hook.load(Ordering::Acquire)
+                {
                     selector_for_hook.trace_qa("macOS native event ignored while hook inactive");
-                    return event.as_ptr();
+                    return;
                 }
                 let Some(expected_window) = *window_number.lock().expect("window number lock")
                 else {
-                    return event.as_ptr();
+                    return;
                 };
                 let event_window = event_ref.windowNumber() as isize;
                 selector_for_hook.trace_qa(&format!(
@@ -211,11 +229,16 @@ mod macos {
                 ));
                 if event_window != expected_window {
                     selector_for_hook.trace_qa("macOS native event rejected for window mismatch");
-                    return event.as_ptr();
+                    return;
                 }
-                let mtm = MainThreadMarker::new().expect("AppKit event monitor main thread");
+                let Some(mtm) = MainThreadMarker::new() else {
+                    selector_for_hook.trace_qa(
+                        "macOS native event rejected because the monitor was not on the AppKit main thread",
+                    );
+                    return;
+                };
                 let Some(window_ptr) = *window_ptr.lock().expect("window pointer lock") else {
-                    return event.as_ptr();
+                    return;
                 };
                 let app = NSApplication::sharedApplication(mtm);
                 let main_window = unsafe { &*(window_ptr as *const NSWindow) };
@@ -227,7 +250,7 @@ mod macos {
                     selector_for_hook.trace_qa(&format!(
                         "macOS native event rejected app_active={app_active} same_window={same_window} visible={visible} key_window={key_window}"
                     ));
-                    return event.as_ptr();
+                    return;
                 }
                 selector_for_hook.trace_qa("macOS native event passed window and focus checks");
                 match event_ref.r#type() {
@@ -262,15 +285,39 @@ mod macos {
                     }
                     _ => {}
                 }
-                event.as_ptr()
             });
-            let token = unsafe {
-                NSEvent::addLocalMonitorForEventsMatchingMask_handler(event_mask, &block)
+            let local_block = RcBlock::new({
+                let handle_event = handle_event.clone();
+                move |event: NonNull<NSEvent>| -> *mut NSEvent {
+                    handle_event(event);
+                    event.as_ptr()
+                }
+            });
+            let global_block = RcBlock::new({
+                let handle_event = handle_event.clone();
+                move |event: NonNull<NSEvent>| {
+                    handle_event(event);
+                }
+            });
+            let local_token = unsafe {
+                NSEvent::addLocalMonitorForEventsMatchingMask_handler(event_mask, &local_block)
             };
-            if let Some(token) = token {
-                *monitor_for_setup.lock().expect("monitor lock") =
-                    Some(Retained::into_raw(token) as usize);
-                selector_for_setup.trace_qa("macOS native input monitor registered");
+            let global_token =
+                NSEvent::addGlobalMonitorForEventsMatchingMask_handler(event_mask, &global_block);
+            let local_raw = local_token.map(|token| Retained::into_raw(token) as usize);
+            let global_raw = global_token.map(|token| Retained::into_raw(token) as usize);
+            let registered = local_raw.is_some() || global_raw.is_some();
+            {
+                let mut slots = monitor_for_setup.lock().expect("monitor lock");
+                slots.local = local_raw;
+                slots.global = global_raw;
+            }
+            if registered {
+                selector_for_setup.trace_qa(&format!(
+                    "macOS native input monitors registered local={} global={}",
+                    local_raw.is_some(),
+                    global_raw.is_some()
+                ));
             } else {
                 active_for_setup.store(false, Ordering::Release);
                 selector_for_setup.trace_qa("macOS native input monitor registration returned nil");
