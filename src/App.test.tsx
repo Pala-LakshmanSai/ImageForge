@@ -878,6 +878,70 @@ describe('ImageForge shell', () => {
     expect(screen.getByText('Currently offline')).toBeVisible();
   });
 
+  it('shows that production Generate is checking the shared GPU instead of appearing inert', async () => {
+    const production = productionAdapter();
+    let releaseRefresh!: () => void;
+    vi.mocked(production.runtime.refresh).mockImplementation(() => new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    }));
+    let state = createConfiguredInitialState();
+    state = appReducer(state, {
+      type: 'SET_POD_PHASE',
+      phase: 'ready',
+      progress: 100,
+      detail: 'Model warm',
+      podId: 'pod-ready-for-preflight',
+      gpu: 'RTX 4090',
+      vram: '24 GB',
+      hourlyRate: 0.54,
+    });
+    state = appReducer(state, { type: 'SET_PROMPT_TEXT', text: 'A sufficiently detailed editorial documentary frame at dawn' });
+    state = appReducer(state, { type: 'SET_DESTINATION', path: '/tmp/imageforge-output' });
+
+    render(<App initialState={state} adapter={production.adapter} />);
+    await waitFor(() => expect(production.runtime.refresh).toHaveBeenCalledOnce());
+
+    const generate = screen.getByRole('button', { name: /Generate 1 images/i });
+    expect(generate).toBeEnabled();
+    fireEvent.click(generate);
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /Checking GPU/i })).toBeDisabled());
+    expect(screen.getByText('Verifying the shared GPU before generation starts…')).toBeVisible();
+    expect(production.runtime.refresh).toHaveBeenCalledOnce();
+
+    releaseRefresh();
+    await waitFor(() => expect(production.runtime.startBatch).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Checking GPU/i })).not.toBeInTheDocument());
+  });
+
+  it('shows an active local queue as an unticked blocker for direct Generate', async () => {
+    const snapshot = queueSnapshot(queuedItem('active'));
+    let state = withQueueSnapshot(snapshot);
+    state = appReducer(state, {
+      type: 'SET_POD_PHASE',
+      phase: 'ready',
+      progress: 100,
+      detail: 'Model warm',
+      podId: 'pod-ready-for-queue',
+      gpu: 'RTX 4090',
+      vram: '24 GB',
+      hourlyRate: 0.54,
+    });
+    state = appReducer(state, { type: 'SET_PROMPT_TEXT', text: 'A sufficiently detailed editorial documentary frame at dawn' });
+    state = appReducer(state, { type: 'SET_DESTINATION', path: '/tmp/imageforge-output' });
+    const base = immediateAdapter();
+    const adapter: ImageForgeAdapter = {
+      ...base,
+      queue: { ...base.queue, load: vi.fn(async () => snapshot) },
+    };
+
+    render(<App initialState={state} adapter={adapter} />);
+
+    expect(await screen.findByText('Local queue is active')).toBeVisible();
+    expect(screen.getByText('Finish the device queue before starting a direct batch')).toBeVisible();
+    expect(screen.getByRole('button', { name: /Generate 1 images/i })).toBeDisabled();
+  });
+
   it('runs a strict Generate preflight even while an advisory observation is in flight', async () => {
     vi.useFakeTimers();
     const production = productionAdapter();
@@ -998,6 +1062,7 @@ describe('ImageForge shell', () => {
     }));
 
     expect(screen.getByText('Exact GPU termination is being finalized')).toBeVisible();
+    expect(screen.getByText('GPU Stop is finalizing')).toBeVisible();
     expect(screen.getByRole('button', { name: /Generate 1 images/i })).toBeDisabled();
   });
 

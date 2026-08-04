@@ -93,6 +93,7 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
   const refreshInFlightRef = useRef<Promise<boolean> | null>(null);
   const observationInFlightRef = useRef<Promise<void> | null>(null);
   const batchStartInFlightRef = useRef(false);
+  const [batchStartPending, setBatchStartPending] = useState(false);
   const queueSnapshotRef = useRef<NativeQueueSnapshotV1>({
     schemaVersion: state.queue.schemaVersion,
     storeRevision: state.queue.storeRevision,
@@ -1552,6 +1553,7 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
       // batch, so a stale ready card cannot submit to a dead worker.
       if (batchStartInFlightRef.current) return;
       batchStartInFlightRef.current = true;
+      setBatchStartPending(true);
       void refreshProductionStatus()
         .then(async (refreshed) => {
           if (!refreshed) {
@@ -1586,6 +1588,7 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
         })
         .finally(() => {
           batchStartInFlightRef.current = false;
+          setBatchStartPending(false);
         });
       return;
     }
@@ -1625,7 +1628,7 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
     testQueueAlarm,
   ]);
 
-  const screenProps = { state, dispatch: uiDispatch, adapter };
+  const screenProps = { state, dispatch: uiDispatch, adapter, batchStartPending };
 
   return (
     <div className="app-shell">

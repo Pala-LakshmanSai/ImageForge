@@ -18,6 +18,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { queueRunIsActive } from '../domain/queue';
 import { canStartBatch } from '../domain/reducer';
 import { isReferenceMimeType, MAX_BATCH_REFERENCES, MAX_REFERENCE_TOTAL_BYTES, normalizeReferenceName, validateReferenceBytes } from '../domain/references';
 import { ASPECT_RATIOS } from '../domain/aspectRatio';
@@ -30,6 +31,8 @@ import type { ScreenProps } from './types';
 function readiness(state: ScreenProps['state']) {
   const previousBatchFinished = state.batch !== null && TERMINAL_BATCH_PHASES.includes(state.batch.phase);
   const ownedActiveBatch = state.batch !== null && !previousBatchFinished && state.batch.canManage === true;
+  const localQueueActive = queueRunIsActive(state.queue.document);
+  const gpuStopFinalizing = state.studio.stop.phase === 'finalizing';
   return [
     {
       label: 'GPU ready',
@@ -48,20 +51,28 @@ function readiness(state: ScreenProps['state']) {
     },
     {
       label: state.batch === null
-        ? 'Ready for a new batch'
+        ? gpuStopFinalizing
+          ? 'GPU Stop is finalizing'
+          : localQueueActive
+            ? 'Local queue is active'
+            : 'Ready for a new batch'
         : previousBatchFinished
           ? 'Previous batch still open'
           : ownedActiveBatch
             ? 'Your batch is active'
             : 'Another batch is running',
       detail: state.batch === null
-        ? 'No other batch is using the GPU'
+        ? gpuStopFinalizing
+          ? 'Wait for shared GPU status to settle before generating'
+          : localQueueActive
+            ? 'Finish the device queue before starting a direct batch'
+            : 'No other batch is using the GPU'
         : previousBatchFinished
           ? 'Choose New brief before starting another batch'
           : ownedActiveBatch
             ? `Your batch · ${state.batch.phase.replace('_', ' ')}`
             : `${state.batch.owner} · ${state.batch.phase.replace('_', ' ')}`,
-      ready: state.batch === null,
+      ready: state.batch === null && !localQueueActive && !gpuStopFinalizing,
     },
   ];
 }
@@ -88,7 +99,7 @@ function referenceMimeForFile(file: File): string {
         : file.type;
 }
 
-export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
+export function CreateScreen({ state, dispatch, adapter, batchStartPending = false }: ScreenProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const referenceInputRef = useRef<HTMLInputElement>(null);
   const [choosingDestination, setChoosingDestination] = useState(false);
@@ -432,10 +443,11 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
               className="launch-button"
               tone="primary"
               icon={Sparkles}
-              disabled={!isReady}
+              pending={batchStartPending}
+              disabled={!isReady || batchStartPending}
               onClick={() => dispatch({ type: 'START_BATCH', startedAt: new Date().toISOString() })}
             >
-              Generate {state.draft.prompts.length || ''} images
+              {batchStartPending ? 'Checking GPU…' : `Generate ${state.draft.prompts.length || ''} images`}
             </Button>
             <Button
               className="queue-stage-button"
@@ -446,7 +458,11 @@ export function CreateScreen({ state, dispatch, adapter }: ScreenProps) {
             >
               {state.draft.queueReplacementId ? 'Replace staged batch' : 'Add to device queue'}
             </Button>
-            <p className="launch-panel__foot">ImageForge will not stop the GPU automatically.</p>
+            <p className="launch-panel__foot" aria-live="polite">
+              {batchStartPending
+                ? 'Verifying the shared GPU before generation starts…'
+                : 'ImageForge will not stop the GPU automatically.'}
+            </p>
           </section>
         </aside>
       </div>

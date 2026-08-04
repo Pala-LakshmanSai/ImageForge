@@ -6,4 +6,5 @@ export interface ScreenProps {
   state: AppState;
   dispatch: Dispatch<AppAction>;
   adapter: ImageForgeAdapter;
+  batchStartPending?: boolean;
 }
