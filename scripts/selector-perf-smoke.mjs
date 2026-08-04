@@ -155,7 +155,7 @@ function createMacInputHelper() {
   const binaryPath = join(root, 'input');
   writeFileSync(sourcePath, MAC_INPUT_HELPER_SOURCE, 'utf8');
   try {
-    run('clang', ['-O2', sourcePath, '-framework', 'CoreGraphics', '-o', binaryPath]);
+    run('clang', ['-O2', sourcePath, '-framework', 'CoreGraphics', '-framework', 'CoreFoundation', '-o', binaryPath]);
     if (!existsSync(binaryPath)) fail(`macOS input helper was not created at ${binaryPath}`);
   } catch (error) {
     rmSync(root, { recursive: true, force: true });
