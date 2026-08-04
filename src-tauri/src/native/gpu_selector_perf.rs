@@ -325,15 +325,33 @@ impl GpuSelectorPerfHost {
     /// session.  Production launches have no QA session and therefore never
     /// expose native diagnostics to the renderer.
     pub(crate) fn report_qa_error(&self, window: &WebviewWindow, error: &NativeError) {
-        let qa_enabled = self
-            .inner
+        if self.qa_enabled() {
+            let detail = format!(
+                "pid={}; window=main; {}: {}",
+                std::process::id(),
+                error.code,
+                error.message
+            );
+            if let Some(path) = std::env::var_os("IMAGEFORGE_NATIVE_SMOKE_RESULT") {
+                let _ = fs::write(path, format!("FAIL\n{detail}\n"));
+            }
+            let _ = window.emit(QA_ERROR_EVENT, error);
+            eprintln!("IMAGEFORGE_GPU_SELECTOR_PERF_QA_ERROR {detail}");
+        }
+    }
+
+    pub(crate) fn trace_qa(&self, message: &str) {
+        if self.qa_enabled() {
+            eprintln!("IMAGEFORGE_GPU_SELECTOR_PERF_QA_TRACE {message}");
+        }
+    }
+
+    fn qa_enabled(&self) -> bool {
+        self.inner
             .lock()
             .expect("selector perf lock")
             .session
-            .is_some();
-        if qa_enabled {
-            let _ = window.emit(QA_ERROR_EVENT, error);
-        }
+            .is_some()
     }
 
     /// Invalidate an in-flight sample when the native window loses the

@@ -168,12 +168,15 @@ mod macos {
         let window_ptr_for_setup = window_ptr.clone();
 
         window.with_webview(move |webview| {
+            selector_for_setup.trace_qa("macOS native input setup started");
             if destroyed_for_setup.load(Ordering::Acquire) {
+                selector_for_setup.trace_qa("macOS native input setup skipped after destroy");
                 return;
             }
             let ns_window = webview.ns_window();
             if ns_window.is_null() {
                 active_for_setup.store(false, Ordering::Release);
+                selector_for_setup.trace_qa("macOS native input setup found a null NSWindow");
                 selector_for_setup.report_qa_error(
                     &window_for_setup,
                     &NativeError::new(
@@ -184,6 +187,9 @@ mod macos {
                 return;
             }
             let number = unsafe { (&*ns_window.cast::<NSWindow>()).windowNumber() as isize };
+            selector_for_setup.trace_qa(&format!(
+                "macOS native input captured window number {number}"
+            ));
             *window_number_for_setup.lock().expect("window number lock") = Some(number);
             *window_ptr_for_setup.lock().expect("window pointer lock") = Some(ns_window as usize);
 
@@ -191,13 +197,20 @@ mod macos {
             let block = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
                 let event_ref = unsafe { event.as_ref() };
                 if !active_for_hook.load(Ordering::Acquire) {
+                    selector_for_hook.trace_qa("macOS native event ignored while hook inactive");
                     return event.as_ptr();
                 }
                 let Some(expected_window) = *window_number.lock().expect("window number lock")
                 else {
                     return event.as_ptr();
                 };
-                if event_ref.windowNumber() as isize != expected_window {
+                let event_window = event_ref.windowNumber() as isize;
+                selector_for_hook.trace_qa(&format!(
+                    "macOS native event received type={:?} event_window={event_window} expected_window={expected_window}",
+                    event_ref.r#type()
+                ));
+                if event_window != expected_window {
+                    selector_for_hook.trace_qa("macOS native event rejected for window mismatch");
                     return event.as_ptr();
                 }
                 let mtm = MainThreadMarker::new().expect("AppKit event monitor main thread");
@@ -206,13 +219,17 @@ mod macos {
                 };
                 let app = NSApplication::sharedApplication(mtm);
                 let main_window = unsafe { &*(window_ptr as *const NSWindow) };
-                if !app.isActive()
-                    || main_window.windowNumber() as isize != expected_window
-                    || !main_window.isVisible()
-                    || !main_window.isKeyWindow()
-                {
+                let app_active = app.isActive();
+                let same_window = main_window.windowNumber() as isize == expected_window;
+                let visible = main_window.isVisible();
+                let key_window = main_window.isKeyWindow();
+                if !app_active || !same_window || !visible || !key_window {
+                    selector_for_hook.trace_qa(&format!(
+                        "macOS native event rejected app_active={app_active} same_window={same_window} visible={visible} key_window={key_window}"
+                    ));
                     return event.as_ptr();
                 }
+                selector_for_hook.trace_qa("macOS native event passed window and focus checks");
                 match event_ref.r#type() {
                     NSEventType::LeftMouseUp => {
                         broker_for_hook.record(
@@ -253,8 +270,10 @@ mod macos {
             if let Some(token) = token {
                 *monitor_for_setup.lock().expect("monitor lock") =
                     Some(Retained::into_raw(token) as usize);
+                selector_for_setup.trace_qa("macOS native input monitor registered");
             } else {
                 active_for_setup.store(false, Ordering::Release);
+                selector_for_setup.trace_qa("macOS native input monitor registration returned nil");
                 selector_for_setup.report_qa_error(
                     &window_for_setup,
                     &NativeError::new(
