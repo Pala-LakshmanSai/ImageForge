@@ -459,6 +459,24 @@ describe('ImageForge shell', () => {
     expect(production.runtime.startGpuChoice).not.toHaveBeenCalled();
   });
 
+  it('keeps Create power control aligned with TopBar when active Pod health degrades', () => {
+    const state = createConfiguredInitialState();
+    state.pod = {
+      ...state.pod,
+      phase: 'error',
+      health: 'degraded',
+      statusDetail: 'RunPod health check failed; Pod may still be accruing cost',
+      podId: 'pod-still-billed',
+      matchingPodIds: ['pod-still-billed'],
+      gpu: 'RTX 4090',
+    };
+
+    render(<App initialState={state} adapter={immediateAdapter()} />);
+
+    expect(screen.queryByRole('button', { name: 'Start GPU' })).not.toBeInTheDocument();
+    expect(screen.getByText('GPU active · review status')).toBeVisible();
+  });
+
   it('shows a peer GPU-switch consent prompt and records only the explicit decision', async () => {
     const production = productionAdapter();
     production.setGpuInventory(liveGpuInventory());

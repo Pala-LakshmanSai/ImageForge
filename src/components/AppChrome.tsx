@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import type { Dispatch } from 'react';
 import { batchCounts } from '../domain/reducer';
-import type { AppAction, AppState, PodPhase, ViewId } from '../domain/types';
+import { hasActivePodIdentity, type AppAction, type AppState, type PodPhase, type ViewId } from '../domain/types';
 import { BrandMark } from './BrandMark';
 import { Button, IconButton, LinearProgress, StatusDot } from './primitives';
 
@@ -67,6 +67,7 @@ function commandEta(state: AppState): string {
 export function TopBar({ state, dispatch }: { state: AppState; dispatch: Dispatch<AppAction> }) {
   const counts = batchCounts(state.batch);
   const podBusy = !['offline', 'ready', 'error'].includes(state.pod.phase);
+  const hasPodIdentity = hasActivePodIdentity(state.pod);
   // An error is not completed work. Keep the track visibly empty so a failed
   // or ambiguous RunPod start cannot be mistaken for a successful 100% run.
   const needsAction = state.pod.phase === 'error' || state.pod.createRecovery !== null;
@@ -124,7 +125,7 @@ export function TopBar({ state, dispatch }: { state: AppState; dispatch: Dispatc
             })
           }
         />
-        {state.pod.podId ? (
+        {hasPodIdentity ? (
           <Button compact tone="danger" icon={Square} onClick={() => dispatch({ type: 'REQUEST_STOP_POD' })}>
             Stop GPU
           </Button>

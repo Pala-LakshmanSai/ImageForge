@@ -142,6 +142,15 @@ export interface PodState {
   stopTargetPodId: string | null;
 }
 
+/**
+ * A Pod identity is the shared lifecycle authority.  Phase/health can be
+ * degraded while that exact Pod remains billed and stoppable; UI controls
+ * must not infer "offline" from a transient health phase.
+ */
+export function hasActivePodIdentity(pod: Pick<PodState, 'podId'>): boolean {
+  return pod.podId !== null;
+}
+
 export interface BatchState {
   id: string;
   name: string;
