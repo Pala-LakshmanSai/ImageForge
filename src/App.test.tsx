@@ -557,6 +557,29 @@ describe('ImageForge shell', () => {
     expect(screen.getAllByRole('button', { name: 'GPU identity needed' }).every((button) => (button as HTMLButtonElement).disabled)).toBe(true);
   });
 
+  it('does not expose interrupted resume or stale GPU metadata without an exact Pod identity', () => {
+    let state = createDemoState();
+    state = appReducer(state, { type: 'CONFIRM_STOP_POD' });
+    state = appReducer(state, { type: 'POD_STOPPED' });
+    state = {
+      ...state,
+      pod: {
+        ...state.pod,
+        phase: 'ready',
+        health: 'degraded',
+        podId: null,
+        matchingPodIds: [],
+        gpu: 'RTX 4090',
+      },
+    };
+
+    render(<App initialState={state} adapter={immediateAdapter()} />);
+
+    expect(screen.queryByRole('button', { name: 'Resume interrupted batch' })).not.toBeInTheDocument();
+    expect(screen.getByText(/The exact GPU identity is unavailable/)).toBeVisible();
+    expect(screen.queryByText(/· RTX 4090$/)).not.toBeInTheDocument();
+  });
+
   it('shows a peer GPU-switch consent prompt and records only the explicit decision', async () => {
     const production = productionAdapter();
     production.setGpuInventory(liveGpuInventory());

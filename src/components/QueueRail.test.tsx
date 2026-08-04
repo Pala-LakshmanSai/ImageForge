@@ -59,6 +59,26 @@ describe('QueueRail', () => {
     expect(screen.getByRole('button', { name: 'Run queue' })).toBeDisabled();
   });
 
+  it('does not enable Resume queue without an exact ready Pod identity', () => {
+    const state = createConfiguredInitialState();
+    const runRevision = uuid(9_001);
+    state.pod = { ...state.pod, phase: 'ready', podId: null, gpu: 'RTX 4090', health: 'degraded' };
+    state.queue = {
+      ...state.queue,
+      loadState: 'ready',
+      document: {
+        schemaVersion: 1,
+        items: [item(1)],
+        run: { runRevision, cohortItemIds: [item(1).queueItemId], runnerState: 'paused', authorizationRequired: true, keepAwake: false },
+        alarm: null,
+      },
+    };
+
+    render(<QueueRail state={state} dispatch={vi.fn()} />);
+
+    expect(screen.getByRole('button', { name: 'Resume queue' })).toBeDisabled();
+  });
+
   it('offers an explicit reset confirmation entry only for an unrecoverable store', () => {
     const dispatch = vi.fn();
     const state = createConfiguredInitialState();

@@ -61,7 +61,8 @@ export function QueueRail({ state, dispatch }: QueueRailProps) {
   const nextRun = rows.filter((row) => !isQueuePlaceholder(row) && row.state === 'staged' && row.runRevision === null).length;
   const canRun = queueCanStartNewRun(document) && state.batch === null && state.pod.phase === 'ready' && hasActivePodIdentity(state.pod);
   const canPause = run?.runnerState === 'running' || run?.runnerState === 'pause_after_current';
-  const canResume = run !== null && ['paused', 'needs_attention'].includes(run.runnerState);
+  const resumePending = run !== null && ['paused', 'needs_attention'].includes(run.runnerState);
+  const canResume = resumePending && state.pod.phase === 'ready' && hasActivePodIdentity(state.pod);
   const notificationFallbackVisible = state.queue.notificationPermission !== 'granted'
     || alarm?.notificationDisposition === 'permission_denied'
     || alarm?.notificationDisposition === 'failed';
@@ -86,7 +87,7 @@ export function QueueRail({ state, dispatch }: QueueRailProps) {
         </div>
         <div className="queue-rail__actions">
           {canPause ? <Button compact tone="secondary" onClick={() => dispatch({ type: 'PAUSE_QUEUE' })}><Pause size={14} /> Pause after current</Button> : null}
-          {canResume ? <Button compact onClick={() => dispatch({ type: 'RESUME_QUEUE' })}><Play size={14} /> Resume queue</Button> : null}
+          {canResume ? <Button compact onClick={() => dispatch({ type: 'RESUME_QUEUE' })}><Play size={14} /> Resume queue</Button> : resumePending ? <Button compact disabled><Play size={14} /> Resume queue</Button> : null}
           {!canPause && !canResume ? <Button compact disabled={!canRun} onClick={() => dispatch({ type: 'RUN_QUEUE' })}><Play size={14} /> Run queue</Button> : null}
         </div>
       </header>

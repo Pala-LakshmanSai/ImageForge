@@ -327,6 +327,8 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
   const isError = batch.phase === 'error' || state.pod.phase === 'error';
   const isInterrupted = batch.phase === 'interrupted';
   const canResolveInterrupted = isInterrupted && canManage;
+  const exactPodAttached = podPowerAction(state.pod) === 'stop';
+  const canResumeInterrupted = canResolveInterrupted && state.pod.phase === 'ready' && exactPodAttached;
   const settled = ['complete', 'partial_failure', 'cancelled'].includes(batch.phase);
   const displayedPhase = isLocked ? (batch.remoteState ?? batch.phase) : batch.phase;
   const status = batchStatus(
@@ -362,7 +364,7 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
             <PhaseBadge tone={phaseTone(displayedPhase)}>{displayedPhase.replace('_', ' ')}</PhaseBadge>
           </div>
           <h1>{batch.name}</h1>
-          <p>{batch.owner} · {counts.total} images · {state.pod.gpu ?? 'GPU disconnected'}</p>
+          <p>{batch.owner} · {counts.total} images · {exactPodAttached ? state.pod.gpu ?? 'GPU identity unavailable' : 'GPU identity unavailable'}</p>
         </div>
         <div className="page-heading__actions progress-actions">
           {isControllable ? (
@@ -371,7 +373,7 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
             </Button>
           ) : null}
           {batch.phase === 'partial_failure' ? <Button tone="primary" icon={RotateCw} onClick={() => dispatch({ type: 'RETRY_FAILED' })}>Retry {counts.failed} failed</Button> : null}
-          {canResolveInterrupted && state.pod.phase === 'ready' ? <Button tone="primary" icon={Play} onClick={() => dispatch({ type: 'RESUME_INTERRUPTED_BATCH' })}>Resume interrupted batch</Button> : null}
+          {canResumeInterrupted ? <Button tone="primary" icon={Play} onClick={() => dispatch({ type: 'RESUME_INTERRUPTED_BATCH' })}>Resume interrupted batch</Button> : null}
           {canResolveInterrupted && podPowerAction(state.pod) === 'start' && ['offline', 'error'].includes(state.pod.phase) ? <Button tone="primary" icon={Zap} onClick={() => dispatch({ type: 'START_POD' })}>Restart GPU to resume</Button> : null}
           {settled || isInterrupted ? <Button icon={FileDown} onClick={() => void exportManifest(batch.prompts, batch.id, batch.name, adapter, dispatch)}>Export CSV</Button> : null}
           <Button
@@ -425,7 +427,7 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
       {isInterrupted ? (
         <aside className="state-banner state-banner--warning" role="status">
           <WifiOff size={21} />
-          <div><strong>Generation was interrupted safely</strong><span>Images already saved remain complete. {canResolveInterrupted ? (state.pod.phase === 'ready' ? 'Resume from the first unfinished prompt or cancel the batch.' : 'Restart a GPU, then resume from the first unfinished prompt—or cancel the batch now.') : `${batch.owner} must resume or cancel this batch.`}</span></div>
+          <div><strong>Generation was interrupted safely</strong><span>Images already saved remain complete. {canResolveInterrupted ? (canResumeInterrupted ? 'Resume from the first unfinished prompt or cancel the batch.' : state.pod.phase === 'ready' ? 'The exact GPU identity is unavailable. Refresh status or cancel the batch.' : 'Restart a GPU, then resume from the first unfinished prompt—or cancel the batch now.') : `${batch.owner} must resume or cancel this batch.`}</span></div>
         </aside>
       ) : null}
       {isError ? (

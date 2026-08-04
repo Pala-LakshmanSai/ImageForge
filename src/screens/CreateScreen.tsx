@@ -32,11 +32,16 @@ function readiness(state: ScreenProps['state']) {
   const ownedActiveBatch = state.batch !== null && !previousBatchFinished && state.batch.canManage === true;
   const localQueueActive = queueRunIsActive(state.queue.document);
   const gpuStopFinalizing = state.studio.stop.phase === 'finalizing';
+  const exactPodReady = state.pod.phase === 'ready' && podPowerAction(state.pod) === 'stop';
   return [
     {
       label: 'GPU ready',
-      detail: state.pod.phase === 'ready' ? `${state.pod.gpu} · model ready` : `Currently ${state.pod.phase}`,
-      ready: state.pod.phase === 'ready' && podPowerAction(state.pod) === 'stop',
+      detail: exactPodReady
+        ? `${state.pod.gpu ?? 'GPU identity unavailable'} · model ready`
+        : state.pod.phase === 'ready'
+          ? 'Exact GPU identity unavailable'
+          : `Currently ${state.pod.phase}`,
+      ready: exactPodReady,
     },
     {
       label: 'Prompts ready',
