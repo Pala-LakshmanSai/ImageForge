@@ -12,19 +12,19 @@ use ::windows::Win32::Foundation::HWND;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::WebviewWindow;
 use webview2_com::AcceleratorKeyPressedEventHandler;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2Controller, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN, COREWEBVIEW2_PHYSICAL_KEY_STATUS,
 };
-use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetAncestor, GetForegroundWindow, GetWindowThreadProcessId, IsChild, IsIconic,
     IsWindow, IsWindowVisible, SetWindowsHookExW, UnhookWindowsHookEx, GA_ROOT, HC_ACTION,
-    MOUSEHOOKSTRUCT, WH_MOUSE, WM_LBUTTONUP,
+    MOUSEHOOKSTRUCT, MSLLHOOKSTRUCT, WH_MOUSE, WH_MOUSE_LL, WM_LBUTTONUP,
 };
 
 const VK_RETURN: u32 = 0x0D;
@@ -54,6 +54,7 @@ struct Registration {
     controller: usize,
     accelerator_token: i64,
     mouse_hook: usize,
+    low_level_mouse_hook: usize,
     thread_id: u32,
 }
 
@@ -66,6 +67,7 @@ struct MouseHookContext {
     broker: TrustedInputBroker,
     selector_perf: GpuSelectorPerfHost,
     window: WebviewWindow,
+    last_pointer_up: Mutex<Option<(Instant, i32, i32)>>,
 }
 
 thread_local! {
@@ -127,6 +129,7 @@ impl NativeInputHook {
                 ICoreWebView2Controller::from_raw(registration.controller as *mut std::ffi::c_void);
             let _ = controller.remove_AcceleratorKeyPressed(registration.accelerator_token);
             let _ = UnhookWindowsHookEx(registration.mouse_hook as _);
+            let _ = UnhookWindowsHookEx(registration.low_level_mouse_hook as _);
         }
     }
 }
@@ -286,6 +289,32 @@ pub(crate) fn install(
             return;
         }
 
+        // WebView2 content can receive the final mouse message in its browser
+        // process rather than in the host thread. Keep the required
+        // thread-scoped WH_MOUSE hook for same-process window messages, and
+        // add a low-level callback as a narrowly filtered bridge for that
+        // browser-process path. The low-level callback never trusts its raw
+        // coordinates by itself: it must pass the same exact foreground,
+        // visibility, focus, controller-parent, and target-root checks below.
+        let low_level_mouse_hook = unsafe {
+            SetWindowsHookExW(
+                WH_MOUSE_LL,
+                Some(low_level_mouse_hook_proc),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if low_level_mouse_hook.is_null() {
+            selector_for_hook.trace_qa(
+                "windows native input rejected low-level mouse bridge registration",
+            );
+            unsafe {
+                let _ = UnhookWindowsHookEx(mouse_hook);
+                let _ = controller.remove_AcceleratorKeyPressed(accelerator_token);
+            }
+            return;
+        }
+
         MOUSE_HOOK_CONTEXT.with(|context| {
             *context.borrow_mut() = Some(MouseHookContext {
                 active: active_for_setup.clone(),
@@ -296,6 +325,7 @@ pub(crate) fn install(
                 broker: broker_for_hook.clone(),
                 selector_perf: selector_for_hook.clone(),
                 window: window_for_hook.clone(),
+                last_pointer_up: Mutex::new(None),
             });
         });
         if let Ok(mut slot) = registration_for_setup.lock() {
@@ -307,6 +337,7 @@ pub(crate) fn install(
                 controller: controller_raw,
                 accelerator_token,
                 mouse_hook: mouse_hook as usize,
+                low_level_mouse_hook: low_level_mouse_hook as usize,
                 thread_id,
             });
             active_for_setup.store(true, Ordering::Release);
@@ -320,6 +351,7 @@ pub(crate) fn install(
             });
             unsafe {
                 let _ = UnhookWindowsHookEx(mouse_hook);
+                let _ = UnhookWindowsHookEx(low_level_mouse_hook);
                 let _ = controller.remove_AcceleratorKeyPressed(accelerator_token);
             }
         }
@@ -334,66 +366,100 @@ pub(crate) fn install(
 }
 
 unsafe extern "system" fn mouse_hook_proc(code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 {
-        MOUSE_HOOK_CONTEXT.with(|context| {
-            if let Some(context) = context.borrow().as_ref() {
-                context
-                    .selector_perf
-                    .trace_qa(&format!("windows mouse hook received message={}", w_param,));
-            }
-        });
-    }
     if code == HC_ACTION as i32 && w_param == WM_LBUTTONUP as WPARAM && l_param != 0 {
         MOUSE_HOOK_CONTEXT.with(|context| {
             let context_guard = context.borrow();
             let Some(context) = context_guard.as_ref() else {
                 return;
             };
-            context
-                .selector_perf
-                .trace_qa("windows mouse hook received left button up");
-            if !context.active.load(Ordering::Acquire) {
-                context
-                    .selector_perf
-                    .trace_qa("windows mouse hook ignored inactive registration");
-                return;
-            }
-            if !window_is_authorized(context.expected_hwnd, context.thread_id)
-                || !controller_parent_is_authorized(
-                    context.expected_hwnd,
-                    context.expected_controller_hwnd,
-                    context.thread_id,
-                )
-            {
-                context
-                    .selector_perf
-                    .trace_qa("windows mouse hook ignored unauthorized window");
-                return;
-            }
             let event = unsafe { &*(l_param as *const MOUSEHOOKSTRUCT) };
-            let target = event.hwnd as usize;
-            if !is_window_or_child(context.expected_hwnd, target) {
-                context.selector_perf.trace_qa(&format!(
-                    "windows mouse hook ignored target hwnd={target} expected={}",
-                    context.expected_hwnd
-                ));
-                return;
-            }
-            context.selector_perf.trace_qa(&format!(
-                "windows mouse hook passed hwnd={} target={target}",
-                context.expected_hwnd
-            ));
-            context.broker.record(
-                &context.window_label,
-                TrustedActivationKind::PrimaryPointerUp,
-                Instant::now(),
-            );
-            let _ = context
-                .selector_perf
-                .start_native_input(&context.window, NativeSelectorInputKind::PrimaryMouseUp);
+            handle_pointer_up(context, event.hwnd as usize, event.pt, "thread");
         });
     }
     unsafe { CallNextHookEx(std::ptr::null_mut(), code, w_param, l_param) }
+}
+
+unsafe extern "system" fn low_level_mouse_hook_proc(
+    code: i32,
+    w_param: WPARAM,
+    l_param: LPARAM,
+) -> LRESULT {
+    if code == HC_ACTION as i32 && w_param == WM_LBUTTONUP as WPARAM && l_param != 0 {
+        MOUSE_HOOK_CONTEXT.with(|context| {
+            let context_guard = context.borrow();
+            let Some(context) = context_guard.as_ref() else {
+                return;
+            };
+            let event = unsafe { &*(l_param as *const MSLLHOOKSTRUCT) };
+            let target =
+                unsafe { windows_sys::Win32::UI::WindowsAndMessaging::WindowFromPoint(event.pt) };
+            handle_pointer_up(context, target as usize, event.pt, "low-level");
+        });
+    }
+    unsafe { CallNextHookEx(std::ptr::null_mut(), code, w_param, l_param) }
+}
+
+fn handle_pointer_up(context: &MouseHookContext, target: usize, point: POINT, source: &str) {
+    context.selector_perf.trace_qa(&format!(
+        "windows {source} mouse hook received left button up target={target} point=({}, {})",
+        point.x, point.y
+    ));
+    if !context.active.load(Ordering::Acquire) {
+        context
+            .selector_perf
+            .trace_qa("windows mouse hook ignored inactive registration");
+        return;
+    }
+    if !window_is_authorized(context.expected_hwnd, context.thread_id)
+        || !controller_parent_is_authorized(
+            context.expected_hwnd,
+            context.expected_controller_hwnd,
+            context.thread_id,
+        )
+    {
+        context
+            .selector_perf
+            .trace_qa("windows mouse hook ignored unauthorized window");
+        return;
+    }
+    if !is_window_or_child(context.expected_hwnd, target) {
+        context.selector_perf.trace_qa(&format!(
+            "windows mouse hook ignored target hwnd={target} expected={}",
+            context.expected_hwnd
+        ));
+        return;
+    }
+    let now = Instant::now();
+    if let Ok(mut last) = context.last_pointer_up.lock() {
+        if last.as_ref().is_some_and(|(previous, x, y)| {
+            now.saturating_duration_since(*previous) < Duration::from_millis(50)
+                && *x == point.x
+                && *y == point.y
+        }) {
+            context
+                .selector_perf
+                .trace_qa("windows mouse hook ignored duplicate pointer notification");
+            return;
+        }
+        *last = Some((now, point.x, point.y));
+    } else {
+        context
+            .selector_perf
+            .trace_qa("windows mouse hook ignored poisoned pointer state");
+        return;
+    }
+    context.selector_perf.trace_qa(&format!(
+        "windows mouse hook passed hwnd={} target={target}",
+        context.expected_hwnd
+    ));
+    context.broker.record(
+        &context.window_label,
+        TrustedActivationKind::PrimaryPointerUp,
+        now,
+    );
+    let _ = context
+        .selector_perf
+        .start_native_input(&context.window, NativeSelectorInputKind::PrimaryMouseUp);
 }
 
 fn window_is_authorized(expected_hwnd: usize, expected_thread_id: u32) -> bool {
@@ -458,5 +524,14 @@ fn is_window_or_child(expected_hwnd: usize, target_hwnd: usize) -> bool {
     }
     let expected = expected_hwnd as windows_sys::Win32::Foundation::HWND;
     let target = target_hwnd as windows_sys::Win32::Foundation::HWND;
-    unsafe { target == expected || IsChild(expected, target) != 0 }
+    unsafe {
+        IsWindow(target) != 0
+            && IsWindowVisible(target) != 0
+            && (target == expected
+                || IsChild(expected, target) != 0
+                // WebView2's browser-process child can cross the host-process
+                // boundary, where IsChild is not reliable. The root ancestry
+                // check still binds the pointer to this exact native window.
+                || GetAncestor(target, GA_ROOT) == expected)
+    }
 }

@@ -14,6 +14,7 @@ import {
   type GpuSelectorPerfActionV1,
   type GpuSelectorPerfStartedEventV1,
 } from './tauriBridge';
+import { advanceWarmOpen } from './gpuSelectorPerfSmokeState';
 
 const FIXTURE_SHA256 = '102cfe7267c269a1344d3758ef1deea4cfbe5d469d2de9b996f5c06499eacf68';
 const ROW_IDS = [
@@ -399,7 +400,12 @@ export function GpuSelectorPerfSmoke() {
 
   useEffect(() => {
     if (!sizeReadyRef.current || reportedRef.current || armedRef.current || armingRef.current || pendingRef.current !== null) return;
-    if (action === 'warm_open' && (warmupsRef.current > 0 || openRef.current)) return;
+    // Use the committed render state for the warm-up gate. The refs are
+    // useful inside native-event callbacks, but an arm request must observe
+    // the same state transition that just closed the sheet; relying on a ref
+    // updated by a separate effect can miss the first measured arm after the
+    // final warm-up click.
+    if (action === 'warm_open' && (warmupsRemaining > 0 || open)) return;
     if (action !== 'cold_open' && action !== 'warm_open' && !openRef.current) return;
     const armInput = {
       fixtureSha256: FIXTURE_SHA256,
@@ -472,13 +478,13 @@ export function GpuSelectorPerfSmoke() {
           type="button"
           data-gpu-selector-perf-open="true"
           onClick={() => {
-            if (action === 'warm_open' && warmupsRef.current > 0) {
-              const remaining = Math.max(0, warmupsRef.current - 1);
-              setWarmupsRemaining(remaining);
+            if (action === 'warm_open' && warmupsRemaining > 0) {
+              const next = advanceWarmOpen(warmupsRemaining);
+              setWarmupsRemaining(next.warmupsRemaining);
               // Leave the sheet closed after the last unrecorded warm-up so
               // the native arm effect has one unambiguous closed state before
               // the first measured open.
-              setOpen(remaining === 0 ? false : true);
+              setOpen(next.open);
               return;
             }
             setOpen(true);
