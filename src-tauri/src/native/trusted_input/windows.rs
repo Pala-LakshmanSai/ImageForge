@@ -33,6 +33,13 @@ const VK_SPACE: u32 = 0x20;
 const VK_UP: u32 = 0x26;
 const VK_DOWN: u32 = 0x28;
 
+// windows-sys 0.61 does not generate this user32 export, so bind the narrow
+// enabled-state query directly instead of weakening the authorization check.
+#[link(name = "User32")]
+extern "system" {
+    fn IsWindowEnabled(hwnd: windows_sys::Win32::Foundation::HWND) -> i32;
+}
+
 #[derive(Clone)]
 pub(crate) struct NativeInputHook {
     active: Arc<AtomicBool>,
@@ -333,6 +340,7 @@ fn window_is_authorized(expected_hwnd: usize, expected_thread_id: u32) -> bool {
     unsafe {
         if IsWindow(expected) == 0
             || IsWindowVisible(expected) == 0
+            || IsWindowEnabled(expected) == 0
             || IsIconic(expected) != 0
             || GetForegroundWindow() != expected
         {
