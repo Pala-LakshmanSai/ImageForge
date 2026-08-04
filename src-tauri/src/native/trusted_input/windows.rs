@@ -19,7 +19,6 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2Controller, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN, COREWEBVIEW2_PHYSICAL_KEY_STATUS,
 };
 use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -250,9 +249,16 @@ pub(crate) fn install(
             return;
         }
 
-        let module = unsafe { GetModuleHandleW(std::ptr::null()) };
-        let mouse_hook =
-            unsafe { SetWindowsHookExW(WH_MOUSE, Some(mouse_hook_proc), module, thread_id) };
+        // This is a current-process, thread-scoped hook. Win32 requires a
+        // null module handle when the callback lives in this process.
+        let mouse_hook = unsafe {
+            SetWindowsHookExW(
+                WH_MOUSE,
+                Some(mouse_hook_proc),
+                std::ptr::null_mut(),
+                thread_id,
+            )
+        };
         if mouse_hook.is_null() {
             unsafe {
                 let _ = controller.remove_AcceleratorKeyPressed(accelerator_token);
