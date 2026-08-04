@@ -724,3 +724,49 @@ the recovery poll observes it.
   `validateQueueReleaseSmokeAttestation` exports (30 trusted samples, p95
   `11.5 ms`, three batches). The full CLI additionally needs the CI-retained
   JPEG/receipt output tree, which is intentionally not copied into Git.
+
+## Current local candidate audit — 2026-08-04
+
+- The runtime candidate under test was clean at
+  `ceae782956fcd58b5d7878368464a386d1a82d2f` on
+  `codex/final-platform-audit`, three commits ahead of its public branch when
+  the runtime evidence was collected. This audit addendum is recorded in the
+  subsequent local documentation commit. `ceae782` changes only the
+  queue-smoke viewport settling/diagnostic harness; the Rust source was
+  unchanged after the fresh native suite below. No Pod or paid provider
+  request was started.
+- Current frontend evidence is `/tmp/imageforge-frontend-full-ceae.log`, exit
+  `0`, `31` files and `385` tests; the focused queue harness is
+  `/tmp/imageforge-queue-release-focused-ceae.log`, exit `0`, `3/3`; current
+  `npm run typecheck` and `npm run build` are `/tmp/imageforge-typecheck-ceae.log`
+  and `/tmp/imageforge-build-ceae.log`, both exit `0`. The build retains only
+  the existing large-chunk warning.
+- Removable-toolchain Rust evidence is `/tmp/imageforge-native-trusted-input-fresh.log`,
+  exit `0`, `2/2` trusted-input tests, and `/tmp/imageforge-rust-lib-fresh.log`,
+  exit `0`, `244 passed, 0 failed`. The current Windows target check remains
+  environment-blocked by `aws-lc-sys` failing to find `windows.h`; no Windows
+  compile or installed smoke is claimed.
+- The current local macOS DMG is
+  `/Volumes/ImageForgeBuild/cargo-target/aarch64-apple-darwin/release/bundle/dmg/ImageForge_0.1.9_aarch64.dmg`,
+  SHA-256 `040772d32dfe3653b76a0ecad6ccbb32768c32b9979e4067552e661ed36dfecd`.
+  Strict deep codesign and `hdiutil verify` pass; signing is ad hoc and there
+  is no notarization evidence. The installed native smoke passed with result
+  SHA-256 `d5cd0dcd548ff5efd1cc94e87f44aa275c9601b2d3ee6dfeb7ea32d32d558fb7`.
+- The current installed macOS queue smoke passed all three phases. Result
+  hashes are run `d4b7ba9a1fe629cf7a678290802d09864b58e27273b60af8c345e4a6cd3c5f8a`,
+  resume `ad38d6d22f00de0d4e80da676fd13fb3a84efc2f6d68df6d67f2a44b67d4334a`,
+  and relaunch `763d4e3515bf661387e5379c5b68c86e50f897bba415cb6723dacb538f14d6f8`.
+  Validator exit is `0`, p95 is `11 ms`, evidence SHA-256 is
+  `db2dce3fdd9c3e4c255f69cd880513e80375958d7d5538b456263973fed4dab0`, and
+  attestation SHA-256 is
+  `c9e0d7de1de5120bc6e9696651998124d5463d6da16b5a353fd3a9ff2c3ceddd`.
+  Canonical viewport observations passed at `1280x720`, `1440x900`, and
+  `1920x1080`, with zero overflow/clipped actions.
+- The current source includes the native macOS and Windows selector-input
+  adapters. The remaining selector gate is evidence, not the existence of the
+  adapter: no installed Task 014 selector-performance file or coordinated
+  Switch audit exists under `release-evidence/`. The required 20 performance
+  groups, current Windows target-native proof, exact-source worker digest, and
+  public v0.1.9 tag/assets/re-download remain open. Checked-in Task 013 files
+  remain internally hash-valid but are bound to commit `5488a63` and workflow
+  `30900636992`, not this current candidate.
