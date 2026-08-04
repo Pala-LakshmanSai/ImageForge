@@ -711,3 +711,16 @@ the recovery poll observes it.
   validates `11/11` with `shasum -a 256 -c release-files.sha256`; queue p95 is
   `11.5 ms`, trusted samples `30`, and three batches. Paid real-RunPod work was
   not used.
+- The Windows evidence is retained at
+  `release-evidence/task-013/windows/` and is bound to installer SHA-256
+  `12c35831f47a2c771c52d7727b6f6582a320c5fc72c854fca05be5f545c6dad7`.
+  `release-files.sha256` covers the evidence, metadata, provenance, and all
+  three queue wrapper records; the recorded wrapper hashes are
+  `accdd548f5136a83a6e53542a987908273e6631feb7eaf230660f9c1600cfeab`,
+  `1bf1cc8b429e25d324a23dadcf280daeeb008cdc2c82fec369c20a8df8d8d4ca`, and
+  `d3f9d43d5d8c1470eba783ae0052a71842f7707bf05ae5a2469f78847720402a`.
+  The checked-in evidence/attestation pair revalidates with the script's pure
+  `validateQueueReleaseSmokeEvidence` and
+  `validateQueueReleaseSmokeAttestation` exports (30 trusted samples, p95
+  `11.5 ms`, three batches). The full CLI additionally needs the CI-retained
+  JPEG/receipt output tree, which is intentionally not copied into Git.
