@@ -1290,7 +1290,16 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
         }),
       ]);
       if (gpuSelectorRequestRef.current !== requestId) return;
-      setGpuSelectorSnapshot(snapshot);
+      // Native refresh returns an immediate loading projection and publishes
+      // the terminal receipt through the inventory subscription. The event
+      // can arrive before this promise continuation; never let that newer
+      // same-observation projection regress the selector back to loading.
+      const latestSnapshot = runtime.getGpuInventory();
+      setGpuSelectorSnapshot(
+        latestSnapshot?.observationId === snapshot.observationId
+          ? latestSnapshot
+          : snapshot,
+      );
       setGpuSelectorError(null);
     } catch (error) {
       if (gpuSelectorRequestRef.current !== requestId) return;

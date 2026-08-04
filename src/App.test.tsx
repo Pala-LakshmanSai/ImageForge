@@ -446,6 +446,35 @@ describe('ImageForge shell', () => {
     expect(screen.getByRole('radio', { name: /RTX 4090/i })).toBeVisible();
   });
 
+  it('keeps terminal rows when native loading resolves through the inventory subscription first', async () => {
+    const production = productionAdapter();
+    const loadingSnapshot: NativeGpuInventorySnapshotV1 = {
+      ...liveGpuInventory(),
+      state: 'loading',
+      observedAt: null,
+      receipt: null,
+      offers: [],
+      currentPod: null,
+      currentPodObservedAt: null,
+      currentPodStale: false,
+      issue: null,
+    };
+    production.runtime.prepareGpuInventory = vi.fn(async () => {
+      // This models the native coordinator publishing its terminal event
+      // before the immediate loading promise continuation resumes.
+      production.setGpuInventory(liveGpuInventory());
+      return loadingSnapshot;
+    });
+    render(<App initialState={createConfiguredInitialState()} adapter={production.adapter} />);
+
+    await waitFor(() => expect(production.runtime.loadGpuSwitch).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getAllByRole('button', { name: 'Start GPU' })[0]);
+
+    expect(await screen.findByRole('radio', { name: /Auto best value/i })).toBeVisible();
+    expect(screen.getByRole('radio', { name: /RTX 4090/i })).toBeVisible();
+    expect(screen.queryByText('Loading the native inventory journal…')).not.toBeInTheDocument();
+  });
+
   it('replaces a failed Start inventory load with a retryable terminal state', async () => {
     const production = productionAdapter();
     production.runtime.prepareGpuInventory = vi.fn(async () => {
