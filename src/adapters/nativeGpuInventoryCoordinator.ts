@@ -25,8 +25,11 @@ interface PendingObservation {
   readonly includeEmergencyTier: boolean;
   readonly resolve: (snapshot: NativeGpuInventorySnapshotV1) => void;
   readonly reject: (reason: unknown) => void;
-  readonly removeAbort: () => void;
+  readonly cleanup: () => void;
 }
+
+const TERMINAL_RECONCILIATION_INTERVAL_MS = 250;
+const TERMINAL_RECONCILIATION_TIMEOUT_MS = 30_000;
 
 function aborted(): DOMException {
   return new DOMException('The GPU inventory refresh was cancelled.', 'AbortError');
@@ -75,7 +78,7 @@ export class NativeGpuInventoryCoordinator implements GpuAutoSelectionSourceV1 {
     this.#initializing = null;
     this.#recovering = null;
     for (const pending of this.#pending.values()) {
-      pending.removeAbort();
+      pending.cleanup();
       pending.reject(new Error('The GPU profile changed before inventory selection completed.'));
     }
     this.#pending.clear();
@@ -134,7 +137,7 @@ export class NativeGpuInventoryCoordinator implements GpuAutoSelectionSourceV1 {
     this.#unlisten?.();
     this.#unlisten = null;
     for (const pending of this.#pending.values()) {
-      pending.removeAbort();
+      pending.cleanup();
       pending.reject(aborted());
     }
     this.#pending.clear();
@@ -239,23 +242,72 @@ export class NativeGpuInventoryCoordinator implements GpuAutoSelectionSourceV1 {
   ): Promise<NativeGpuInventorySnapshotV1> {
     if (signal?.aborted) return Promise.reject(aborted());
     return new Promise<NativeGpuInventorySnapshotV1>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let reconciliationInFlight = false;
+      const startedAt = Date.now();
+      const observationId = immediate.observationId;
       const onAbort = () => {
-        this.#pending.delete(immediate.observationId);
+        const pending = this.#pending.get(observationId);
+        if (pending !== undefined) {
+          this.#pending.delete(observationId);
+          pending.cleanup();
+        }
         reject(aborted());
       };
       if (signal !== undefined) signal.addEventListener('abort', onAbort, { once: true });
-      this.#pending.set(immediate.observationId, {
-        observationId: immediate.observationId,
+      const cleanup = () => {
+        if (timer !== null) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const pending: PendingObservation = {
+        observationId,
         includeEmergencyTier,
         resolve,
         reject,
-        removeAbort: () => signal?.removeEventListener('abort', onAbort),
-      });
+        cleanup,
+      };
+      this.#pending.set(observationId, pending);
       // Native may emit the terminal event between resolving beginRefresh and
       // installing this renderer waiter. Reconcile immediately from the strict
       // projection so a non-replayed event can never strand a selector or Auto
       // Start request.
       if (this.#snapshot !== null) this.#settlePendingFromSnapshot(this.#snapshot);
+
+      // The event channel is an optimization, not the only delivery path.
+      // A native event can be lost while a Tauri listener is being replaced;
+      // the native journal remains the authoritative, read-only recovery path.
+      // Polling `load` never starts another provider observation or creates
+      // mutation authority, and stops as soon as the exact waiter settles.
+      const reconcile = async () => {
+        if (this.#pending.get(observationId) !== pending || reconciliationInFlight) return;
+        reconciliationInFlight = true;
+        try {
+          const loaded = await this.#port.load(immediate.processEpochId);
+          if (this.#pending.get(observationId) !== pending) return;
+          this.#accept(loaded);
+          this.#settlePendingFromSnapshot(loaded);
+          if (
+            this.#pending.get(observationId) === pending
+            && Date.now() - startedAt >= TERMINAL_RECONCILIATION_TIMEOUT_MS
+          ) {
+            this.#pending.delete(observationId);
+            pending.cleanup();
+            reject(new Error('The native GPU inventory observation did not reach a terminal state in time.'));
+          }
+        } catch {
+          // Keep listening. A transient native read failure must not replace a
+          // strict terminal snapshot or turn an unavailable read into rows.
+        } finally {
+          reconciliationInFlight = false;
+          if (this.#pending.get(observationId) === pending) {
+            timer = setTimeout(() => { void reconcile(); }, TERMINAL_RECONCILIATION_INTERVAL_MS);
+          }
+        }
+      };
+      void reconcile();
     });
   }
 
@@ -264,7 +316,7 @@ export class NativeGpuInventoryCoordinator implements GpuAutoSelectionSourceV1 {
     if (!event.superseded) this.#accept(event.snapshot);
     if (pending === undefined) return;
     this.#pending.delete(event.observationId);
-    pending.removeAbort();
+    pending.cleanup();
     if (event.superseded || event.snapshot.includeEmergencyTier !== pending.includeEmergencyTier) {
       pending.reject(new Error('The requested GPU inventory observation was superseded.'));
       return;
@@ -276,7 +328,7 @@ export class NativeGpuInventoryCoordinator implements GpuAutoSelectionSourceV1 {
     if (snapshot.state === 'loading') return;
     for (const [observationId, pending] of this.#pending) {
       this.#pending.delete(observationId);
-      pending.removeAbort();
+      pending.cleanup();
       if (
         observationId !== snapshot.observationId ||
         snapshot.includeEmergencyTier !== pending.includeEmergencyTier

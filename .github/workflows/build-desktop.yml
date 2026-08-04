@@ -55,7 +55,7 @@ jobs:
         run: cargo test --release --manifest-path src-tauri/Cargo.toml
 
       - name: Build Windows NSIS installer
-        run: npm run tauri:build -- --target x86_64-pc-windows-msvc --bundles nsis
+        run: npm run tauri:build -- --target x86_64-pc-windows-msvc --bundles nsis --config src-tauri/tauri.windows.conf.json
 
       - name: Verify WebView2 runtime on native runner
         shell: pwsh
@@ -121,6 +121,11 @@ jobs:
               Get-ChildItem -LiteralPath $installRoot -Recurse -Force |
                 Select-Object FullName, Length | Format-Table -AutoSize | Out-String | Write-Host
               throw "Installed application executable was not found at $installedExe."
+            }
+
+            $trustedInputHook = @(Get-ChildItem -LiteralPath $installRoot -Recurse -Filter 'imageforge-trusted-input-hook.dll' -File)
+            if ($trustedInputHook.Count -ne 1) {
+              throw "Installed Windows trusted-input hook DLL was not packaged exactly once; found $($trustedInputHook.Count)."
             }
 
             $uninstaller = Join-Path $installRoot 'uninstall.exe'

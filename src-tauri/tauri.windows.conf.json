@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "resources": {
+      "native/generated/imageforge-trusted-input-hook.dll": "imageforge-trusted-input-hook.dll"
+    }
+  }
+}

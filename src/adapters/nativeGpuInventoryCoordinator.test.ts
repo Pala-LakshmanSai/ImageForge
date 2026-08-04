@@ -113,7 +113,7 @@ describe('NativeGpuInventoryCoordinator', () => {
     port.emit(terminalEvent());
 
     await expect(pending).resolves.toMatchObject({ state: 'ready', receipt: { receiptId: RECEIPT } });
-    expect(port.load).toHaveBeenCalledTimes(2);
+    expect(port.load).toHaveBeenCalledTimes(3);
     expect(observed.at(-1)?.state).toBe('ready');
     coordinator.dispose();
   });
@@ -132,6 +132,26 @@ describe('NativeGpuInventoryCoordinator', () => {
       receipt: { receiptId: RECEIPT },
     });
     expect(coordinator.getSnapshot()?.state).toBe('ready');
+    coordinator.dispose();
+  });
+
+  it('reconciles terminal rows from the native journal when the terminal event is missed', async () => {
+    let loads = 0;
+    const loading = snapshot('loading');
+    const ready = snapshot('ready');
+    const port = fakePort(loading);
+    vi.mocked(port.load).mockImplementation(async () => {
+      loads += 1;
+      return loads >= 3 ? ready : loading;
+    });
+    const coordinator = new NativeGpuInventoryCoordinator(port);
+
+    await expect(coordinator.refreshForVisibleSelector(false)).resolves.toMatchObject({
+      state: 'ready',
+      receipt: { receiptId: RECEIPT },
+    });
+    expect(port.listen).toHaveBeenCalledTimes(1);
+    expect(loads).toBeGreaterThanOrEqual(3);
     coordinator.dispose();
   });
 
@@ -254,7 +274,7 @@ describe('NativeGpuInventoryCoordinator', () => {
       receipt: { receiptId: RECEIPT },
     });
     await vi.waitFor(() => expect(port.listen).toHaveBeenCalledTimes(2));
-    expect(port.load).toHaveBeenCalledTimes(4);
+    expect(port.load).toHaveBeenCalledTimes(5);
     coordinator.dispose();
   });
 });

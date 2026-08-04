@@ -14,7 +14,11 @@ import {
   type GpuSelectorPerfActionV1,
   type GpuSelectorPerfStartedEventV1,
 } from './tauriBridge';
-import { advanceWarmOpen } from './gpuSelectorPerfSmokeState';
+import {
+  advanceWarmOpen,
+  isMeasuredInputReady,
+  type SelectorPerfArmState,
+} from './gpuSelectorPerfSmokeState';
 
 const FIXTURE_SHA256 = '102cfe7267c269a1344d3758ef1deea4cfbe5d469d2de9b996f5c06499eacf68';
 const ROW_IDS = [
@@ -233,6 +237,7 @@ export function GpuSelectorPerfSmoke() {
   const [snapshot, setSnapshot] = useState(() => fixtureSnapshot());
   const [cycle, setCycle] = useState(0);
   const [warmupsRemaining, setWarmupsRemaining] = useState(config.action === 'warm_open' ? 3 : 0);
+  const [armState, setArmState] = useState<SelectorPerfArmState>('idle');
   const [error, setError] = useState<string | null>(null);
   const openRef = useRef(open);
   const snapshotRef = useRef(snapshot);
@@ -271,6 +276,7 @@ export function GpuSelectorPerfSmoke() {
 
   useEffect(() => {
     mountedRef.current = true;
+    setArmState('idle');
     sizeReadyRef.current = false;
     listenerReadyRef.current = false;
     nativeWindowReadyRef.current = false;
@@ -296,6 +302,7 @@ export function GpuSelectorPerfSmoke() {
           throw new Error('Selector performance native event did not match the current arm.');
         }
         armedRef.current = false;
+        setArmState('idle');
         pendingRef.current = started;
         await nextPaint();
         const deadline = Date.now() + 2_000;
@@ -415,6 +422,7 @@ export function GpuSelectorPerfSmoke() {
       viewportHeight: config.viewportHeight,
     } as const;
     armingRef.current = true;
+    setArmState('arming');
     void (async () => {
       try {
         if (!armProbeDoneRef.current) {
@@ -428,6 +436,7 @@ export function GpuSelectorPerfSmoke() {
         }
         await nativeGpuSelectorPerfArm(armInput);
         armedRef.current = true;
+        if (mountedRef.current) setArmState('armed');
       } catch (caught) {
         fail(caught);
       } finally {
@@ -435,6 +444,8 @@ export function GpuSelectorPerfSmoke() {
       }
     })();
   }, [action, config, cycle, maxSamples, open, warmupsRemaining]);
+
+  const measuredInputReady = isMeasuredInputReady(warmupsRemaining, armState);
 
   if (error !== null) {
     return <main data-gpu-selector-perf-qa="failed">{error}</main>;
@@ -466,7 +477,13 @@ export function GpuSelectorPerfSmoke() {
             <button
               type="button"
               data-gpu-selector-perf-refresh="true"
-              onClick={() => setSnapshot(fixtureSnapshot('loading'))}
+              disabled={!measuredInputReady}
+              aria-busy={armState !== 'armed'}
+              onClick={() => {
+                if (!measuredInputReady) return;
+                setArmState('idle');
+                setSnapshot(fixtureSnapshot('loading'));
+              }}
               style={{ position: 'fixed', top: 8, left: 8, zIndex: 20 }}
             >
               Refresh GPUs
@@ -477,16 +494,21 @@ export function GpuSelectorPerfSmoke() {
         <button
           type="button"
           data-gpu-selector-perf-open="true"
+          disabled={warmupsRemaining === 0 && !measuredInputReady}
+          aria-busy={warmupsRemaining === 0 && armState !== 'armed'}
           onClick={() => {
             if (action === 'warm_open' && warmupsRemaining > 0) {
               const next = advanceWarmOpen(warmupsRemaining);
               setWarmupsRemaining(next.warmupsRemaining);
+              setArmState('idle');
               // Leave the sheet closed after the last unrecorded warm-up so
               // the native arm effect has one unambiguous closed state before
               // the first measured open.
               setOpen(next.open);
               return;
             }
+            if (!measuredInputReady) return;
+            setArmState('idle');
             setOpen(true);
           }}
           style={{ width: '100vw', height: '100vh' }}

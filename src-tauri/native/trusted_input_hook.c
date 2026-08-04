@@ -1,0 +1,103 @@
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <stdint.h>
+
+#define IMAGEFORGE_TRUSTED_INPUT_MAGIC 0x49464754u
+#define IMAGEFORGE_TRUSTED_INPUT_VERSION 1u
+#define IMAGEFORGE_TRUSTED_INPUT_MESSAGE (WM_APP + 0x4f)
+
+typedef struct ImageForgeTrustedInputConfig {
+    uint32_t magic;
+    uint32_t version;
+    uintptr_t receiver_hwnd;
+    uintptr_t expected_hwnd;
+    volatile LONG active;
+} ImageForgeTrustedInputConfig;
+
+static HANDLE config_mapping = NULL;
+static ImageForgeTrustedInputConfig *config_view = NULL;
+
+static int is_descendant(HWND expected, HWND candidate) {
+    HWND current = candidate;
+    for (int depth = 0; current != NULL && depth < 64; depth += 1) {
+        if (current == expected) return 1;
+        current = GetParent(current);
+    }
+    return IsChild(expected, candidate) != FALSE;
+}
+
+static int load_config(void) {
+    if (config_view != NULL) return 1;
+
+    wchar_t mapping_name[128];
+    wsprintfW(mapping_name, L"Local\\ImageForgeTrustedInput-%lu", GetCurrentThreadId());
+    config_mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, mapping_name);
+    if (config_mapping == NULL) return 0;
+    config_view = (ImageForgeTrustedInputConfig *)MapViewOfFile(
+        config_mapping,
+        FILE_MAP_READ,
+        0,
+        0,
+        sizeof(ImageForgeTrustedInputConfig)
+    );
+    if (config_view == NULL) {
+        CloseHandle(config_mapping);
+        config_mapping = NULL;
+        return 0;
+    }
+    return 1;
+}
+
+static LPARAM pack_point(POINT point) {
+    uint64_t x = (uint32_t)point.x;
+    uint64_t y = (uint32_t)point.y;
+    return (LPARAM)((y << 32) | x);
+}
+
+__declspec(dllexport) LRESULT CALLBACK imageforge_trusted_mouse_hook(
+    int code,
+    WPARAM w_param,
+    LPARAM l_param
+) {
+    if (code == HC_ACTION && w_param == WM_LBUTTONUP && l_param != 0 && load_config()) {
+        ImageForgeTrustedInputConfig *config = config_view;
+        HWND expected = (HWND)config->expected_hwnd;
+        HWND receiver = (HWND)config->receiver_hwnd;
+        MOUSEHOOKSTRUCT *event = (MOUSEHOOKSTRUCT *)l_param;
+        HWND target = event->hwnd;
+        if (config->magic == IMAGEFORGE_TRUSTED_INPUT_MAGIC
+            && config->version == IMAGEFORGE_TRUSTED_INPUT_VERSION
+            && InterlockedCompareExchange((LONG *)&config->active, 0, 0) != 0
+            && IsWindow(expected) != FALSE
+            && IsWindowVisible(expected) != FALSE
+            && IsIconic(expected) == FALSE
+            && GetForegroundWindow() == expected
+            && IsWindow(target) != FALSE
+            && IsWindowVisible(target) != FALSE
+            && is_descendant(expected, target)
+            && IsWindow(receiver) != FALSE) {
+            // The hook does no broker, COM, allocation, or renderer work.
+            // The host window procedure performs all authorization checks.
+            PostMessageW(receiver, IMAGEFORGE_TRUSTED_INPUT_MESSAGE, (WPARAM)target, pack_point(event->pt));
+        }
+    }
+    return CallNextHookEx(NULL, code, w_param, l_param);
+}
+
+BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
+    (void)instance;
+    (void)reserved;
+    if (reason == DLL_PROCESS_DETACH) {
+        if (config_view != NULL) {
+            UnmapViewOfFile(config_view);
+            config_view = NULL;
+        }
+        if (config_mapping != NULL) {
+            CloseHandle(config_mapping);
+            config_mapping = NULL;
+        }
+    } else if (reason == DLL_PROCESS_ATTACH) {
+        DisableThreadLibraryCalls(instance);
+    }
+    return TRUE;
+}

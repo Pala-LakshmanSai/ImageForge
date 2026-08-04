@@ -1811,6 +1811,7 @@ name = "imageforge-desktop-core"
 version = "0.1.10"
 dependencies = [
  "block2",
+ "cc",
  "futures-util",
  "hex",
  "image",
