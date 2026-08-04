@@ -695,3 +695,19 @@ the recovery poll observes it.
   Task 014 selector-performance files, target-native coordinated Switch audit,
   current worker publisher/digest, public v0.1.9 tag/assets, and public
   re-download verification remain open.
+
+## Current native selector-QA boundary — 2026-08-04
+
+- Commit `8f31a69` adds the installed-only selector performance boundary:
+  strict fixture/session/artifact binding, exact viewport and ordinal checks,
+  native monotonic sample state, one-shot commit/replay rejection, ordered
+  ten-row fixture hashing, and the dedicated QA capability permissions.
+- Current removable-disk Rust validation is `239 passed, 0 failed` in
+  `cargo test --manifest-path src-tauri/Cargo.toml --lib`; the five new
+  selector-QA tests pass. The native `start_trusted_input` seam still needs a
+  safe macOS/Windows platform hook before Task 014 installed selector evidence
+  can be recorded. No selector p95 claim is made from unit tests.
+- Windows Task 013 provenance was re-bound to the actual wrapper bytes and
+  validates `11/11` with `shasum -a 256 -c release-files.sha256`; queue p95 is
+  `11.5 ms`, trusted samples `30`, and three batches. Paid real-RunPod work was
+  not used.
