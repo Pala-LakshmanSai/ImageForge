@@ -1,6 +1,6 @@
 import { Activity, ArrowDownToLine, Clock3, Coins, Gauge, Leaf, ShieldCheck, Zap } from 'lucide-react';
 import { batchCounts } from '../domain/reducer';
-import type { UsageRun } from '../domain/types';
+import { hasActivePodIdentity, type UsageRun } from '../domain/types';
 import { Button, EmptyState, Eyebrow, PhaseBadge } from '../components/primitives';
 import type { ScreenProps } from './types';
 
@@ -51,6 +51,16 @@ export function UsageScreen({ state, dispatch, adapter }: ScreenProps) {
   const maxCost = Math.max(...chartRuns.map((run) => run.cost), 0.01);
   const avgSeconds = totals.images ? totals.seconds / totals.images : 0;
   const costPerImage = totals.images ? totals.cost / totals.images : 0;
+  const podHasIdentity = hasActivePodIdentity(state.pod);
+  const podStatus = state.pod.phase === 'ready'
+    ? 'Ready'
+    : state.pod.phase === 'error'
+      ? 'Needs attention'
+      : state.pod.phase === 'stopping'
+        ? 'Stopping'
+        : podHasIdentity
+          ? 'Active · checking'
+          : 'Offline';
 
   return (
     <div className="screen usage-screen">
@@ -58,7 +68,7 @@ export function UsageScreen({ state, dispatch, adapter }: ScreenProps) {
         <div><Eyebrow>Usage</Eyebrow><h1>Usage and cost</h1><p>Recent batches, image counts, and measured GPU cost.</p></div>
         <div className="page-heading__actions">
           <Button icon={ArrowDownToLine} disabled={!chartRuns.length} onClick={() => exportUsage(chartRuns)}>Export usage CSV</Button>
-          <PhaseBadge tone={state.pod.phase === 'ready' ? 'success' : 'neutral'}>{state.pod.gpu ? `${state.pod.gpu} · $${state.pod.hourlyRate?.toFixed(2)}/hr` : 'compute offline'}</PhaseBadge>
+          <PhaseBadge tone={state.pod.phase === 'ready' ? 'success' : state.pod.phase === 'error' ? 'danger' : podHasIdentity ? 'warning' : 'neutral'}>{state.pod.gpu ? `${state.pod.gpu} · $${state.pod.hourlyRate?.toFixed(2)}/hr` : 'compute offline'}</PhaseBadge>
         </div>
       </section>
 
@@ -94,7 +104,7 @@ export function UsageScreen({ state, dispatch, adapter }: ScreenProps) {
               <>
                 <div className="live-rate"><span>Live hourly rate</span><strong>${state.pod.hourlyRate?.toFixed(2)}</strong><small>per GPU hour · one GPU</small></div>
                 <dl className="live-cost-details">
-                  <div><dt>Status</dt><dd>{state.pod.phase === 'ready' ? 'Ready' : 'Starting'}</dd></div>
+                  <div><dt>Status</dt><dd>{podStatus}</dd></div>
                   <div><dt>Storage</dt><dd>Persistent volume</dd></div>
                   <div><dt>Shutdown</dt><dd>Manual only</dd></div>
                 </dl>

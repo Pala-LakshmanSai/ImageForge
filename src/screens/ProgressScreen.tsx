@@ -22,7 +22,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { batchCounts } from '../domain/reducer';
-import type { BatchPrompt, BatchState } from '../domain/types';
+import { hasActivePodIdentity, type BatchPrompt, type BatchState } from '../domain/types';
 import { aspectRatioOption } from '../domain/aspectRatio';
 import { ACTIVE_PROMPT_VISIBLE_ROW_LIMIT, isQueuePlaceholder } from '../domain/queue';
 import { SimulatedImage } from '../components/SimulatedImage';
@@ -208,6 +208,7 @@ async function exportManifest(
 
 function NoBatch({ state, dispatch }: Pick<ScreenProps, 'state' | 'dispatch'>) {
   const transitioning = !['offline', 'ready', 'error'].includes(state.pod.phase);
+  const hasPodIdentity = hasActivePodIdentity(state.pod);
   if (transitioning) {
     return (
       <div className="screen progress-screen">
@@ -233,7 +234,7 @@ function NoBatch({ state, dispatch }: Pick<ScreenProps, 'state' | 'dispatch'>) {
           copy={state.pod.errorMessage ?? (state.pod.phase === 'ready' ? 'Add prompts and choose an output folder in Create.' : 'No compute is running and no hourly GPU cost is accruing.')}
           action={
             <div className="empty-state__actions">
-              {state.pod.phase !== 'ready' ? <Button tone="primary" icon={Zap} onClick={() => dispatch({ type: 'START_POD' })}>Start GPU</Button> : null}
+              {!hasPodIdentity && state.pod.phase !== 'ready' ? <Button tone="primary" icon={Zap} onClick={() => dispatch({ type: 'START_POD' })}>Start GPU</Button> : null}
               <Button icon={ArrowRight} onClick={() => dispatch({ type: 'NAVIGATE', view: 'create' })}>Open Create</Button>
             </div>
           }

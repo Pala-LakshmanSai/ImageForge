@@ -169,7 +169,13 @@ describe('QueueRail', () => {
     const completed = item(1, 'completed_with_failures');
     const runRevision = completed.runRevision!;
     const state = createConfiguredInitialState();
-    state.pod = { ...state.pod, phase: 'ready' };
+    state.pod = {
+      ...state.pod,
+      phase: 'ready',
+      podId: 'pod-queue-active',
+      matchingPodIds: ['pod-queue-active'],
+      gpu: 'RTX 4090',
+    };
     state.queue = {
       ...state.queue,
       loadState: 'ready',
@@ -195,6 +201,42 @@ describe('QueueRail', () => {
     expect(screen.getByText('Alarm snoozed')).toBeInTheDocument();
     expect(screen.getByText('It will ring once more after 15 minutes. The GPU is still running.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Dismiss alarm' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Stop GPU…' })).toBeEnabled();
+  });
+
+  it('keeps Stop available when queue alarm rings and Pod health is degraded', () => {
+    const completed = item(1, 'completed');
+    const runRevision = completed.runRevision!;
+    const state = createConfiguredInitialState();
+    state.pod = {
+      ...state.pod,
+      phase: 'error',
+      health: 'degraded',
+      podId: 'pod-still-billed',
+      matchingPodIds: ['pod-still-billed'],
+      gpu: 'RTX 4090',
+    };
+    state.queue = {
+      ...state.queue,
+      loadState: 'ready',
+      document: {
+        schemaVersion: 1,
+        items: [completed],
+        run: { runRevision, cohortItemIds: [completed.queueItemId], runnerState: 'completed', authorizationRequired: true, keepAwake: false },
+        alarm: {
+          eventId: `queue-complete:${runRevision}`,
+          runRevision,
+          state: 'ringing',
+          kind: 'complete',
+          snoozeUsed: false,
+          snoozeDueAt: null,
+          notificationDisposition: 'delivered',
+          snoozeNotificationDisposition: null,
+        },
+      },
+    };
+
+    render(<QueueRail state={state} dispatch={vi.fn()} />);
     expect(screen.getByRole('button', { name: 'Stop GPU…' })).toBeEnabled();
   });
 

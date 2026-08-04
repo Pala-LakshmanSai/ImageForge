@@ -477,6 +477,25 @@ describe('ImageForge shell', () => {
     expect(screen.getByText('GPU active · review status')).toBeVisible();
   });
 
+  it('does not offer Start GPU from Progress while a degraded Pod identity remains active', () => {
+    const state = createConfiguredInitialState();
+    state.activeView = 'progress';
+    state.pod = {
+      ...state.pod,
+      phase: 'error',
+      health: 'degraded',
+      errorMessage: 'Worker health could not be verified',
+      podId: 'pod-still-billed',
+      matchingPodIds: ['pod-still-billed'],
+      gpu: 'RTX 4090',
+    };
+
+    render(<App initialState={state} adapter={immediateAdapter()} />);
+
+    expect(screen.getByText('GPU needs attention')).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Start GPU' })).not.toBeInTheDocument();
+  });
+
   it('shows a peer GPU-switch consent prompt and records only the explicit decision', async () => {
     const production = productionAdapter();
     production.setGpuInventory(liveGpuInventory());
