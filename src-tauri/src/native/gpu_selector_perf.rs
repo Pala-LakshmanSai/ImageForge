@@ -46,6 +46,32 @@ pub enum GpuSelectorPerfActionV1 {
     KeyboardSelect,
 }
 
+/// Native input kind observed by the installed QA hook.  The hook supplies
+/// only the kind; action, viewport, UUID, and monotonic start stay native.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeSelectorInputKind {
+    KeyDown,
+    PrimaryMouseUp,
+}
+
+impl NativeSelectorInputKind {
+    fn matches(self, action: GpuSelectorPerfActionV1) -> bool {
+        match self {
+            Self::KeyDown => matches!(
+                action,
+                GpuSelectorPerfActionV1::KeyboardMove
+                    | GpuSelectorPerfActionV1::KeyboardSelect
+            ),
+            Self::PrimaryMouseUp => matches!(
+                action,
+                GpuSelectorPerfActionV1::ColdOpen
+                    | GpuSelectorPerfActionV1::WarmOpen
+                    | GpuSelectorPerfActionV1::RefreshLoading
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GpuSelectorPerfArmV1 {
@@ -212,7 +238,7 @@ impl GpuSelectorPerfHost {
     /// renderer command for this transition: the sample UUID and monotonic
     /// start timestamp are generated here, then the strict event is emitted
     /// to the bound main window exactly once.
-    pub fn start_trusted_input(
+    pub(crate) fn start_trusted_input(
         &self,
         window: &WebviewWindow,
         action: GpuSelectorPerfActionV1,
@@ -229,6 +255,39 @@ impl GpuSelectorPerfHost {
             ));
         }
         Ok(event)
+    }
+
+    /// Start a sample from a platform-native key/mouse event.  Renderer code
+    /// cannot provide the action, viewport, timestamp, or sample ID.  A
+    /// mismatched native event is ignored so normal user input while the
+    /// harness is idle never changes QA state.
+    pub(crate) fn start_native_input(
+        &self,
+        window: &WebviewWindow,
+        input: NativeSelectorInputKind,
+    ) -> NativeResult<Option<GpuSelectorPerfStartedEventV1>> {
+        require_main_foreground(window)?;
+        let event = self.start_native_inner(input, Instant::now())?;
+        let Some(event) = event else {
+            return Ok(None);
+        };
+        if window.emit(QA_EVENT, &event).is_err() {
+            self.inner.lock().expect("selector perf lock").pending = None;
+            return Err(NativeError::new(
+                "gpu_selector_perf_event_failed",
+                "The selector performance sample event could not be delivered.",
+            ));
+        }
+        Ok(Some(event))
+    }
+
+    /// Invalidate an in-flight sample when the native window loses the
+    /// conditions required by the installed gate.  This is deliberately
+    /// native-side; a renderer cannot rescue a backgrounded or resized sample.
+    pub(crate) fn invalidate_native_sample(&self) {
+        let mut inner = self.inner.lock().expect("selector perf lock");
+        inner.armed = None;
+        inner.pending = None;
     }
 
     pub fn commit(
@@ -329,6 +388,52 @@ impl GpuSelectorPerfHost {
             viewport_width,
             viewport_height,
         })
+    }
+
+    fn start_native_inner(
+        &self,
+        input: NativeSelectorInputKind,
+        now: Instant,
+    ) -> NativeResult<Option<GpuSelectorPerfStartedEventV1>> {
+        let mut inner = self.inner.lock().expect("selector perf lock");
+        let session = inner.session.clone().ok_or_else(qa_disabled)?;
+        let Some(armed) = inner.armed.as_ref() else {
+            return Ok(None);
+        };
+        if armed.expires_at <= now {
+            inner.armed = None;
+            return Ok(None);
+        }
+        if !input.matches(armed.action) {
+            return Ok(None);
+        }
+        if inner.pending.is_some() {
+            return Err(NativeError::new(
+                "gpu_selector_perf_busy",
+                "A selector performance sample is already in progress.",
+            ));
+        }
+        let armed = inner.armed.take().expect("armed sample checked above");
+        let sample_id = Uuid::new_v4().to_string();
+        inner.pending = Some(PendingSample {
+            qa_session_id: session.qa_session_id.clone(),
+            sample_id: sample_id.clone(),
+            action: armed.action,
+            ordinal: armed.ordinal,
+            viewport_width: armed.viewport_width,
+            viewport_height: armed.viewport_height,
+            started_at: now,
+        });
+        Ok(Some(GpuSelectorPerfStartedEventV1 {
+            schema_version: 1,
+            event: QA_EVENT,
+            qa_session_id: session.qa_session_id,
+            sample_id,
+            action: armed.action,
+            ordinal: armed.ordinal,
+            viewport_width: armed.viewport_width,
+            viewport_height: armed.viewport_height,
+        }))
     }
 
     fn commit_inner(
@@ -627,6 +732,50 @@ mod tests {
             mounted_row_ids: rows(),
         });
         assert_eq!(replay.unwrap_err().code, "gpu_selector_perf_sample_invalid");
+    }
+
+    #[test]
+    fn native_hook_ignores_wrong_input_kind_then_starts_matching_action() {
+        let host = GpuSelectorPerfHost::for_test();
+        host.arm_for_test(arm(GpuSelectorPerfActionV1::KeyboardMove))
+            .unwrap();
+        assert!(host
+            .start_native_inner(NativeSelectorInputKind::PrimaryMouseUp, Instant::now())
+            .unwrap()
+            .is_none());
+        let started = host
+            .start_native_inner(NativeSelectorInputKind::KeyDown, Instant::now())
+            .unwrap()
+            .expect("matching native key should start the sample");
+        assert_eq!(started.action, GpuSelectorPerfActionV1::KeyboardMove);
+    }
+
+    #[test]
+    fn native_window_invalidation_clears_armed_and_pending_samples() {
+        let host = GpuSelectorPerfHost::for_test();
+        host.arm_for_test(arm(GpuSelectorPerfActionV1::WarmOpen))
+            .unwrap();
+        host.invalidate_native_sample();
+        assert!(host
+            .start_native_inner(NativeSelectorInputKind::PrimaryMouseUp, Instant::now())
+            .unwrap()
+            .is_none());
+
+        host.arm_for_test(arm(GpuSelectorPerfActionV1::WarmOpen))
+            .unwrap();
+        host.start_native_inner(NativeSelectorInputKind::PrimaryMouseUp, Instant::now())
+            .unwrap()
+            .expect("matching native pointer should start the sample");
+        host.invalidate_native_sample();
+        let commit = host.commit_inner(
+            GpuSelectorPerfCommitV1 {
+                qa_session_id: "11111111-1111-4111-8111-111111111111".to_owned(),
+                sample_id: "22222222-2222-4222-8222-222222222222".to_owned(),
+                mounted_row_ids: rows(),
+            },
+            Instant::now(),
+        );
+        assert_eq!(commit.unwrap_err().code, "gpu_selector_perf_sample_invalid");
     }
 
     #[test]

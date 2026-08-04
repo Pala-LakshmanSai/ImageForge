@@ -51,7 +51,7 @@ use std::time::{Duration, Instant};
 use tauri::webview::{NewWindowResponse, WebviewWindowBuilder};
 use tauri::State;
 use tauri::WebviewUrl;
-use tauri::{AppHandle, Manager, WebviewWindow};
+use tauri::{AppHandle, Manager, WebviewWindow, WindowEvent};
 use tauri_plugin_notification::{NotificationExt, PermissionState};
 use uuid::Uuid;
 
@@ -4109,7 +4109,7 @@ pub fn run() {
                     })?;
                 builder = builder.data_directory(profile);
             }
-            builder
+            let window = builder
                 .title("ImageForge")
                 .inner_size(1440.0, 900.0)
                 .min_inner_size(900.0, 650.0)
@@ -4119,6 +4119,14 @@ pub fn run() {
                 .on_navigation(navigation_allowed)
                 .on_new_window(|_, _| NewWindowResponse::Deny)
                 .build()?;
+            let selector_perf = app.state::<NativeState>().gpu_selector_perf.clone();
+            window.on_window_event(move |event| match event {
+                WindowEvent::Focused(false)
+                | WindowEvent::Resized(_)
+                | WindowEvent::ScaleFactorChanged { .. }
+                | WindowEvent::Destroyed => selector_perf.invalidate_native_sample(),
+                _ => {}
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
