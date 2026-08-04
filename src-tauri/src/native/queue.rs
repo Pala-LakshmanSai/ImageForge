@@ -1237,6 +1237,9 @@ impl QueueStore {
         // stray assertion before moving the journal aside so an interrupted
         // partial cleanup cannot leave a no-idle-sleep request without any
         // durable runner to release it later.
+        // The explicit drop is required on Windows: an open runner.lock
+        // handle prevents the containing directory from being renamed.
+        drop(_runner_guard);
         self.power.release_all();
         let parent = self.root.parent().ok_or_else(queue_store_unavailable)?;
         let quarantine = parent.join(format!("v1-recovery-{}", Uuid::new_v4()));
