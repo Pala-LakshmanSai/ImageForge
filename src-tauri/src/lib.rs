@@ -1,6 +1,10 @@
 mod native;
 
 use futures_util::FutureExt;
+use native::gpu_selector_perf::{
+    GpuSelectorPerfArmResultV1, GpuSelectorPerfArmV1, GpuSelectorPerfCommitV1, GpuSelectorPerfHost,
+    GpuSelectorPerfSampleV1,
+};
 use native::gpu_switch::{
     GpuSwitchService, NativeGpuSwitchAcquireV1, NativeGpuSwitchActualPriceV1,
     NativeGpuSwitchBeginV1, NativeGpuSwitchConfirmAttemptV1,
@@ -73,6 +77,7 @@ struct NativeState {
     downloader: Downloader,
     queue: QueueStore,
     queue_release_smoke: Option<QueueReleaseSmokeHost>,
+    gpu_selector_perf: GpuSelectorPerfHost,
     control_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -115,6 +120,7 @@ impl NativeState {
         let worker = WorkerApi::new(vault.clone(), session.clone())?;
         let downloader = Downloader::new(worker.clone(), destination.clone());
         let queue = QueueStore::new(destination.clone())?;
+        let gpu_selector_perf = GpuSelectorPerfHost::from_environment()?;
         Ok(Self {
             vault,
             destination,
@@ -128,6 +134,7 @@ impl NativeState {
             downloader,
             queue,
             queue_release_smoke,
+            gpu_selector_perf,
             control_gate: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
@@ -562,6 +569,31 @@ fn gpu_inventory_load(
 ) -> NativeResult<NativeGpuInventorySnapshotV1> {
     require_main_gpu_window(&window)?;
     state.gpu_inventory.load()
+}
+
+/// Arm one installed-only selector performance sample.  The native host
+/// rejects this command unless the process was started with the explicit,
+/// artifact-bound QA session; production launches never expose a timer or
+/// sample authority to the renderer.
+#[tauri::command]
+fn gpu_selector_perf_arm(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    input: GpuSelectorPerfArmV1,
+) -> NativeResult<GpuSelectorPerfArmResultV1> {
+    state.gpu_selector_perf.arm(&window, input)
+}
+
+/// Commit one native-started selector performance sample after the harness's
+/// double-rAF callback.  Duration and build identity are native-owned; the
+/// renderer supplies only the strict ordered mounted-row projection.
+#[tauri::command]
+fn gpu_selector_perf_commit(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    input: GpuSelectorPerfCommitV1,
+) -> NativeResult<GpuSelectorPerfSampleV1> {
+    state.gpu_selector_perf.commit(&window, input)
 }
 
 /// Start exactly one native-coalesced catalog observation. The two provider
@@ -4107,6 +4139,8 @@ pub fn run() {
             runpod_create_marker_metadata,
             resolve_runpod_create_marker,
             gpu_inventory_load,
+            gpu_selector_perf_arm,
+            gpu_selector_perf_commit,
             gpu_inventory_begin_refresh,
             gpu_pod_observe,
             gpu_normal_stop_load,

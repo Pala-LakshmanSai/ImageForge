@@ -27,15 +27,15 @@
   "queue_release_result_sha256": "ec8fa2f658f2ea80723df032db55f6133b731eee6e28e96cf85c5033285a7e78",
   "queue_release_wrapper_records": [
     {
-      "sha256": "4c8cb0cc8e21a7f00fc9419eb0be2b8296773e12602c443f6db9c87e43cca237",
+      "sha256": "accdd548f5136a83a6e53542a987908273e6631feb7eaf230660f9c1600cfeab",
       "name": "ImageForge-windows-queue-release-run.wrapper.result"
     },
     {
-      "sha256": "309be566a7683e19f09cfb84ce976c84c1c799b4e3eaa46079f3cac41cf8a4eb",
+      "sha256": "1bf1cc8b429e25d324a23dadcf280daeeb008cdc2c82fec369c20a8df8d8d4ca",
       "name": "ImageForge-windows-queue-release-resume.wrapper.result"
     },
     {
-      "sha256": "ad3286c25728e36f4c227886ff680d5cf5d50edd1b0ee6bb7a70af4b8af28c91",
+      "sha256": "d3f9d43d5d8c1470eba783ae0052a71842f7707bf05ae5a2469f78847720402a",
       "name": "ImageForge-windows-queue-release-relaunch.wrapper.result"
     }
   ]

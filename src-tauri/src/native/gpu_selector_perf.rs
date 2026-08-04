@@ -1,0 +1,665 @@
+//! Installed-only Task 014 selector performance instrumentation.
+//!
+//! The production renderer never receives a timer or a native sample ID from
+//! this module.  A release harness must opt in before the Tauri window is
+//! created, bind the installed artifact/session metadata, and arrange for the
+//! native trusted-input hook to call `start_trusted_input`.  Without that
+//! out-of-band session every command is deliberately disabled.
+
+use super::{NativeError, NativeResult};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tauri::{Emitter, WebviewWindow};
+use uuid::{Uuid, Version};
+
+const FIXTURE_SHA256: &str = "102cfe7267c269a1344d3758ef1deea4cfbe5d469d2de9b996f5c06499eacf68";
+const MOUNTED_ROW_IDS_SHA256: &str =
+    "83d20e051a50c2f0fbb16a459af0d67662acf81feaeddf9af0cab82b6cc3c71c";
+const QA_OPT_IN_ENV: &str = "IMAGEFORGE_GPU_SELECTOR_PERF_QA";
+const QA_SESSION_ENV: &str = "IMAGEFORGE_GPU_SELECTOR_PERF_QA_SESSION";
+const QA_EVENT: &str = "gpu-selector-perf-started-v1";
+const ARM_VALID_FOR: Duration = Duration::from_secs(5);
+const MAX_DURATION_US: u64 = 10_000_000;
+
+pub const GPU_SELECTOR_PERF_ROW_IDS: [&str; 10] = [
+    "current",
+    "auto",
+    "ordinary:rtx-4090",
+    "ordinary:rtx-pro-4500-blackwell",
+    "ordinary:rtx-5090",
+    "ordinary:rtx-pro-4000-blackwell",
+    "ordinary:l4",
+    "ordinary:rtx-a4500",
+    "ordinary:rtx-4000-ada",
+    "emergency:rtx-2000-ada",
+];
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GpuSelectorPerfActionV1 {
+    ColdOpen,
+    WarmOpen,
+    RefreshLoading,
+    KeyboardMove,
+    KeyboardSelect,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GpuSelectorPerfArmV1 {
+    pub fixture_sha256: String,
+    pub action: GpuSelectorPerfActionV1,
+    pub ordinal: u8,
+    pub viewport_width: u16,
+    pub viewport_height: u16,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GpuSelectorPerfCommitV1 {
+    pub qa_session_id: String,
+    pub sample_id: String,
+    pub mounted_row_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuSelectorPerfArmResultV1 {
+    pub schema_version: u8,
+    pub armed: bool,
+    pub qa_session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuSelectorPerfStartedEventV1 {
+    pub schema_version: u8,
+    pub event: &'static str,
+    pub qa_session_id: String,
+    pub sample_id: String,
+    pub action: GpuSelectorPerfActionV1,
+    pub ordinal: u8,
+    pub viewport_width: u16,
+    pub viewport_height: u16,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuSelectorPerfSampleV1 {
+    pub schema_version: u8,
+    pub sample_id: String,
+    pub platform: String,
+    pub app_version: String,
+    pub commit_sha: String,
+    pub artifact_sha256: String,
+    pub viewport_width: u16,
+    pub viewport_height: u16,
+    pub action: GpuSelectorPerfActionV1,
+    pub ordinal: u8,
+    pub duration_us: u64,
+    pub mounted_gpu_rows: u8,
+    pub mounted_row_ids_sha256: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GpuSelectorPerfQaSessionV1 {
+    schema_version: u8,
+    qa_session_id: String,
+    platform: String,
+    app_version: String,
+    commit_sha: String,
+    artifact_sha256: String,
+    fixture_sha256: String,
+    window_label: String,
+}
+
+#[derive(Debug, Clone)]
+struct ArmedSample {
+    action: GpuSelectorPerfActionV1,
+    ordinal: u8,
+    viewport_width: u16,
+    viewport_height: u16,
+    expires_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct PendingSample {
+    qa_session_id: String,
+    sample_id: String,
+    action: GpuSelectorPerfActionV1,
+    ordinal: u8,
+    viewport_width: u16,
+    viewport_height: u16,
+    started_at: Instant,
+}
+
+#[derive(Debug, Default)]
+struct PerfInner {
+    session: Option<GpuSelectorPerfQaSessionV1>,
+    armed: Option<ArmedSample>,
+    pending: Option<PendingSample>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct GpuSelectorPerfHost {
+    inner: Arc<Mutex<PerfInner>>,
+}
+
+impl GpuSelectorPerfHost {
+    /// Build the host before the main window exists.  The QA capability is
+    /// only live when the harness supplies both an explicit opt-in and a
+    /// strict, artifact-bound session object; ordinary launches stay disabled.
+    pub fn from_environment() -> NativeResult<Self> {
+        let host = Self::default();
+        if std::env::var(QA_OPT_IN_ENV).ok().as_deref() != Some("1") {
+            return Ok(host);
+        }
+        let raw = std::env::var(QA_SESSION_ENV).map_err(|_| {
+            NativeError::new(
+                "gpu_selector_perf_session_invalid",
+                "The selector performance QA session is missing.",
+            )
+        })?;
+        let session: GpuSelectorPerfQaSessionV1 = serde_json::from_str(&raw).map_err(|_| {
+            NativeError::new(
+                "gpu_selector_perf_session_invalid",
+                "The selector performance QA session is malformed.",
+            )
+        })?;
+        validate_session(&session)?;
+        *host.inner.lock().expect("selector perf lock") = PerfInner {
+            session: Some(session),
+            armed: None,
+            pending: None,
+        };
+        Ok(host)
+    }
+
+    #[cfg(test)]
+    fn for_test() -> Self {
+        let session = GpuSelectorPerfQaSessionV1 {
+            schema_version: 1,
+            qa_session_id: "11111111-1111-4111-8111-111111111111".to_owned(),
+            platform: current_platform().to_owned(),
+            app_version: "0.1.9".to_owned(),
+            commit_sha: "a".repeat(40),
+            artifact_sha256: "b".repeat(64),
+            fixture_sha256: FIXTURE_SHA256.to_owned(),
+            window_label: "main".to_owned(),
+        };
+        let host = Self::default();
+        *host.inner.lock().expect("selector perf lock") = PerfInner {
+            session: Some(session),
+            armed: None,
+            pending: None,
+        };
+        host
+    }
+
+    pub fn arm(
+        &self,
+        window: &WebviewWindow,
+        input: GpuSelectorPerfArmV1,
+    ) -> NativeResult<GpuSelectorPerfArmResultV1> {
+        require_main_foreground(window)?;
+        self.arm_inner(input, Instant::now())
+    }
+
+    /// Called by the native trusted pointer/keyboard hook.  There is no
+    /// renderer command for this transition: the sample UUID and monotonic
+    /// start timestamp are generated here, then the strict event is emitted
+    /// to the bound main window exactly once.
+    pub fn start_trusted_input(
+        &self,
+        window: &WebviewWindow,
+        action: GpuSelectorPerfActionV1,
+        viewport_width: u16,
+        viewport_height: u16,
+    ) -> NativeResult<GpuSelectorPerfStartedEventV1> {
+        require_main_foreground(window)?;
+        let event = self.start_inner(action, viewport_width, viewport_height, Instant::now())?;
+        if window.emit(QA_EVENT, &event).is_err() {
+            self.inner.lock().expect("selector perf lock").pending = None;
+            return Err(NativeError::new(
+                "gpu_selector_perf_event_failed",
+                "The selector performance sample event could not be delivered.",
+            ));
+        }
+        Ok(event)
+    }
+
+    pub fn commit(
+        &self,
+        window: &WebviewWindow,
+        input: GpuSelectorPerfCommitV1,
+    ) -> NativeResult<GpuSelectorPerfSampleV1> {
+        require_main_foreground(window)?;
+        self.commit_inner(input, Instant::now())
+    }
+
+    fn arm_inner(
+        &self,
+        input: GpuSelectorPerfArmV1,
+        now: Instant,
+    ) -> NativeResult<GpuSelectorPerfArmResultV1> {
+        validate_arm(&input)?;
+        let mut inner = self.inner.lock().expect("selector perf lock");
+        let session = inner.session.clone().ok_or_else(qa_disabled)?;
+        if inner.pending.is_some() {
+            return Err(NativeError::new(
+                "gpu_selector_perf_busy",
+                "A selector performance sample is already in progress.",
+            ));
+        }
+        if inner
+            .armed
+            .as_ref()
+            .is_some_and(|armed| armed.expires_at > now)
+        {
+            return Err(NativeError::new(
+                "gpu_selector_perf_busy",
+                "A selector performance action is already armed.",
+            ));
+        }
+        inner.armed = Some(ArmedSample {
+            action: input.action,
+            ordinal: input.ordinal,
+            viewport_width: input.viewport_width,
+            viewport_height: input.viewport_height,
+            expires_at: now + ARM_VALID_FOR,
+        });
+        Ok(GpuSelectorPerfArmResultV1 {
+            schema_version: 1,
+            armed: true,
+            qa_session_id: session.qa_session_id,
+        })
+    }
+
+    fn start_inner(
+        &self,
+        action: GpuSelectorPerfActionV1,
+        viewport_width: u16,
+        viewport_height: u16,
+        now: Instant,
+    ) -> NativeResult<GpuSelectorPerfStartedEventV1> {
+        let mut inner = self.inner.lock().expect("selector perf lock");
+        let session = inner.session.clone().ok_or_else(qa_disabled)?;
+        let armed = inner.armed.take().ok_or_else(|| {
+            NativeError::new(
+                "gpu_selector_perf_not_armed",
+                "No selector performance action is armed.",
+            )
+        })?;
+        if armed.expires_at <= now
+            || armed.action != action
+            || armed.viewport_width != viewport_width
+            || armed.viewport_height != viewport_height
+        {
+            return Err(NativeError::new(
+                "gpu_selector_perf_input_invalid",
+                "The trusted selector input does not match the armed action.",
+            ));
+        }
+        if inner.pending.is_some() {
+            return Err(NativeError::new(
+                "gpu_selector_perf_busy",
+                "A selector performance sample is already in progress.",
+            ));
+        }
+        let sample_id = Uuid::new_v4().to_string();
+        inner.pending = Some(PendingSample {
+            qa_session_id: session.qa_session_id.clone(),
+            sample_id: sample_id.clone(),
+            action,
+            ordinal: armed.ordinal,
+            viewport_width,
+            viewport_height,
+            started_at: now,
+        });
+        Ok(GpuSelectorPerfStartedEventV1 {
+            schema_version: 1,
+            event: QA_EVENT,
+            qa_session_id: session.qa_session_id,
+            sample_id,
+            action,
+            ordinal: armed.ordinal,
+            viewport_width,
+            viewport_height,
+        })
+    }
+
+    fn commit_inner(
+        &self,
+        input: GpuSelectorPerfCommitV1,
+        now: Instant,
+    ) -> NativeResult<GpuSelectorPerfSampleV1> {
+        if input.mounted_row_ids.len() != GPU_SELECTOR_PERF_ROW_IDS.len()
+            || input
+                .mounted_row_ids
+                .iter()
+                .map(String::as_str)
+                .ne(GPU_SELECTOR_PERF_ROW_IDS.iter().copied())
+        {
+            return Err(NativeError::new(
+                "gpu_selector_perf_rows_invalid",
+                "The mounted selector row IDs do not match the QA fixture.",
+            ));
+        }
+        let mut inner = self.inner.lock().expect("selector perf lock");
+        let session = inner.session.clone().ok_or_else(qa_disabled)?;
+        let pending = inner.pending.clone().ok_or_else(|| {
+            NativeError::new(
+                "gpu_selector_perf_sample_invalid",
+                "The selector performance sample is missing or already committed.",
+            )
+        })?;
+        if input.qa_session_id != pending.qa_session_id || input.sample_id != pending.sample_id {
+            return Err(NativeError::new(
+                "gpu_selector_perf_sample_invalid",
+                "The selector performance sample binding is invalid.",
+            ));
+        }
+        let duration_us = now
+            .saturating_duration_since(pending.started_at)
+            .as_micros() as u64;
+        if duration_us == 0 || duration_us > MAX_DURATION_US {
+            return Err(NativeError::new(
+                "gpu_selector_perf_sample_invalid",
+                "The selector performance duration is outside the safe range.",
+            ));
+        }
+        // Consume only after every renderer-supplied binding and the native
+        // duration pass. A stale/wrong commit must not destroy the one valid
+        // sample that the harness can still complete.
+        inner.pending = None;
+        Ok(GpuSelectorPerfSampleV1 {
+            schema_version: 1,
+            sample_id: pending.sample_id,
+            platform: session.platform,
+            app_version: session.app_version,
+            commit_sha: session.commit_sha,
+            artifact_sha256: session.artifact_sha256,
+            viewport_width: pending.viewport_width,
+            viewport_height: pending.viewport_height,
+            action: pending.action,
+            ordinal: pending.ordinal,
+            duration_us,
+            mounted_gpu_rows: GPU_SELECTOR_PERF_ROW_IDS.len() as u8,
+            mounted_row_ids_sha256: mounted_row_ids_sha256(),
+        })
+    }
+
+    #[cfg(test)]
+    fn arm_for_test(
+        &self,
+        input: GpuSelectorPerfArmV1,
+    ) -> NativeResult<GpuSelectorPerfArmResultV1> {
+        self.arm_inner(input, Instant::now())
+    }
+
+    #[cfg(test)]
+    fn start_for_test(
+        &self,
+        action: GpuSelectorPerfActionV1,
+        viewport_width: u16,
+        viewport_height: u16,
+    ) -> NativeResult<GpuSelectorPerfStartedEventV1> {
+        self.start_inner(action, viewport_width, viewport_height, Instant::now())
+    }
+
+    #[cfg(test)]
+    fn commit_for_test(
+        &self,
+        input: GpuSelectorPerfCommitV1,
+    ) -> NativeResult<GpuSelectorPerfSampleV1> {
+        std::thread::sleep(Duration::from_millis(1));
+        self.commit_inner(input, Instant::now())
+    }
+}
+
+fn require_main_foreground(window: &WebviewWindow) -> NativeResult<()> {
+    if window.label() != "main"
+        || !window
+            .is_visible()
+            .map_err(|_| gpu_selector_perf_focus_required())?
+        || !window
+            .is_focused()
+            .map_err(|_| gpu_selector_perf_focus_required())?
+        || window
+            .is_minimized()
+            .map_err(|_| gpu_selector_perf_focus_required())?
+    {
+        return Err(gpu_selector_perf_focus_required());
+    }
+    Ok(())
+}
+
+fn gpu_selector_perf_focus_required() -> NativeError {
+    NativeError::new(
+        "gpu_selector_perf_focus_required",
+        "The selector performance sample requires the focused main window.",
+    )
+}
+
+fn qa_disabled() -> NativeError {
+    NativeError::new(
+        "gpu_selector_perf_qa_disabled",
+        "Selector performance instrumentation is disabled outside the installed QA harness.",
+    )
+}
+
+fn validate_arm(input: &GpuSelectorPerfArmV1) -> NativeResult<()> {
+    if input.fixture_sha256 != FIXTURE_SHA256
+        || !(1..=30).contains(&input.ordinal)
+        || !valid_viewport(input.viewport_width, input.viewport_height)
+    {
+        return Err(NativeError::new(
+            "gpu_selector_perf_arm_invalid",
+            "The selector performance arm does not match the checked-in fixture.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_session(session: &GpuSelectorPerfQaSessionV1) -> NativeResult<()> {
+    if session.schema_version != 1
+        || session.fixture_sha256 != FIXTURE_SHA256
+        || session.window_label != "main"
+        || session.platform != current_platform()
+        || session.app_version.is_empty()
+        || session.app_version.len() > 64
+        || !session
+            .app_version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
+        || !canonical_uuid_v4(&session.qa_session_id)
+        || !lower_hex(&session.commit_sha, 40)
+        || !lower_hex(&session.artifact_sha256, 64)
+    {
+        return Err(NativeError::new(
+            "gpu_selector_perf_session_invalid",
+            "The selector performance QA session is not bound to this artifact.",
+        ));
+    }
+    Ok(())
+}
+
+fn valid_viewport(width: u16, height: u16) -> bool {
+    matches!((width, height), (1280, 720) | (1440, 900))
+}
+
+fn lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn canonical_uuid_v4(value: &str) -> bool {
+    Uuid::parse_str(value).ok().is_some_and(|uuid| {
+        uuid.to_string() == value && uuid.get_version() == Some(Version::Random)
+    })
+}
+
+fn current_platform() -> &'static str {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        "macos-arm64"
+    }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    {
+        "windows-x64"
+    }
+    #[cfg(not(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "windows", target_arch = "x86_64")
+    )))]
+    {
+        "unsupported"
+    }
+}
+
+#[allow(dead_code)]
+fn fixture_sha256() -> &'static str {
+    FIXTURE_SHA256
+}
+
+#[allow(dead_code)]
+fn checked_in_fixture_hash() -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(include_bytes!(
+        "../../../contracts/gpu-selector-perf-10-v1.json"
+    ));
+    format!("{:x}", hasher.finalize())
+}
+
+fn mounted_row_ids_sha256() -> String {
+    let mut hasher = Sha256::new();
+    let ordered = serde_json::to_string(&GPU_SELECTOR_PERF_ROW_IDS)
+        .expect("selector performance row IDs are serializable");
+    hasher.update(ordered.as_bytes());
+    hasher.update(b"\n");
+    format!("{:x}", hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn arm(action: GpuSelectorPerfActionV1) -> GpuSelectorPerfArmV1 {
+        GpuSelectorPerfArmV1 {
+            fixture_sha256: FIXTURE_SHA256.to_owned(),
+            action,
+            ordinal: 1,
+            viewport_width: 1280,
+            viewport_height: 720,
+        }
+    }
+
+    fn rows() -> Vec<String> {
+        GPU_SELECTOR_PERF_ROW_IDS
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn disabled_host_rejects_arm_without_installed_session() {
+        let host = GpuSelectorPerfHost::default();
+        let error = host
+            .arm_inner(arm(GpuSelectorPerfActionV1::ColdOpen), Instant::now())
+            .unwrap_err();
+        assert_eq!(error.code, "gpu_selector_perf_qa_disabled");
+    }
+
+    #[test]
+    fn arm_requires_exact_fixture_viewport_and_ordinal() {
+        let host = GpuSelectorPerfHost::for_test();
+        let mut invalid = arm(GpuSelectorPerfActionV1::WarmOpen);
+        invalid.fixture_sha256 = "0".repeat(64);
+        assert_eq!(
+            host.arm_for_test(invalid).unwrap_err().code,
+            "gpu_selector_perf_arm_invalid"
+        );
+
+        let mut invalid = arm(GpuSelectorPerfActionV1::WarmOpen);
+        invalid.ordinal = 31;
+        assert_eq!(
+            host.arm_for_test(invalid).unwrap_err().code,
+            "gpu_selector_perf_arm_invalid"
+        );
+
+        let mut invalid = arm(GpuSelectorPerfActionV1::WarmOpen);
+        invalid.viewport_height = 900;
+        assert_eq!(
+            host.arm_for_test(invalid).unwrap_err().code,
+            "gpu_selector_perf_arm_invalid"
+        );
+    }
+
+    #[test]
+    fn trusted_input_generates_native_id_and_commit_is_one_shot() {
+        let host = GpuSelectorPerfHost::for_test();
+        host.arm_for_test(arm(GpuSelectorPerfActionV1::KeyboardMove))
+            .unwrap();
+        let started = host
+            .start_for_test(GpuSelectorPerfActionV1::KeyboardMove, 1280, 720)
+            .unwrap();
+        assert!(canonical_uuid_v4(&started.sample_id));
+        assert_eq!(started.event, QA_EVENT);
+
+        let sample = host
+            .commit_for_test(GpuSelectorPerfCommitV1 {
+                qa_session_id: started.qa_session_id.clone(),
+                sample_id: started.sample_id.clone(),
+                mounted_row_ids: rows(),
+            })
+            .unwrap();
+        assert_eq!(sample.duration_us >= 1, true);
+        assert_eq!(sample.mounted_gpu_rows, 10);
+        assert_eq!(sample.mounted_row_ids_sha256, MOUNTED_ROW_IDS_SHA256);
+        let replay = host.commit_for_test(GpuSelectorPerfCommitV1 {
+            qa_session_id: started.qa_session_id,
+            sample_id: started.sample_id,
+            mounted_row_ids: rows(),
+        });
+        assert_eq!(replay.unwrap_err().code, "gpu_selector_perf_sample_invalid");
+    }
+
+    #[test]
+    fn commit_rejects_wrong_row_order_without_returning_a_sample() {
+        let host = GpuSelectorPerfHost::for_test();
+        host.arm_for_test(arm(GpuSelectorPerfActionV1::KeyboardSelect))
+            .unwrap();
+        let started = host
+            .start_for_test(GpuSelectorPerfActionV1::KeyboardSelect, 1280, 720)
+            .unwrap();
+        let mut wrong = rows();
+        wrong.swap(0, 1);
+        let error = host
+            .commit_for_test(GpuSelectorPerfCommitV1 {
+                qa_session_id: started.qa_session_id.clone(),
+                sample_id: started.sample_id.clone(),
+                mounted_row_ids: wrong,
+            })
+            .unwrap_err();
+        assert_eq!(error.code, "gpu_selector_perf_rows_invalid");
+        let sample = host
+            .commit_for_test(GpuSelectorPerfCommitV1 {
+                qa_session_id: started.qa_session_id,
+                sample_id: started.sample_id,
+                mounted_row_ids: rows(),
+            })
+            .unwrap();
+        assert_eq!(sample.mounted_gpu_rows, 10);
+    }
+
+    #[test]
+    fn checked_in_fixture_hash_matches_contract_constant() {
+        assert_eq!(checked_in_fixture_hash(), FIXTURE_SHA256);
+        assert_eq!(mounted_row_ids_sha256(), MOUNTED_ROW_IDS_SHA256);
+    }
+}
