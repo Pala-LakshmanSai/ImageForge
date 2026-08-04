@@ -323,22 +323,30 @@ function podDetails(
   progress: number,
   detail: string,
   current: PodState,
-  hardware?: { gpu?: string; vram?: string; hourlyRate?: number },
+  hardware?: { gpu?: string; vram?: string; hourlyRate?: number; podId?: string },
 ): PodState {
   const isReady = phase === 'ready';
   const isOffline = phase === 'offline';
   const isError = phase === 'error';
+  const nextPodId = hardware?.podId ?? current.podId;
+  const readyIdentityAttached = !isReady || nextPodId !== null;
   return {
     ...current,
     phase,
     phaseProgress: progress,
     statusDetail: detail,
-    gpu: isOffline ? null : hardware?.gpu ?? current.gpu ?? (isReady ? 'RTX 4090' : null),
-    vram: isOffline ? null : hardware?.vram ?? current.vram ?? (isReady ? '24 GB' : null),
-    hourlyRate: isOffline ? null : hardware?.hourlyRate ?? current.hourlyRate ?? (isReady ? 0.54 : null),
-    health: isReady ? 'healthy' : isOffline ? 'offline' : isError ? 'degraded' : 'checking',
-    podId: isReady ? current.podId ?? 'pod-if-7K2M' : isOffline ? null : current.podId,
-    matchingPodIds: isOffline ? [] : current.matchingPodIds,
+    gpu: isOffline || !readyIdentityAttached
+      ? null
+      : hardware?.gpu ?? current.gpu ?? (isReady ? 'RTX 4090' : null),
+    vram: isOffline || !readyIdentityAttached
+      ? null
+      : hardware?.vram ?? current.vram ?? (isReady ? '24 GB' : null),
+    hourlyRate: isOffline || !readyIdentityAttached
+      ? null
+      : hardware?.hourlyRate ?? current.hourlyRate ?? (isReady ? 0.54 : null),
+    health: isReady && readyIdentityAttached ? 'healthy' : isOffline ? 'offline' : isError ? 'degraded' : 'checking',
+    podId: isReady ? nextPodId : isOffline ? null : current.podId,
+    matchingPodIds: isOffline || !readyIdentityAttached ? [] : current.matchingPodIds,
     errorMessage: isError ? detail : null,
   };
 }

@@ -196,6 +196,16 @@ impl StartForegroundGate {
         }
     }
 
+    /// Window lifecycle changes invalidate the post-dialog permit as well as
+    /// the shorter native activation.  A permit is provider authority, so it
+    /// must not survive focus loss, resize, scale changes, or destruction.
+    fn invalidate(&self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            *pending = None;
+        }
+        self.trusted_input.invalidate();
+    }
+
     fn request(
         &self,
         window: &WebviewWindow,
@@ -4005,7 +4015,7 @@ fn native_queue_release_smoke_exchange(
 fn native_smoke_result(app: tauri::AppHandle, passed: bool, detail: String) -> NativeResult<()> {
     if !matches!(
         std::env::var("IMAGEFORGE_NATIVE_SMOKE").ok().as_deref(),
-        Some("1" | "two-client")
+        Some("1" | "two-client" | "selector-perf")
     ) {
         return Err(NativeError::new(
             "native_smoke_disabled",
@@ -4058,8 +4068,10 @@ pub fn run() {
         .setup(|app| {
             let smoke_setting = std::env::var("IMAGEFORGE_NATIVE_SMOKE").ok();
             let queue_release_smoke = smoke_setting.as_deref() == Some("queue-release");
+            let selector_perf_smoke = smoke_setting.as_deref() == Some("selector-perf");
             let smoke_mode = matches!(smoke_setting.as_deref(), Some("1" | "two-client"))
-                || queue_release_smoke;
+                || queue_release_smoke
+                || selector_perf_smoke;
             let two_client_role = if smoke_setting.as_deref() == Some("two-client") {
                 match std::env::var("IMAGEFORGE_NATIVE_SMOKE_ROLE").ok().as_deref() {
                     Some("A") => Some("A"),
@@ -4074,6 +4086,54 @@ pub fn run() {
             if smoke_mode {
                 let initialization = if queue_release_smoke {
                     "window.__IMAGEFORGE_QUEUE_RELEASE_SMOKE__ = true;".to_string()
+                } else if selector_perf_smoke {
+                    let action = std::env::var("IMAGEFORGE_GPU_SELECTOR_PERF_ACTION")
+                        .ok()
+                        .filter(|value| {
+                            matches!(
+                                value.as_str(),
+                                "cold_open"
+                                    | "warm_open"
+                                    | "refresh_loading"
+                                    | "keyboard_move"
+                                    | "keyboard_select"
+                            )
+                        })
+                        .ok_or_else(|| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                "The selector performance action is not configured.",
+                            )
+                        })?;
+                    let viewport_width = std::env::var("IMAGEFORGE_GPU_SELECTOR_PERF_VIEWPORT_WIDTH")
+                        .ok()
+                        .and_then(|value| value.parse::<u16>().ok())
+                        .filter(|value| matches!(value, 1280 | 1440))
+                        .ok_or_else(|| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                "The selector performance viewport width is invalid.",
+                            )
+                        })?;
+                    let viewport_height = std::env::var("IMAGEFORGE_GPU_SELECTOR_PERF_VIEWPORT_HEIGHT")
+                        .ok()
+                        .and_then(|value| value.parse::<u16>().ok())
+                        .filter(|value| matches!(value, 720 | 900))
+                        .ok_or_else(|| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                "The selector performance viewport height is invalid.",
+                            )
+                        })?;
+                    let config = serde_json::json!({
+                        "action": action,
+                        "viewportWidth": viewport_width,
+                        "viewportHeight": viewport_height,
+                    });
+                    format!(
+                        "window.__IMAGEFORGE_GPU_SELECTOR_PERF_QA__ = true; window.__IMAGEFORGE_GPU_SELECTOR_PERF_QA_CONFIG__ = {};",
+                        config
+                    )
                 } else {
                     match two_client_role {
                         Some(role) => format!(
@@ -4110,7 +4170,7 @@ pub fn run() {
                 builder = builder.data_store_identifier(identifier);
             }
             #[cfg(target_os = "windows")]
-            if two_client_role.is_some() || queue_release_smoke {
+            if two_client_role.is_some() || queue_release_smoke || selector_perf_smoke {
                 let profile = std::env::var_os("IMAGEFORGE_NATIVE_SMOKE_PROFILE")
                     .map(PathBuf::from)
                     .filter(|path| path.is_absolute())
@@ -4134,6 +4194,7 @@ pub fn run() {
                 .build()?;
             let selector_perf = app.state::<NativeState>().gpu_selector_perf.clone();
             let trusted_input = app.state::<NativeState>().trusted_input.clone();
+            let gpu_start_foreground = app.state::<NativeState>().gpu_start_foreground.clone();
             let native_input_hook = native::trusted_input::install(
                 &window,
                 trusted_input.clone(),
@@ -4143,14 +4204,14 @@ pub fn run() {
             window.on_window_event(move |event| match event {
                 WindowEvent::Focused(false) => {
                     selector_perf.invalidate_native_sample();
-                    trusted_input.invalidate();
+                    gpu_start_foreground.invalidate();
                     if let Some(hook) = &native_input_hook {
                         hook.invalidate();
                     }
                 }
                 WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
                     selector_perf.invalidate_native_sample();
-                    trusted_input.invalidate();
+                    gpu_start_foreground.invalidate();
                     if let Some(hook) = &native_input_hook {
                         hook.invalidate();
                         // Resizing/scaling invalidates the old activation and
@@ -4168,7 +4229,7 @@ pub fn run() {
                 }
                 WindowEvent::Destroyed => {
                     selector_perf.invalidate_native_sample();
-                    trusted_input.invalidate();
+                    gpu_start_foreground.invalidate();
                     if let Some(hook) = &native_input_hook {
                         hook.remove_on_main_thread();
                     }
@@ -4329,6 +4390,27 @@ mod tests {
         })
         .unwrap();
         assert!(journal_accessed.get());
+    }
+
+    #[test]
+    fn start_foreground_permit_is_cleared_by_window_lifecycle_invalidation() {
+        let gate = StartForegroundGate::new(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            TrustedInputBroker::default(),
+        );
+        let permit = StartForegroundPermit {
+            id: "11111111-1111-4111-8111-111111111111".to_owned(),
+            action: GpuStartForegroundAction::Selected,
+            input_sha256: "b".repeat(64),
+            window_label: "main".to_owned(),
+            process_epoch_id: gate.process_epoch_id.clone(),
+            issued_at: Instant::now(),
+        };
+        *gate.pending.lock().expect("permit lock") = Some(permit);
+
+        gate.invalidate();
+
+        assert!(gate.pending.lock().expect("permit lock").is_none());
     }
 
     #[test]

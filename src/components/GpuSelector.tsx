@@ -224,7 +224,13 @@ export function GpuSelector({
 
   return (
     <>
-      <section className="gpu-selector" role="dialog" aria-modal="false" aria-labelledby="gpu-selector-title">
+      <section
+        className="gpu-selector"
+        role="dialog"
+        aria-modal="false"
+        aria-labelledby="gpu-selector-title"
+        data-gpu-selector-state={snapshot.state}
+      >
         <header className="gpu-selector__header">
           <div>
             <p className="gpu-selector__eyebrow">Secure Cloud · EU-RO-1 · one GPU</p>

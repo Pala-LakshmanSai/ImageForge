@@ -9,6 +9,9 @@
 use super::{NativeError, NativeResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, WebviewWindow};
@@ -170,6 +173,7 @@ struct PerfInner {
 #[derive(Clone, Debug, Default)]
 pub struct GpuSelectorPerfHost {
     inner: Arc<Mutex<PerfInner>>,
+    sample_output: Option<PathBuf>,
 }
 
 impl GpuSelectorPerfHost {
@@ -181,6 +185,7 @@ impl GpuSelectorPerfHost {
         if std::env::var(QA_OPT_IN_ENV).ok().as_deref() != Some("1") {
             return Ok(host);
         }
+        let sample_output = qa_sample_output_from_environment()?;
         let raw = std::env::var(QA_SESSION_ENV).map_err(|_| {
             NativeError::new(
                 "gpu_selector_perf_session_invalid",
@@ -199,7 +204,16 @@ impl GpuSelectorPerfHost {
             armed: None,
             pending: None,
         };
-        Ok(host)
+        if let Some(path) = &sample_output {
+            reset_sample_output(path)?;
+        }
+        // The output path is an installed-harness-only transport for raw
+        // samples. It is never accepted from a renderer command and is not
+        // present in the artifact/session binding used by production.
+        Ok(Self {
+            inner: host.inner,
+            sample_output,
+        })
     }
 
     #[cfg(test)]
@@ -294,7 +308,24 @@ impl GpuSelectorPerfHost {
         input: GpuSelectorPerfCommitV1,
     ) -> NativeResult<GpuSelectorPerfSampleV1> {
         require_main_foreground(window)?;
-        self.commit_inner(input, Instant::now())
+        let sample = self.commit_inner(input, Instant::now())?;
+        self.record_sample(&sample)?;
+        Ok(sample)
+    }
+
+    fn record_sample(&self, sample: &GpuSelectorPerfSampleV1) -> NativeResult<()> {
+        let Some(path) = &self.sample_output else {
+            return Ok(());
+        };
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|_| sample_output_failed())?;
+        serde_json::to_writer(&mut file, sample).map_err(|_| sample_output_failed())?;
+        file.write_all(b"\n").map_err(|_| sample_output_failed())?;
+        file.sync_all().map_err(|_| sample_output_failed())?;
+        Ok(())
     }
 
     fn arm_inner(
@@ -646,6 +677,44 @@ fn mounted_row_ids_sha256() -> String {
     hasher.update(ordered.as_bytes());
     hasher.update(b"\n");
     format!("{:x}", hasher.finalize())
+}
+
+fn qa_sample_output_from_environment() -> NativeResult<Option<PathBuf>> {
+    let Some(raw) = std::env::var_os("IMAGEFORGE_GPU_SELECTOR_PERF_QA_SAMPLES") else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(raw);
+    if !path.is_absolute() || path.file_name().is_none() {
+        return Err(sample_output_failed());
+    }
+    let parent = path.parent().ok_or_else(sample_output_failed)?;
+    let parent_metadata = fs::symlink_metadata(parent).map_err(|_| sample_output_failed())?;
+    if !parent_metadata.is_dir() || parent_metadata.file_type().is_symlink() {
+        return Err(sample_output_failed());
+    }
+    if let Ok(metadata) = fs::symlink_metadata(&path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(sample_output_failed());
+        }
+    }
+    Ok(Some(path))
+}
+
+fn reset_sample_output(path: &Path) -> NativeResult<()> {
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|_| sample_output_failed())?;
+    file.sync_all().map_err(|_| sample_output_failed())
+}
+
+fn sample_output_failed() -> NativeError {
+    NativeError::new(
+        "gpu_selector_perf_sample_output_failed",
+        "The installed selector performance sample output is unavailable.",
+    )
 }
 
 #[cfg(test)]

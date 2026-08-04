@@ -22,6 +22,26 @@ function readyDraft(promptCount: number): AppState {
 }
 
 describe('appReducer', () => {
+  it('keeps a ready phase fail-closed when no exact Pod identity is supplied', () => {
+    const state = appReducer(createInitialState(), {
+      type: 'SET_POD_PHASE',
+      phase: 'ready',
+      progress: 100,
+      detail: 'Ready response missing Pod identity',
+    });
+
+    expect(state.pod).toMatchObject({
+      phase: 'ready',
+      podId: null,
+      matchingPodIds: [],
+      gpu: null,
+      vram: null,
+      hourlyRate: null,
+      health: 'checking',
+    });
+    expect(canStartBatch(state)).toBe(false);
+  });
+
   it('does not mark a failed or ambiguous Pod start as complete', () => {
     const state = appReducer(createInitialState(), {
       type: 'RUNTIME_ERROR',

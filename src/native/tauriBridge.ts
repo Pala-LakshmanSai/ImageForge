@@ -355,7 +355,67 @@ declare global {
     __IMAGEFORGE_NATIVE_SMOKE__?: boolean;
     __IMAGEFORGE_NATIVE_SMOKE_ROLE__?: 'A' | 'B';
     __IMAGEFORGE_QUEUE_RELEASE_SMOKE__?: boolean;
+    __IMAGEFORGE_GPU_SELECTOR_PERF_QA__?: boolean;
+    __IMAGEFORGE_GPU_SELECTOR_PERF_QA_CONFIG__?: {
+      action: GpuSelectorPerfActionV1;
+      viewportWidth: 1280 | 1440;
+      viewportHeight: 720 | 900;
+    };
   }
+}
+
+export type GpuSelectorPerfActionV1 =
+  | 'cold_open'
+  | 'warm_open'
+  | 'refresh_loading'
+  | 'keyboard_move'
+  | 'keyboard_select';
+
+export interface GpuSelectorPerfArmV1 {
+  readonly fixtureSha256: string;
+  readonly action: GpuSelectorPerfActionV1;
+  readonly ordinal: number;
+  readonly viewportWidth: 1280 | 1440;
+  readonly viewportHeight: 720 | 900;
+}
+
+export interface GpuSelectorPerfArmResultV1 {
+  readonly schemaVersion: 1;
+  readonly armed: true;
+  readonly qaSessionId: string;
+}
+
+export interface GpuSelectorPerfStartedEventV1 {
+  readonly schemaVersion: 1;
+  readonly event: 'gpu-selector-perf-started-v1';
+  readonly qaSessionId: string;
+  readonly sampleId: string;
+  readonly action: GpuSelectorPerfActionV1;
+  readonly ordinal: number;
+  readonly viewportWidth: 1280 | 1440;
+  readonly viewportHeight: 720 | 900;
+}
+
+export interface GpuSelectorPerfCommitV1 {
+  readonly qaSessionId: string;
+  readonly sampleId: string;
+  readonly mountedRowIds: readonly string[];
+}
+
+export interface GpuSelectorPerfSampleV1 {
+  readonly schemaVersion: 1;
+  readonly sampleId: string;
+  readonly platform: string;
+  readonly appVersion: string;
+  readonly commitSha: string;
+  readonly artifactSha256: string;
+  readonly viewportWidth: number;
+  readonly viewportHeight: number;
+  readonly action: GpuSelectorPerfActionV1;
+  readonly ordinal: number;
+  readonly durationUs: number;
+  readonly mountedGpuRows: number;
+  readonly mountedRowIdsSha256: string;
 }
 
 export function isNativeDesktop(): boolean {
@@ -893,6 +953,21 @@ export async function nativeQueueSetSleepPrevention(input: NativePowerInput): Pr
 
 export async function nativeQueueSignalAlert(input: NativeAlertInput): Promise<NativeAlertResult> {
   return parseAlertResult(await invoke('queue_signal_alert', { input }));
+}
+
+/** Installed-only Task 014 selector instrumentation. The native host rejects
+ * these commands unless an artifact-bound QA session was established before
+ * the window was created. */
+export function nativeGpuSelectorPerfArm(
+  input: GpuSelectorPerfArmV1,
+): Promise<GpuSelectorPerfArmResultV1> {
+  return invoke('gpu_selector_perf_arm', { input });
+}
+
+export function nativeGpuSelectorPerfCommit(
+  input: GpuSelectorPerfCommitV1,
+): Promise<GpuSelectorPerfSampleV1> {
+  return invoke('gpu_selector_perf_commit', { input });
 }
 
 /**

@@ -7,6 +7,7 @@ import { createConfiguredInitialState, createInitialState } from './domain/reduc
 import { createNativeProductionPort } from './native/productionPort';
 import { isNativeDesktop } from './native/tauriBridge';
 import { runNativeSmoke } from './native/nativeSmoke';
+import { GpuSelectorPerfSmoke } from './native/gpuSelectorPerfSmoke';
 import {
   QueueReleaseSmokeController,
   QueueReleaseSmokeHarness,
@@ -17,7 +18,8 @@ import { createTwoClientSmokePort, type TwoClientSmokeRole } from './native/twoC
 
 const native = isNativeDesktop();
 const queueReleaseSmoke = native && window.__IMAGEFORGE_QUEUE_RELEASE_SMOKE__ === true;
-const nativeSmoke = native && !queueReleaseSmoke && window.__IMAGEFORGE_NATIVE_SMOKE__ === true;
+const selectorPerfSmoke = native && !queueReleaseSmoke && window.__IMAGEFORGE_GPU_SELECTOR_PERF_QA__ === true;
+const nativeSmoke = native && !queueReleaseSmoke && !selectorPerfSmoke && window.__IMAGEFORGE_NATIVE_SMOKE__ === true;
 const twoClientRole = nativeSmoke && ['A', 'B'].includes(window.__IMAGEFORGE_NATIVE_SMOKE_ROLE__ ?? '')
   ? window.__IMAGEFORGE_NATIVE_SMOKE_ROLE__ as TwoClientSmokeRole
   : null;
@@ -26,10 +28,10 @@ const twoClientInitialState = twoClientRole === null ? undefined : createConfigu
 if (twoClientInitialState && twoClientRole === 'B') {
   twoClientInitialState.settings = { ...twoClientInitialState.settings, userName: 'Sujal' };
 }
-const initialState = twoClientInitialState ?? (native && !nativeSmoke
+const initialState = twoClientInitialState ?? (native && !nativeSmoke && !selectorPerfSmoke
   ? hydrateSafePreferences(createInitialState(), window.localStorage)
   : undefined);
-const recoveredBatch = native && !nativeSmoke
+const recoveredBatch = native && !nativeSmoke && !selectorPerfSmoke
   ? readPersistedBatchRecovery(window.localStorage)
   : null;
 const adapter = twoClientFixture !== null
@@ -38,7 +40,7 @@ const adapter = twoClientFixture !== null
       twoClientRole === 'B' ? '11111111-1111-4111-8111-111111111111' : null,
       twoClientRole === 'B' ? 'Stale local recovery' : null,
     )
-  : native && !nativeSmoke
+  : native && !nativeSmoke && !selectorPerfSmoke
   ? createProductionImageForgeAdapter(
       createNativeProductionPort(),
       recoveredBatch?.id ?? null,
@@ -49,7 +51,9 @@ const queueReleaseController = queueReleaseSmoke ? new QueueReleaseSmokeControll
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    {queueReleaseController
+    {selectorPerfSmoke
+      ? <GpuSelectorPerfSmoke />
+      : queueReleaseController
       ? <QueueReleaseSmokeHarness controller={queueReleaseController} />
       : <App initialState={initialState} adapter={adapter} />}
   </StrictMode>,

@@ -9,6 +9,7 @@ on:
       - "packages/**"
       - "package.json"
       - "package-lock.json"
+      - "contracts/**"
       - "scripts/**"
       - ".github/workflows/build-desktop.yml"
 
@@ -487,6 +488,82 @@ jobs:
             }
           }
 
+      - name: Run installed Windows Task 014 selector performance gate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundleDir = Join-Path $env:GITHUB_WORKSPACE 'src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis'
+          $installer = @(Get-ChildItem -LiteralPath $bundleDir -Filter '*-setup.exe' -File)
+          if ($installer.Count -ne 1) {
+            throw "Expected exactly one NSIS installer for selector performance; found $($installer.Count)."
+          }
+          $buildDir = Join-Path $env:GITHUB_WORKSPACE 'src-tauri/target/x86_64-pc-windows-msvc/release'
+          $builtBinary = @(Get-ChildItem -LiteralPath $buildDir -Filter '*.exe' -File |
+            Where-Object { $_.Name -notmatch '(?i)(setup|uninstall)' })
+          if ($builtBinary.Count -ne 1) {
+            throw "Expected exactly one built application executable; found $($builtBinary.Count)."
+          }
+          $installRoot = Join-Path $env:RUNNER_TEMP 'imageforge-selector-perf-installed'
+          $stateRoot = Join-Path $env:RUNNER_TEMP 'imageforge-selector-perf-state'
+          $evidenceRoot = Join-Path $env:GITHUB_WORKSPACE 'release-evidence'
+          $selectorRoot = Join-Path $evidenceRoot 'gpu-selector-perf-v1'
+          $runRoot = Join-Path $evidenceRoot '.selector-perf-runs'
+          $profileRoot = Join-Path $evidenceRoot '.selector-perf-profile'
+          $version = node -p "require('./package.json').version"
+          try {
+            foreach ($path in @($installRoot, $stateRoot, $selectorRoot, $runRoot, $profileRoot)) {
+              if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+              New-Item -ItemType Directory -Path $path -Force | Out-Null
+            }
+            $installResult = Start-Process -FilePath $installer[0].FullName `
+              -ArgumentList @('/S', "/D=$installRoot") -Wait -PassThru
+            if ($installResult.ExitCode -ne 0) { throw "Selector performance NSIS install failed with exit code $($installResult.ExitCode)." }
+            $installedExe = Join-Path $installRoot $builtBinary[0].Name
+            if (-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) { throw "Installed selector performance executable was not found at $installedExe." }
+            $artifactSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer[0].FullName).Hash.ToLowerInvariant()
+            $selectorEvidence = Join-Path $evidenceRoot "gpu-selector-perf-v1/$($env:GITHUB_SHA)/$version/windows-x64/$artifactSha/gpu-selector-perf-10-v1__1280x720__1440x900.json"
+            $userRoot = Join-Path $stateRoot 'User'
+            $homeRoot = Join-Path $stateRoot 'Home'
+            $appData = Join-Path $stateRoot 'Roaming'
+            $localAppData = Join-Path $stateRoot 'Local'
+            New-Item -ItemType Directory -Path $userRoot, $homeRoot, $appData, $localAppData -Force | Out-Null
+            $env:USERPROFILE = $userRoot
+            $env:HOME = $homeRoot
+            $env:APPDATA = $appData
+            $env:LOCALAPPDATA = $localAppData
+            node scripts/selector-perf-smoke.mjs `
+              --binary $installedExe `
+              --artifact-sha256 $artifactSha `
+              --commit $env:GITHUB_SHA `
+              --version $version `
+              --platform windows-x64 `
+              --output-root $evidenceRoot
+            if ($LASTEXITCODE -ne 0) { throw 'Installed Windows selector performance gate failed.' }
+            node scripts/validate-selector-perf-evidence.mjs `
+              --evidence $selectorEvidence `
+              --artifact $installer[0].FullName `
+              --commit $env:GITHUB_SHA `
+              --version $version `
+              --platform windows-x64
+            if ($LASTEXITCODE -ne 0) { throw 'Windows selector performance evidence validation failed.' }
+          }
+          finally {
+            if (Test-Path -LiteralPath $installRoot) {
+              $uninstaller = Join-Path $installRoot 'uninstall.exe'
+              if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
+                $uninstallResult = Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait -PassThru
+                if ($uninstallResult.ExitCode -ne 0) { throw "Selector performance NSIS uninstall failed with exit code $($uninstallResult.ExitCode)." }
+              }
+            }
+            # Keep canonical and raw evidence for the metadata and upload
+            # steps. Only installed-app state and the temporary WebView
+            # profile are disposable here.
+            Remove-Item -LiteralPath $installRoot, $stateRoot, $profileRoot -Recurse -Force -ErrorAction SilentlyContinue
+            foreach ($path in @($installRoot, $stateRoot, $profileRoot)) {
+              if (Test-Path -LiteralPath $path) { throw "Selector performance temporary Windows state remained: $path" }
+            }
+          }
+
       - name: Upload failed Windows queue and two-client smoke diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
@@ -503,6 +580,8 @@ jobs:
             ${{ runner.temp }}/imageforge-queue-release-wrapper/*.wrapper.result
             ${{ runner.temp }}/imageforge-queue-release-*.stdout
             ${{ runner.temp }}/imageforge-queue-release-*.stderr
+            release-evidence/gpu-selector-perf-v1/**
+            release-evidence/.selector-perf-runs/**
           if-no-files-found: ignore
 
       - name: Write Windows release metadata
@@ -528,6 +607,9 @@ jobs:
           $queueWrapperRun = Join-Path $bundleDir 'ImageForge-windows-queue-release-run.wrapper.result'
           $queueWrapperResume = Join-Path $bundleDir 'ImageForge-windows-queue-release-resume.wrapper.result'
           $queueWrapperRelaunch = Join-Path $bundleDir 'ImageForge-windows-queue-release-relaunch.wrapper.result'
+          $selectorEvidenceRelative = "release-evidence/gpu-selector-perf-v1/$($env:GITHUB_SHA)/$([string]$package.version)/windows-x64/$hash/gpu-selector-perf-10-v1__1280x720__1440x900.json"
+          $selectorEvidence = Join-Path $env:GITHUB_WORKSPACE $selectorEvidenceRelative
+          if (-not (Test-Path -LiteralPath $selectorEvidence -PathType Leaf)) { throw "Task 014 selector evidence was not written at $selectorEvidence." }
           [ordered]@{
             product = 'ImageForge'
             version = [string]$package.version
@@ -560,6 +642,8 @@ jobs:
               @{ name = 'ImageForge-windows-queue-release-resume.wrapper.result'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $queueWrapperResume).Hash.ToLowerInvariant() },
               @{ name = 'ImageForge-windows-queue-release-relaunch.wrapper.result'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $queueWrapperRelaunch).Hash.ToLowerInvariant() }
             )
+            selector_performance_evidence = $selectorEvidenceRelative
+            selector_performance_evidence_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $selectorEvidence).Hash.ToLowerInvariant()
           } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 -LiteralPath (Join-Path $bundleDir 'ImageForge-windows-release-metadata.json')
 
       - name: Upload Windows installer
@@ -576,6 +660,8 @@ jobs:
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ImageForge-windows-queue-release-attestation.json
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ImageForge-windows-queue-release-result.txt
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ImageForge-windows-queue-release-*.wrapper.result
+            release-evidence/gpu-selector-perf-v1/**
+            release-evidence/.selector-perf-runs/**
           if-no-files-found: error
 
   macos:
@@ -996,6 +1082,65 @@ jobs:
           cp "$attestation" "$bundle_dir/dmg/ImageForge-macos-queue-release-attestation.json"
           cp "$result" "$bundle_dir/dmg/ImageForge-macos-queue-release-result.txt"
 
+      - name: Run installed macOS Task 014 selector performance gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_dir="$GITHUB_WORKSPACE/src-tauri/target/aarch64-apple-darwin/release/bundle"
+          dmg_count="$(find "$bundle_dir/dmg" -maxdepth 1 -type f -name 'ImageForge_*_aarch64.dmg' -print | wc -l | tr -d ' ')"
+          if [ "$dmg_count" -ne 1 ]; then
+            echo "The selector performance gate expected exactly one built macOS DMG, found $dmg_count." >&2
+            exit 1
+          fi
+          dmg_path="$(find "$bundle_dir/dmg" -maxdepth 1 -type f -name 'ImageForge_*_aarch64.dmg' -print)"
+          mount_dir="$(mktemp -d "$RUNNER_TEMP/imageforge-selector-dmg.XXXXXX")"
+          install_root="$(mktemp -d "$RUNNER_TEMP/imageforge-selector-installed.XXXXXX")"
+          qa_home="$(mktemp -d "$RUNNER_TEMP/imageforge-selector-home.XXXXXX")"
+          mounted=0
+          cleanup() {
+            local status=$?
+            if [ "$mounted" -eq 1 ]; then
+              hdiutil detach "$mount_dir" -force >/dev/null 2>&1 || status=1
+            fi
+            rm -rf "$mount_dir" "$install_root" "$qa_home"
+            trap - EXIT
+            exit "$status"
+          }
+          trap cleanup EXIT
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" "$dmg_path" >/dev/null
+          mounted=1
+          app_path="$(find "$mount_dir" -maxdepth 2 -type d -name 'ImageForge.app' -print | head -n 1)"
+          if [ -z "$app_path" ]; then
+            echo 'The selector performance DMG did not contain ImageForge.app.' >&2
+            exit 1
+          fi
+          installed_app="$install_root/ImageForge.app"
+          ditto "$app_path" "$installed_app"
+          codesign --verify --deep --strict --verbose=2 "$installed_app"
+          binary_path="$installed_app/Contents/MacOS/imageforge-desktop-core"
+          if [ ! -x "$binary_path" ]; then
+            echo "The installed selector performance binary was not found at $binary_path." >&2
+            exit 1
+          fi
+          artifact_sha256="$(shasum -a 256 "$dmg_path" | awk '{print $1}')"
+          version="$(node -p "require('./package.json').version")"
+          selector_evidence="$GITHUB_WORKSPACE/release-evidence/gpu-selector-perf-v1/$GITHUB_SHA/$version/macos-arm64/$artifact_sha256/gpu-selector-perf-10-v1__1280x720__1440x900.json"
+          mkdir -p "$qa_home/tmp"
+          HOME="$qa_home" TMPDIR="$qa_home/tmp" \
+            node scripts/selector-perf-smoke.mjs \
+              --binary "$binary_path" \
+              --artifact-sha256 "$artifact_sha256" \
+              --commit "$GITHUB_SHA" \
+              --version "$version" \
+              --platform macos-arm64 \
+              --output-root "$GITHUB_WORKSPACE/release-evidence"
+          node scripts/validate-selector-perf-evidence.mjs \
+            --evidence "$selector_evidence" \
+            --artifact "$dmg_path" \
+            --commit "$GITHUB_SHA" \
+            --version "$version" \
+            --platform macos-arm64
+
       - name: Upload failed macOS queue and two-client smoke diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
@@ -1013,6 +1158,8 @@ jobs:
             ${{ runner.temp }}/ImageForge-macos-queue-release-attestation.json
             ${{ runner.temp }}/imageforge-queue-release-wrapper/*.wrapper.result
             ${{ runner.temp }}/imageforge-queue-release-*.log
+            release-evidence/gpu-selector-perf-v1/**
+            release-evidence/.selector-perf-runs/**
           if-no-files-found: ignore
 
       - name: Write macOS release metadata
@@ -1041,6 +1188,13 @@ jobs:
           queue_wrapper_run_hash="$(shasum -a 256 "$queue_wrapper_run" | awk '{print $1}')"
           queue_wrapper_resume_hash="$(shasum -a 256 "$queue_wrapper_resume" | awk '{print $1}')"
           queue_wrapper_relaunch_hash="$(shasum -a 256 "$queue_wrapper_relaunch" | awk '{print $1}')"
+          selector_evidence_relative="release-evidence/gpu-selector-perf-v1/$GITHUB_SHA/$version/macos-arm64/$hash/gpu-selector-perf-10-v1__1280x720__1440x900.json"
+          selector_evidence="$GITHUB_WORKSPACE/$selector_evidence_relative"
+          if [ ! -f "$selector_evidence" ]; then
+            echo "Task 014 selector evidence was not written at $selector_evidence." >&2
+            exit 1
+          fi
+          selector_evidence_hash="$(shasum -a 256 "$selector_evidence" | awk '{print $1}')"
           cat > "$bundle_dir/dmg/ImageForge-macos-release-metadata.json" <<EOF
           {
             "product": "ImageForge",
@@ -1073,7 +1227,9 @@ jobs:
               {"name": "ImageForge-macos-queue-release-run.wrapper.result", "sha256": "$queue_wrapper_run_hash"},
               {"name": "ImageForge-macos-queue-release-resume.wrapper.result", "sha256": "$queue_wrapper_resume_hash"},
               {"name": "ImageForge-macos-queue-release-relaunch.wrapper.result", "sha256": "$queue_wrapper_relaunch_hash"}
-            ]
+            ],
+            "selector_performance_evidence": "$selector_evidence_relative",
+            "selector_performance_evidence_sha256": "$selector_evidence_hash"
           }
           EOF
 
@@ -1092,4 +1248,6 @@ jobs:
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge-macos-queue-release-attestation.json
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge-macos-queue-release-result.txt
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge-macos-queue-release-*.wrapper.result
+            release-evidence/gpu-selector-perf-v1/**
+            release-evidence/.selector-perf-runs/**
           if-no-files-found: error
