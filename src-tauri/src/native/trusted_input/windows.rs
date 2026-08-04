@@ -24,8 +24,8 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThrea
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetAncestor, GetForegroundWindow, GetWindowThreadProcessId, IsChild, IsIconic,
-    IsWindow, IsWindowEnabled, IsWindowVisible, SetWindowsHookExW, UnhookWindowsHookEx, GA_ROOT,
-    HC_ACTION, MOUSEHOOKSTRUCT, WH_MOUSE, WM_LBUTTONUP,
+    IsWindow, IsWindowVisible, SetWindowsHookExW, UnhookWindowsHookEx, GA_ROOT, HC_ACTION,
+    MOUSEHOOKSTRUCT, WH_MOUSE, WM_LBUTTONUP,
 };
 
 const VK_RETURN: u32 = 0x0D;
@@ -333,7 +333,6 @@ fn window_is_authorized(expected_hwnd: usize, expected_thread_id: u32) -> bool {
     unsafe {
         if IsWindow(expected) == 0
             || IsWindowVisible(expected) == 0
-            || IsWindowEnabled(expected) == 0
             || IsIconic(expected) != 0
             || GetForegroundWindow() != expected
         {
