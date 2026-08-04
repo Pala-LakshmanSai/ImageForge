@@ -147,6 +147,25 @@ function nextPaint(): Promise<void> {
   });
 }
 
+function errorDetail(reason: unknown): string {
+  if (reason instanceof Error) return reason.message;
+  if (typeof reason === 'string') return reason;
+  if (typeof reason === 'object' && reason !== null) {
+    const record = reason as Record<string, unknown>;
+    if (typeof record.message === 'string') {
+      return typeof record.code === 'string'
+        ? `${record.code}: ${record.message}`
+        : record.message;
+    }
+    try {
+      return JSON.stringify(reason);
+    } catch {
+      return 'The native selector performance operation returned an unreadable error.';
+    }
+  }
+  return String(reason);
+}
+
 async function waitForExactViewport(
   width: number,
   height: number,
@@ -242,7 +261,7 @@ export function GpuSelectorPerfSmoke() {
   const fail = (reason: unknown) => {
     if (reportedRef.current) return;
     reportedRef.current = true;
-    const detail = reason instanceof Error ? reason.message : 'Selector performance smoke failed.';
+    const detail = errorDetail(reason);
     setError(detail);
     void report(false, detail).catch(() => undefined);
   };

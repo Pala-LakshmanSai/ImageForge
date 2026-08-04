@@ -582,6 +582,7 @@ jobs:
             ${{ runner.temp }}/imageforge-queue-release-*.stderr
             release-evidence/gpu-selector-perf-v1/**
             release-evidence/.selector-perf-runs/**
+          include-hidden-files: true
           if-no-files-found: ignore
 
       - name: Write Windows release metadata
@@ -662,6 +663,7 @@ jobs:
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ImageForge-windows-queue-release-*.wrapper.result
             release-evidence/gpu-selector-perf-v1/**
             release-evidence/.selector-perf-runs/**
+          include-hidden-files: true
           if-no-files-found: error
 
   macos:
@@ -1160,6 +1162,7 @@ jobs:
             ${{ runner.temp }}/imageforge-queue-release-*.log
             release-evidence/gpu-selector-perf-v1/**
             release-evidence/.selector-perf-runs/**
+          include-hidden-files: true
           if-no-files-found: ignore
 
       - name: Write macOS release metadata
@@ -1250,4 +1253,5 @@ jobs:
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge-macos-queue-release-*.wrapper.result
             release-evidence/gpu-selector-perf-v1/**
             release-evidence/.selector-perf-runs/**
+          include-hidden-files: true
           if-no-files-found: error
