@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GpuSelectorOfferV1, NativeGpuInventorySnapshotV1 } from '@imageforge/runpod-client';
@@ -413,7 +413,7 @@ describe('ImageForge shell', () => {
     expect(production.adapter.runPodLifecycle).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Start GPU' })[0]);
-    expect(await screen.findByRole('dialog', { name: 'Choose a GPU' })).toBeVisible();
+    expect(await screen.findByRole('radio', { name: /Auto best value/i })).toBeVisible();
     fireEvent.click(screen.getByRole('radio', { name: /Auto best value/i }));
     fireEvent.click(screen.getByRole('button', { name: 'Review Auto start' }));
     fireEvent.click(screen.getByRole('button', { name: 'Start Auto best value' }));
@@ -424,6 +424,42 @@ describe('ImageForge shell', () => {
     );
     expect(production.runtime.startGpu).not.toHaveBeenCalled();
     expect(production.adapter.runPodLifecycle).not.toHaveBeenCalled();
+  });
+
+  it('shows GPU rows after delayed Start inventory preparation resolves', async () => {
+    const production = productionAdapter();
+    let resolvePreparation: ((snapshot: NativeGpuInventorySnapshotV1) => void) | null = null;
+    production.runtime.prepareGpuInventory = vi.fn(() => new Promise<NativeGpuInventorySnapshotV1>((resolve) => {
+      resolvePreparation = resolve;
+    }));
+    render(<App initialState={createConfiguredInitialState()} adapter={production.adapter} />);
+
+    await waitFor(() => expect(production.runtime.loadGpuSwitch).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getAllByRole('button', { name: 'Start GPU' })[0]);
+    expect(await screen.findByRole('dialog', { name: 'Choose a GPU' })).toBeVisible();
+    expect(screen.getByText('Loading the native inventory journal…')).toBeVisible();
+
+    await act(async () => {
+      resolvePreparation?.(liveGpuInventory());
+    });
+    expect(await screen.findByRole('radio', { name: /Auto best value/i })).toBeVisible();
+    expect(screen.getByRole('radio', { name: /RTX 4090/i })).toBeVisible();
+  });
+
+  it('replaces a failed Start inventory load with a retryable terminal state', async () => {
+    const production = productionAdapter();
+    production.runtime.prepareGpuInventory = vi.fn(async () => {
+      throw new Error('RunPod inventory could not be reached.');
+    });
+    render(<App initialState={createConfiguredInitialState()} adapter={production.adapter} />);
+
+    await waitFor(() => expect(production.runtime.loadGpuSwitch).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getAllByRole('button', { name: 'Start GPU' })[0]);
+    const dialog = await screen.findByRole('dialog', { name: 'GPU inventory unavailable' });
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('RunPod inventory could not be reached.');
+    expect(within(dialog).getByRole('button', { name: 'Retry GPU list' })).toBeVisible();
+    expect(screen.queryByText('Loading the native inventory journal…')).not.toBeInTheDocument();
+    expect(production.runtime.startGpuChoice).not.toHaveBeenCalled();
   });
 
   it('opens Switch from the current GPU chip and begins only through the native switch facade', async () => {

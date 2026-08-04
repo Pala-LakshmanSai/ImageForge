@@ -61,6 +61,7 @@ export interface AppProps {
 }
 
 const CROSS_CLIENT_HEARTBEAT_MS = 4_000;
+const GPU_SELECTOR_LOAD_TIMEOUT_MS = 15_000;
 
 export default function App({ initialState, adapter: injectedAdapter, alarmPort: injectedAlarm }: AppProps) {
   const [state, dispatch] = useReducer(appReducer, initialState, (provided) => provided ?? createInitialState());
@@ -77,7 +78,9 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
   const [gpuSelectorSnapshot, setGpuSelectorSnapshot] = useState<NativeGpuInventorySnapshotV1 | null>(
     () => runtime?.getGpuInventory() ?? null,
   );
+  const [gpuSelectorError, setGpuSelectorError] = useState<string | null>(null);
   const gpuSelectorReturnFocusRef = useRef<HTMLElement | null>(null);
+  const gpuSelectorRequestRef = useRef(0);
   const [gpuPriceAttention, setGpuPriceAttention] = useState<NativeGpuStartResultV1 | null>(null);
   const [gpuPriceConfirmBusy, setGpuPriceConfirmBusy] = useState(false);
   const [gpuSwitchSnapshot, setGpuSwitchSnapshot] = useState<NativeGpuSwitchSnapshotV1 | null>(null);
@@ -85,6 +88,12 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
     runtime ? 'loading' : 'ready',
   );
   const [gpuSwitchActionBusy, setGpuSwitchActionBusy] = useState<GpuSwitchProgressActionV1 | null>(null);
+  const closeGpuSelector = useCallback(() => {
+    gpuSelectorRequestRef.current += 1;
+    setGpuSelectorOpen(false);
+    setGpuSelectorBusy(false);
+    setGpuSelectorError(null);
+  }, []);
   const alarm = useMemo(() => injectedAlarm ?? new WebAudioQueueAlarm(), [injectedAlarm]);
   const recoveryPointerRef = useRef<PersistedBatchRecovery | null>(
     adapter.mode === 'production' ? readPersistedBatchRecovery(window.localStorage) : null,
@@ -364,6 +373,8 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
     if (!runtime) {
       setGpuSelectorSnapshot(null);
       setGpuSelectorOpen(false);
+      setGpuSelectorBusy(false);
+      setGpuSelectorError(null);
       setGpuPriceAttention(null);
       setGpuSwitchSnapshot(null);
       setGpuSwitchLoadState('ready');
@@ -1255,6 +1266,12 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
       return;
     }
     setGpuSelectorMode(switchMode ? 'switch' : 'offline_start');
+    const requestId = gpuSelectorRequestRef.current + 1;
+    gpuSelectorRequestRef.current = requestId;
+    setGpuSelectorError(null);
+    // A previous receipt must never remain actionable while the explicit
+    // Start/Switch click obtains a fresh native observation.
+    setGpuSelectorSnapshot(null);
     if (captureReturnFocus) {
       gpuSelectorReturnFocusRef.current = document.activeElement instanceof HTMLElement
         ? document.activeElement
@@ -1262,14 +1279,28 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
       setGpuSelectorOpen(true);
     }
     setGpuSelectorBusy(true);
+    let timeoutId: number | undefined;
     try {
-      const snapshot = await runtime.prepareGpuInventory(current);
+      const snapshot = await Promise.race([
+        runtime.prepareGpuInventory(current),
+        new Promise<NativeGpuInventorySnapshotV1>((_, reject) => {
+          timeoutId = window.setTimeout(() => reject(new Error(
+            'Live GPU inventory did not respond in time. Check the network and retry.',
+          )), GPU_SELECTOR_LOAD_TIMEOUT_MS);
+        }),
+      ]);
+      if (gpuSelectorRequestRef.current !== requestId) return;
       setGpuSelectorSnapshot(snapshot);
+      setGpuSelectorError(null);
     } catch (error) {
+      if (gpuSelectorRequestRef.current !== requestId) return;
       const message = error instanceof Error ? error.message : 'Live GPU inventory could not be refreshed.';
+      setGpuSelectorSnapshot(null);
+      setGpuSelectorError(message);
       dispatch({ type: 'RUNTIME_ERROR', scope: 'pod', message });
     } finally {
-      setGpuSelectorBusy(false);
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+      if (gpuSelectorRequestRef.current === requestId) setGpuSelectorBusy(false);
     }
   }, [gpuSwitchLoadState, gpuSwitchSnapshot, runtime]);
 
@@ -1281,7 +1312,7 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
         (snapshot) => {
           setGpuSwitchSnapshot(snapshot);
           setGpuSwitchLoadState('ready');
-          setGpuSelectorOpen(false);
+          closeGpuSelector();
         },
         (error: unknown) => {
           const message = error instanceof Error ? error.message : 'The coordinated GPU Switch could not begin safely.';
@@ -1293,7 +1324,7 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
     setGpuSelectorBusy(true);
     void runtime.startGpuChoice(stateRef.current, confirmation).then(
       (result) => {
-        setGpuSelectorOpen(false);
+        closeGpuSelector();
         setGpuPriceAttention(result.state === 'price_attention' ? result : null);
       },
       (error: unknown) => {
@@ -1301,7 +1332,7 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
         dispatch({ type: 'RUNTIME_ERROR', scope: 'pod', message });
       },
     ).finally(() => setGpuSelectorBusy(false));
-  }, [runtime]);
+  }, [closeGpuSelector, runtime]);
 
   const confirmGpuPriceAttention = useCallback(() => {
     if (
@@ -1733,7 +1764,28 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
       </main>
 
       {gpuSelectorOpen ? (
-        gpuSelectorSnapshot === null ? (
+        gpuSelectorError !== null ? (
+          <section className="gpu-selector" role="dialog" aria-labelledby="gpu-selector-error-title">
+            <header className="gpu-selector__header">
+              <div>
+                <p className="gpu-selector__eyebrow">Secure Cloud · EU-RO-1 · one GPU</p>
+                <h2 id="gpu-selector-error-title">GPU inventory unavailable</h2>
+                <p role="alert">{gpuSelectorError}</p>
+              </div>
+              <Button tone="secondary" onClick={closeGpuSelector}>Close</Button>
+            </header>
+            <footer className="gpu-selector__footer">
+              <span>No Pod was started. A fresh native inventory receipt is required.</span>
+              <Button
+                tone="primary"
+                pending={gpuSelectorBusy}
+                onClick={() => { void prepareGpuSelector(false); }}
+              >
+                Retry GPU list
+              </Button>
+            </footer>
+          </section>
+        ) : gpuSelectorSnapshot === null ? (
           <section className="gpu-selector" role="dialog" aria-labelledby="gpu-selector-loading-title">
             <header className="gpu-selector__header">
               <div>
@@ -1741,7 +1793,7 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
                 <h2 id="gpu-selector-loading-title">Choose a GPU</h2>
                 <p>Loading the native inventory journal…</p>
               </div>
-              <Button tone="secondary" onClick={() => setGpuSelectorOpen(false)}>Close</Button>
+              <Button tone="secondary" onClick={closeGpuSelector}>Close</Button>
             </header>
           </section>
         ) : (
@@ -1750,7 +1802,7 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
             mode={gpuSelectorMode}
             busy={gpuSelectorBusy}
             returnFocusRef={gpuSelectorReturnFocusRef}
-            onClose={() => setGpuSelectorOpen(false)}
+            onClose={closeGpuSelector}
             onRefresh={() => { void prepareGpuSelector(false); }}
             onCommit={commitGpuSelectorChoice}
           />
