@@ -60,6 +60,7 @@ struct Registration {
 struct MouseHookContext {
     active: Arc<AtomicBool>,
     expected_hwnd: usize,
+    expected_controller_hwnd: usize,
     thread_id: u32,
     window_label: String,
     broker: TrustedInputBroker,
@@ -166,15 +167,20 @@ pub(crate) fn install(
         let mut parent_window = HWND::default();
         let parent_matches = unsafe {
             controller.ParentWindow(&mut parent_window).is_ok()
-                && parent_window.0 as usize == expected_hwnd
+                && controller_parent_is_authorized(
+                    expected_hwnd,
+                    parent_window.0 as usize,
+                    thread_id,
+                )
         };
         if !parent_matches {
             selector_for_hook.trace_qa(&format!(
-                "windows native input rejected parent hwnd={} expected={expected_hwnd}",
-                parent_window.0 as usize
+                "windows native input rejected parent hwnd={} expected_root={expected_hwnd} thread_id={thread_id}",
+                parent_window.0 as usize,
             ));
             return;
         }
+        let expected_controller_hwnd = parent_window.0 as usize;
 
         let active_for_accelerator = active_for_setup.clone();
         let destroyed_for_accelerator = destroyed_for_setup.clone();
@@ -196,7 +202,12 @@ pub(crate) fn install(
                 let mut controller_window = HWND::default();
                 let controller_matches = unsafe {
                     controller.ParentWindow(&mut controller_window).is_ok()
-                        && controller_window.0 as usize == expected_hwnd
+                        && controller_window.0 as usize == expected_controller_hwnd
+                        && controller_parent_is_authorized(
+                            expected_hwnd,
+                            controller_window.0 as usize,
+                            thread_id,
+                        )
                 };
                 if !controller_matches || !window_is_authorized(expected_hwnd, thread_id) {
                     return Ok(());
@@ -279,6 +290,7 @@ pub(crate) fn install(
             *context.borrow_mut() = Some(MouseHookContext {
                 active: active_for_setup.clone(),
                 expected_hwnd,
+                expected_controller_hwnd,
                 thread_id,
                 window_label: window_label.clone(),
                 broker: broker_for_hook.clone(),
@@ -337,7 +349,13 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, w_param: WPARAM, l_param: L
                     .trace_qa("windows mouse hook ignored inactive registration");
                 return;
             }
-            if !window_is_authorized(context.expected_hwnd, context.thread_id) {
+            if !window_is_authorized(context.expected_hwnd, context.thread_id)
+                || !controller_parent_is_authorized(
+                    context.expected_hwnd,
+                    context.expected_controller_hwnd,
+                    context.thread_id,
+                )
+            {
                 context
                     .selector_perf
                     .trace_qa("windows mouse hook ignored unauthorized window");
@@ -393,6 +411,35 @@ fn window_is_authorized(expected_hwnd: usize, expected_thread_id: u32) -> bool {
         }
         let focus = GetFocus();
         !focus.is_null() && GetAncestor(focus, GA_ROOT) == expected
+    }
+}
+
+fn controller_parent_is_authorized(
+    expected_hwnd: usize,
+    controller_hwnd: usize,
+    expected_thread_id: u32,
+) -> bool {
+    if expected_hwnd == 0
+        || controller_hwnd == 0
+        || unsafe { GetCurrentThreadId() } != expected_thread_id
+    {
+        return false;
+    }
+    let expected = expected_hwnd as windows_sys::Win32::Foundation::HWND;
+    let controller = controller_hwnd as windows_sys::Win32::Foundation::HWND;
+    unsafe {
+        if IsWindow(expected) == 0
+            || IsWindow(controller) == 0
+            || IsWindowVisible(controller) == 0
+            || IsWindowEnabled(controller) == 0
+            || GetAncestor(controller, GA_ROOT) != expected
+            || IsChild(expected, controller) == 0
+        {
+            return false;
+        }
+        let mut process_id = 0;
+        let owner_thread_id = GetWindowThreadProcessId(controller, &mut process_id);
+        owner_thread_id == expected_thread_id && process_id == GetCurrentProcessId()
     }
 }
 
