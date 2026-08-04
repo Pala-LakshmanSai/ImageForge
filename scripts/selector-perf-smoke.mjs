@@ -189,12 +189,43 @@ using System;
 using System.Runtime.InteropServices;
 public static class ImageForgePerfInput {
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public UIntPtr dwExtraInfo; }
+  [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public UIntPtr dwExtraInfo; }
+  [StructLayout(LayoutKind.Explicit)] public struct INPUT_UNION {
+    [FieldOffset(0)] public MOUSEINPUT mi;
+    [FieldOffset(0)] public KEYBDINPUT ki;
+  }
+  [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public INPUT_UNION u; }
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int command);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
-  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
-  [DllImport("user32.dll")] public static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
-  public const uint MOUSE_DOWN = 0x0002, MOUSE_UP = 0x0004, KEY_UP = 0x0002;
+  [DllImport("user32.dll")] public static extern uint SendInput(uint count, INPUT[] inputs, int size);
+  public const uint INPUT_MOUSE = 0, INPUT_KEYBOARD = 1, MOUSE_DOWN = 0x0002, MOUSE_UP = 0x0004, KEY_UP = 0x0002;
+  public static bool FocusWindow(IntPtr hWnd) {
+    ShowWindow(hWnd, 9);
+    BringWindowToTop(hWnd);
+    return SetForegroundWindow(hWnd);
+  }
+  public static void Click() {
+    var inputs = new INPUT[2];
+    inputs[0].type = INPUT_MOUSE;
+    inputs[0].u.mi.dwFlags = MOUSE_DOWN;
+    inputs[1].type = INPUT_MOUSE;
+    inputs[1].u.mi.dwFlags = MOUSE_UP;
+    if (SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>()) != inputs.Length) throw new InvalidOperationException("SendInput mouse failed");
+  }
+  public static void Key(ushort virtualKey) {
+    var inputs = new INPUT[2];
+    inputs[0].type = INPUT_KEYBOARD;
+    inputs[0].u.ki.wVk = virtualKey;
+    inputs[1].type = INPUT_KEYBOARD;
+    inputs[1].u.ki.wVk = virtualKey;
+    inputs[1].u.ki.dwFlags = KEY_UP;
+    if (SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>()) != inputs.Length) throw new InvalidOperationException("SendInput keyboard failed");
+  }
 }`;
 
 function windowsCommand(pid, action) {
@@ -204,7 +235,8 @@ ${WINDOWS_HELPER}
 $process = Get-Process -Id ${pid} -ErrorAction Stop
 $handle = $process.MainWindowHandle
 if ($handle -eq 0) { throw 'main window is unavailable' }
-[ImageForgePerfInput]::SetForegroundWindow($handle) | Out-Null
+[ImageForgePerfInput]::FocusWindow($handle) | Out-Null
+if ([ImageForgePerfInput]::GetForegroundWindow() -ne $handle) { throw 'main window could not be focused' }
 ${action}`;
   return run('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script]);
 }
@@ -217,11 +249,11 @@ function windowsMetrics(pid) {
 }
 
 function windowsClick(pid, location) {
-  windowsCommand(pid, `[ImageForgePerfInput]::SetCursorPos(${Math.round(location.x)}, ${Math.round(location.y)}) | Out-Null\n[ImageForgePerfInput]::mouse_event([ImageForgePerfInput]::MOUSE_DOWN,0,0,0,[UIntPtr]::Zero)\n[ImageForgePerfInput]::mouse_event([ImageForgePerfInput]::MOUSE_UP,0,0,0,[UIntPtr]::Zero)`);
+  windowsCommand(pid, `[ImageForgePerfInput]::SetCursorPos(${Math.round(location.x)}, ${Math.round(location.y)}) | Out-Null\n[ImageForgePerfInput]::Click()`);
 }
 
 function windowsKey(pid, virtualKey) {
-  windowsCommand(pid, `[ImageForgePerfInput]::keybd_event(${virtualKey},0,0,[UIntPtr]::Zero)\n[ImageForgePerfInput]::keybd_event(${virtualKey},0,[ImageForgePerfInput]::KEY_UP,[UIntPtr]::Zero)`);
+  windowsCommand(pid, `[ImageForgePerfInput]::Key(${virtualKey})`);
 }
 
 function windowMetrics(platform, pid) {
@@ -408,15 +440,14 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
         await waitForFile(resultPath, 20_000, child, `${action} launch ${launchIndex + 1}`);
       } else if (action === 'warm_open') {
         // Three close/open cycles are intentionally unrecorded warm-ups. The
-        // harness arms only after the final close, so those clicks cannot mint
-        // selector samples.
+        // harness explicitly leaves the sheet closed after the third open so
+        // the next native arm has one deterministic starting state.
         for (let warmup = 0; warmup < 3; warmup += 1) {
           clickAt(config.platform, child.pid, 'close', macInputHelperPath);
           await sleep(250);
           clickAt(config.platform, child.pid, 'center', macInputHelperPath);
           await sleep(400);
         }
-        clickAt(config.platform, child.pid, 'close', macInputHelperPath);
         await sleep(500);
         for (let ordinal = 1; ordinal <= 30; ordinal += 1) {
           await waitForNextArm();

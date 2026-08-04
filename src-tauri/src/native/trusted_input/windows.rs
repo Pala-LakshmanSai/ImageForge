@@ -137,6 +137,9 @@ pub(crate) fn install(
 ) -> tauri::Result<NativeInputHook> {
     let hwnd = window.hwnd()?;
     let expected_hwnd = hwnd.0 as usize;
+    selector_perf.trace_qa(&format!(
+        "windows native input setup started hwnd={expected_hwnd}"
+    ));
     let active = Arc::new(AtomicBool::new(false));
     let destroyed = Arc::new(AtomicBool::new(false));
     let registration = Arc::new(Mutex::new(None));
@@ -166,6 +169,10 @@ pub(crate) fn install(
                 && parent_window.0 as usize == expected_hwnd
         };
         if !parent_matches {
+            selector_for_hook.trace_qa(&format!(
+                "windows native input rejected parent hwnd={} expected={expected_hwnd}",
+                parent_window.0 as usize
+            ));
             return;
         }
 
@@ -246,6 +253,7 @@ pub(crate) fn install(
         if unsafe { controller.add_AcceleratorKeyPressed(&accelerator, &mut accelerator_token) }
             .is_err()
         {
+            selector_for_hook.trace_qa("windows native input rejected accelerator registration");
             return;
         }
 
@@ -260,6 +268,7 @@ pub(crate) fn install(
             )
         };
         if mouse_hook.is_null() {
+            selector_for_hook.trace_qa("windows native input rejected mouse hook registration");
             unsafe {
                 let _ = controller.remove_AcceleratorKeyPressed(accelerator_token);
             }
@@ -289,7 +298,11 @@ pub(crate) fn install(
                 thread_id,
             });
             active_for_setup.store(true, Ordering::Release);
+            selector_for_hook.trace_qa(&format!(
+                "windows native input registered thread_id={thread_id} hwnd={expected_hwnd}"
+            ));
         } else {
+            selector_for_hook.trace_qa("windows native input rejected registration state");
             MOUSE_HOOK_CONTEXT.with(|context| {
                 *context.borrow_mut() = None;
             });
@@ -315,16 +328,34 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, w_param: WPARAM, l_param: L
             let Some(context) = context_guard.as_ref() else {
                 return;
             };
-            if !context.active.load(Ordering::Acquire)
-                || !window_is_authorized(context.expected_hwnd, context.thread_id)
-            {
+            context
+                .selector_perf
+                .trace_qa("windows mouse hook received left button up");
+            if !context.active.load(Ordering::Acquire) {
+                context
+                    .selector_perf
+                    .trace_qa("windows mouse hook ignored inactive registration");
+                return;
+            }
+            if !window_is_authorized(context.expected_hwnd, context.thread_id) {
+                context
+                    .selector_perf
+                    .trace_qa("windows mouse hook ignored unauthorized window");
                 return;
             }
             let event = unsafe { &*(l_param as *const MOUSEHOOKSTRUCT) };
             let target = event.hwnd as usize;
             if !is_window_or_child(context.expected_hwnd, target) {
+                context.selector_perf.trace_qa(&format!(
+                    "windows mouse hook ignored target hwnd={target} expected={}",
+                    context.expected_hwnd
+                ));
                 return;
             }
+            context.selector_perf.trace_qa(&format!(
+                "windows mouse hook passed hwnd={} target={target}",
+                context.expected_hwnd
+            ));
             context.broker.record(
                 &context.window_label,
                 TrustedActivationKind::PrimaryPointerUp,

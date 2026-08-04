@@ -473,7 +473,13 @@ export function GpuSelectorPerfSmoke() {
           data-gpu-selector-perf-open="true"
           onClick={() => {
             if (action === 'warm_open' && warmupsRef.current > 0) {
-              setWarmupsRemaining((value) => Math.max(0, value - 1));
+              const remaining = Math.max(0, warmupsRef.current - 1);
+              setWarmupsRemaining(remaining);
+              // Leave the sheet closed after the last unrecorded warm-up so
+              // the native arm effect has one unambiguous closed state before
+              // the first measured open.
+              setOpen(remaining === 0 ? false : true);
+              return;
             }
             setOpen(true);
           }}
