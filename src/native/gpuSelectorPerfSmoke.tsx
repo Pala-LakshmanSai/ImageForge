@@ -243,6 +243,8 @@ export function GpuSelectorPerfSmoke() {
   const pendingRef = useRef<GpuSelectorPerfStartedEventV1 | null>(null);
   const reportedRef = useRef(false);
   const sizeReadyRef = useRef(false);
+  const listenerReadyRef = useRef(false);
+  const nativeWindowReadyRef = useRef(false);
   const mountedRef = useRef(true);
   const action = config.action;
   const maxSamples = action === 'cold_open' ? 1 : 30;
@@ -268,8 +270,17 @@ export function GpuSelectorPerfSmoke() {
 
   useEffect(() => {
     mountedRef.current = true;
+    sizeReadyRef.current = false;
+    listenerReadyRef.current = false;
+    nativeWindowReadyRef.current = false;
     let disposed = false;
     let unlisten: (() => void) | undefined;
+
+    const markReady = () => {
+      if (!listenerReadyRef.current || !nativeWindowReadyRef.current || disposed) return;
+      sizeReadyRef.current = true;
+      if (mountedRef.current) setCycle((value) => value + 1);
+    };
 
     const handleStarted = async (payload: unknown) => {
       try {
@@ -346,11 +357,25 @@ export function GpuSelectorPerfSmoke() {
       }
     };
 
-    void listen<unknown>('gpu-selector-perf-started-v1', (event) => {
-      void handleStarted(event.payload);
-    }).then((remove) => {
-      if (disposed) remove();
-      else unlisten = remove;
+    void Promise.all([
+      listen<unknown>('gpu-selector-perf-started-v1', (event) => {
+        void handleStarted(event.payload);
+      }),
+      listen<unknown>('gpu-selector-perf-error-v1', (event) => {
+        fail(event.payload);
+      }),
+    ]).then(([removeStarted, removeError]) => {
+      if (disposed) {
+        removeStarted();
+        removeError();
+      } else {
+        unlisten = () => {
+          removeStarted();
+          removeError();
+        };
+        listenerReadyRef.current = true;
+        markReady();
+      }
     }).catch(fail);
 
     void (async () => {
@@ -358,8 +383,8 @@ export function GpuSelectorPerfSmoke() {
         const appWindow = getCurrentWindow();
         await setExactViewport(appWindow, config.viewportWidth, config.viewportHeight);
         await appWindow.setFocus();
-        sizeReadyRef.current = true;
-        if (mountedRef.current) setCycle((value) => value + 1);
+        nativeWindowReadyRef.current = true;
+        markReady();
       } catch (caught) {
         fail(caught);
       }

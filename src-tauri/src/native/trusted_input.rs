@@ -102,6 +102,7 @@ fn activation_required() -> super::NativeError {
 mod macos {
     use super::{TrustedActivationKind, TrustedInputBroker};
     use crate::native::gpu_selector_perf::{GpuSelectorPerfHost, NativeSelectorInputKind};
+    use crate::native::NativeError;
     use block2::RcBlock;
     use objc2::runtime::AnyObject;
     use objc2::{rc::Retained, MainThreadMarker};
@@ -153,12 +154,14 @@ mod macos {
         let monitor = Arc::new(Mutex::new(None));
         let window_label = window.label().to_owned();
         let window_for_hook = window.clone();
+        let window_for_setup = window.clone();
         let active_for_hook = active.clone();
         let active_for_setup = active.clone();
         let destroyed_for_setup = destroyed.clone();
         let monitor_for_setup = monitor.clone();
         let broker_for_hook = broker.clone();
         let selector_for_hook = selector_perf.clone();
+        let selector_for_setup = selector_perf.clone();
         let window_number = Arc::new(Mutex::new(None::<isize>));
         let window_number_for_setup = window_number.clone();
         let window_ptr = Arc::new(Mutex::new(None::<usize>));
@@ -171,6 +174,13 @@ mod macos {
             let ns_window = webview.ns_window();
             if ns_window.is_null() {
                 active_for_setup.store(false, Ordering::Release);
+                selector_for_setup.report_qa_error(
+                    &window_for_setup,
+                    &NativeError::new(
+                        "gpu_selector_perf_native_input_unavailable",
+                        "The native selector input window is unavailable.",
+                    ),
+                );
                 return;
             }
             let number = unsafe { (&*ns_window.cast::<NSWindow>()).windowNumber() as isize };
@@ -245,6 +255,13 @@ mod macos {
                     Some(Retained::into_raw(token) as usize);
             } else {
                 active_for_setup.store(false, Ordering::Release);
+                selector_for_setup.report_qa_error(
+                    &window_for_setup,
+                    &NativeError::new(
+                        "gpu_selector_perf_native_input_unavailable",
+                        "The macOS native selector input monitor could not be registered.",
+                    ),
+                );
             }
         })?;
 

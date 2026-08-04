@@ -23,6 +23,7 @@ const MOUNTED_ROW_IDS_SHA256: &str =
 const QA_OPT_IN_ENV: &str = "IMAGEFORGE_GPU_SELECTOR_PERF_QA";
 const QA_SESSION_ENV: &str = "IMAGEFORGE_GPU_SELECTOR_PERF_QA_SESSION";
 const QA_EVENT: &str = "gpu-selector-perf-started-v1";
+const QA_ERROR_EVENT: &str = "gpu-selector-perf-error-v1";
 const ARM_VALID_FOR: Duration = Duration::from_secs(5);
 const MAX_DURATION_US: u64 = 10_000_000;
 type NativeWindowSize = (u32, u32);
@@ -245,7 +246,12 @@ impl GpuSelectorPerfHost {
         window: &WebviewWindow,
         input: GpuSelectorPerfArmV1,
     ) -> NativeResult<GpuSelectorPerfArmResultV1> {
-        require_main_foreground(window)?;
+        // Arming is only a QA capability and does not mint trusted input. The
+        // native callback below still requires the visible, focused,
+        // foreground window at the exact OS event. Allowing the harness to
+        // arm before its external focus helper runs avoids a startup race;
+        // focus loss still invalidates the arm through the window lifecycle.
+        require_main_visible(window)?;
         let native_window_size = native_window_size(window)?;
         self.arm_inner_with_native_size(input, Instant::now(), Some(native_window_size))
     }
@@ -289,24 +295,45 @@ impl GpuSelectorPerfHost {
         window: &WebviewWindow,
         input: NativeSelectorInputKind,
     ) -> NativeResult<Option<GpuSelectorPerfStartedEventV1>> {
-        require_main_foreground(window)?;
-        let native_window_size = native_window_size(window)?;
-        let event = self.start_native_inner_with_native_size(
-            input,
-            Instant::now(),
-            Some(native_window_size),
-        )?;
-        let Some(event) = event else {
-            return Ok(None);
-        };
-        if window.emit(QA_EVENT, &event).is_err() {
-            self.inner.lock().expect("selector perf lock").pending = None;
-            return Err(NativeError::new(
-                "gpu_selector_perf_event_failed",
-                "The selector performance sample event could not be delivered.",
-            ));
+        let result: NativeResult<Option<GpuSelectorPerfStartedEventV1>> = (|| {
+            require_main_foreground(window)?;
+            let native_window_size = native_window_size(window)?;
+            let event = self.start_native_inner_with_native_size(
+                input,
+                Instant::now(),
+                Some(native_window_size),
+            )?;
+            let Some(event) = event else {
+                return Ok(None);
+            };
+            if window.emit(QA_EVENT, &event).is_err() {
+                self.inner.lock().expect("selector perf lock").pending = None;
+                return Err(NativeError::new(
+                    "gpu_selector_perf_event_failed",
+                    "The selector performance sample event could not be delivered.",
+                ));
+            }
+            Ok(Some(event))
+        })();
+        if let Err(error) = &result {
+            self.report_qa_error(window, error);
         }
-        Ok(Some(event))
+        result
+    }
+
+    /// Report a native selector failure only to the explicitly opted-in QA
+    /// session.  Production launches have no QA session and therefore never
+    /// expose native diagnostics to the renderer.
+    pub(crate) fn report_qa_error(&self, window: &WebviewWindow, error: &NativeError) {
+        let qa_enabled = self
+            .inner
+            .lock()
+            .expect("selector perf lock")
+            .session
+            .is_some();
+        if qa_enabled {
+            let _ = window.emit(QA_ERROR_EVENT, error);
+        }
     }
 
     /// Invalidate an in-flight sample when the native window loses the
@@ -643,12 +670,20 @@ fn native_window_size(window: &WebviewWindow) -> NativeResult<NativeWindowSize> 
 }
 
 fn require_main_foreground(window: &WebviewWindow) -> NativeResult<()> {
+    require_main_visible(window)?;
+    if !window
+        .is_focused()
+        .map_err(|_| gpu_selector_perf_focus_required())?
+    {
+        return Err(gpu_selector_perf_focus_required());
+    }
+    Ok(())
+}
+
+fn require_main_visible(window: &WebviewWindow) -> NativeResult<()> {
     if window.label() != "main"
         || !window
             .is_visible()
-            .map_err(|_| gpu_selector_perf_focus_required())?
-        || !window
-            .is_focused()
             .map_err(|_| gpu_selector_perf_focus_required())?
         || window
             .is_minimized()
