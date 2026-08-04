@@ -25,6 +25,7 @@ const QA_SESSION_ENV: &str = "IMAGEFORGE_GPU_SELECTOR_PERF_QA_SESSION";
 const QA_EVENT: &str = "gpu-selector-perf-started-v1";
 const ARM_VALID_FOR: Duration = Duration::from_secs(5);
 const MAX_DURATION_US: u64 = 10_000_000;
+type NativeWindowSize = (u32, u32);
 
 pub const GPU_SELECTOR_PERF_ROW_IDS: [&str; 10] = [
     "current",
@@ -149,6 +150,7 @@ struct ArmedSample {
     ordinal: u8,
     viewport_width: u16,
     viewport_height: u16,
+    native_window_size: Option<NativeWindowSize>,
     expires_at: Instant,
 }
 
@@ -160,6 +162,7 @@ struct PendingSample {
     ordinal: u8,
     viewport_width: u16,
     viewport_height: u16,
+    native_window_size: Option<NativeWindowSize>,
     started_at: Instant,
 }
 
@@ -243,7 +246,8 @@ impl GpuSelectorPerfHost {
         input: GpuSelectorPerfArmV1,
     ) -> NativeResult<GpuSelectorPerfArmResultV1> {
         require_main_foreground(window)?;
-        self.arm_inner(input, Instant::now())
+        let native_window_size = native_window_size(window)?;
+        self.arm_inner_with_native_size(input, Instant::now(), Some(native_window_size))
     }
 
     /// Called by the native trusted pointer/keyboard hook.  There is no
@@ -258,7 +262,14 @@ impl GpuSelectorPerfHost {
         viewport_height: u16,
     ) -> NativeResult<GpuSelectorPerfStartedEventV1> {
         require_main_foreground(window)?;
-        let event = self.start_inner(action, viewport_width, viewport_height, Instant::now())?;
+        let native_window_size = native_window_size(window)?;
+        let event = self.start_inner_with_native_size(
+            action,
+            viewport_width,
+            viewport_height,
+            Instant::now(),
+            Some(native_window_size),
+        )?;
         if window.emit(QA_EVENT, &event).is_err() {
             self.inner.lock().expect("selector perf lock").pending = None;
             return Err(NativeError::new(
@@ -279,7 +290,12 @@ impl GpuSelectorPerfHost {
         input: NativeSelectorInputKind,
     ) -> NativeResult<Option<GpuSelectorPerfStartedEventV1>> {
         require_main_foreground(window)?;
-        let event = self.start_native_inner(input, Instant::now())?;
+        let native_window_size = native_window_size(window)?;
+        let event = self.start_native_inner_with_native_size(
+            input,
+            Instant::now(),
+            Some(native_window_size),
+        )?;
         let Some(event) = event else {
             return Ok(None);
         };
@@ -308,7 +324,9 @@ impl GpuSelectorPerfHost {
         input: GpuSelectorPerfCommitV1,
     ) -> NativeResult<GpuSelectorPerfSampleV1> {
         require_main_foreground(window)?;
-        let sample = self.commit_inner(input, Instant::now())?;
+        let native_window_size = native_window_size(window)?;
+        let sample =
+            self.commit_inner_with_native_size(input, Instant::now(), Some(native_window_size))?;
         self.record_sample(&sample)?;
         Ok(sample)
     }
@@ -332,6 +350,15 @@ impl GpuSelectorPerfHost {
         &self,
         input: GpuSelectorPerfArmV1,
         now: Instant,
+    ) -> NativeResult<GpuSelectorPerfArmResultV1> {
+        self.arm_inner_with_native_size(input, now, None)
+    }
+
+    fn arm_inner_with_native_size(
+        &self,
+        input: GpuSelectorPerfArmV1,
+        now: Instant,
+        native_window_size: Option<NativeWindowSize>,
     ) -> NativeResult<GpuSelectorPerfArmResultV1> {
         validate_arm(&input)?;
         let mut inner = self.inner.lock().expect("selector perf lock");
@@ -357,6 +384,7 @@ impl GpuSelectorPerfHost {
             ordinal: input.ordinal,
             viewport_width: input.viewport_width,
             viewport_height: input.viewport_height,
+            native_window_size,
             expires_at: now + ARM_VALID_FOR,
         });
         Ok(GpuSelectorPerfArmResultV1 {
@@ -372,6 +400,17 @@ impl GpuSelectorPerfHost {
         viewport_width: u16,
         viewport_height: u16,
         now: Instant,
+    ) -> NativeResult<GpuSelectorPerfStartedEventV1> {
+        self.start_inner_with_native_size(action, viewport_width, viewport_height, now, None)
+    }
+
+    fn start_inner_with_native_size(
+        &self,
+        action: GpuSelectorPerfActionV1,
+        viewport_width: u16,
+        viewport_height: u16,
+        now: Instant,
+        native_window_size: Option<NativeWindowSize>,
     ) -> NativeResult<GpuSelectorPerfStartedEventV1> {
         let mut inner = self.inner.lock().expect("selector perf lock");
         let session = inner.session.clone().ok_or_else(qa_disabled)?;
@@ -391,6 +430,12 @@ impl GpuSelectorPerfHost {
                 "The trusted selector input does not match the armed action.",
             ));
         }
+        if armed.native_window_size != native_window_size {
+            return Err(NativeError::new(
+                "gpu_selector_perf_input_invalid",
+                "The trusted selector input does not match the current native window.",
+            ));
+        }
         if inner.pending.is_some() {
             return Err(NativeError::new(
                 "gpu_selector_perf_busy",
@@ -405,6 +450,7 @@ impl GpuSelectorPerfHost {
             ordinal: armed.ordinal,
             viewport_width,
             viewport_height,
+            native_window_size,
             started_at: now,
         });
         Ok(GpuSelectorPerfStartedEventV1 {
@@ -424,6 +470,15 @@ impl GpuSelectorPerfHost {
         input: NativeSelectorInputKind,
         now: Instant,
     ) -> NativeResult<Option<GpuSelectorPerfStartedEventV1>> {
+        self.start_native_inner_with_native_size(input, now, None)
+    }
+
+    fn start_native_inner_with_native_size(
+        &self,
+        input: NativeSelectorInputKind,
+        now: Instant,
+        native_window_size: Option<NativeWindowSize>,
+    ) -> NativeResult<Option<GpuSelectorPerfStartedEventV1>> {
         let mut inner = self.inner.lock().expect("selector perf lock");
         let session = inner.session.clone().ok_or_else(qa_disabled)?;
         let Some(armed) = inner.armed.as_ref() else {
@@ -432,6 +487,13 @@ impl GpuSelectorPerfHost {
         if armed.expires_at <= now {
             inner.armed = None;
             return Ok(None);
+        }
+        if armed.native_window_size != native_window_size {
+            inner.armed = None;
+            return Err(NativeError::new(
+                "gpu_selector_perf_input_invalid",
+                "The trusted selector input does not match the current native window.",
+            ));
         }
         if !input.matches(armed.action) {
             return Ok(None);
@@ -451,6 +513,7 @@ impl GpuSelectorPerfHost {
             ordinal: armed.ordinal,
             viewport_width: armed.viewport_width,
             viewport_height: armed.viewport_height,
+            native_window_size,
             started_at: now,
         });
         Ok(Some(GpuSelectorPerfStartedEventV1 {
@@ -469,6 +532,15 @@ impl GpuSelectorPerfHost {
         &self,
         input: GpuSelectorPerfCommitV1,
         now: Instant,
+    ) -> NativeResult<GpuSelectorPerfSampleV1> {
+        self.commit_inner_with_native_size(input, now, None)
+    }
+
+    fn commit_inner_with_native_size(
+        &self,
+        input: GpuSelectorPerfCommitV1,
+        now: Instant,
+        native_window_size: Option<NativeWindowSize>,
     ) -> NativeResult<GpuSelectorPerfSampleV1> {
         if input.mounted_row_ids.len() != GPU_SELECTOR_PERF_ROW_IDS.len()
             || input
@@ -494,6 +566,12 @@ impl GpuSelectorPerfHost {
             return Err(NativeError::new(
                 "gpu_selector_perf_sample_invalid",
                 "The selector performance sample binding is invalid.",
+            ));
+        }
+        if pending.native_window_size != native_window_size {
+            return Err(NativeError::new(
+                "gpu_selector_perf_sample_invalid",
+                "The selector performance window changed before commit.",
             ));
         }
         let duration_us = now
@@ -552,6 +630,16 @@ impl GpuSelectorPerfHost {
         std::thread::sleep(Duration::from_millis(1));
         self.commit_inner(input, Instant::now())
     }
+}
+
+fn native_window_size(window: &WebviewWindow) -> NativeResult<NativeWindowSize> {
+    let size = window
+        .inner_size()
+        .map_err(|_| gpu_selector_perf_focus_required())?;
+    if size.width == 0 || size.height == 0 {
+        return Err(gpu_selector_perf_focus_required());
+    }
+    Ok((size.width, size.height))
 }
 
 fn require_main_foreground(window: &WebviewWindow) -> NativeResult<()> {
@@ -815,6 +903,70 @@ mod tests {
             .unwrap()
             .expect("matching native key should start the sample");
         assert_eq!(started.action, GpuSelectorPerfActionV1::KeyboardMove);
+    }
+
+    #[test]
+    fn native_window_size_change_invalidates_arm_and_pending_sample() {
+        let host = GpuSelectorPerfHost::for_test();
+        host.arm_inner_with_native_size(
+            arm(GpuSelectorPerfActionV1::WarmOpen),
+            Instant::now(),
+            Some((1280, 720)),
+        )
+        .unwrap();
+        let start = host
+            .start_native_inner_with_native_size(
+                NativeSelectorInputKind::PrimaryMouseUp,
+                Instant::now(),
+                Some((1440, 900)),
+            )
+            .unwrap_err();
+        assert_eq!(start.code, "gpu_selector_perf_input_invalid");
+        assert!(host
+            .start_native_inner_with_native_size(
+                NativeSelectorInputKind::PrimaryMouseUp,
+                Instant::now(),
+                Some((1280, 720)),
+            )
+            .unwrap()
+            .is_none());
+
+        host.arm_inner_with_native_size(
+            arm(GpuSelectorPerfActionV1::WarmOpen),
+            Instant::now(),
+            Some((1280, 720)),
+        )
+        .unwrap();
+        let started = host
+            .start_native_inner_with_native_size(
+                NativeSelectorInputKind::PrimaryMouseUp,
+                Instant::now(),
+                Some((1280, 720)),
+            )
+            .unwrap()
+            .expect("matching native pointer should start the sample");
+        let commit = host.commit_inner_with_native_size(
+            GpuSelectorPerfCommitV1 {
+                qa_session_id: started.qa_session_id.clone(),
+                sample_id: started.sample_id.clone(),
+                mounted_row_ids: rows(),
+            },
+            Instant::now() + Duration::from_millis(1),
+            Some((1440, 900)),
+        );
+        assert_eq!(commit.unwrap_err().code, "gpu_selector_perf_sample_invalid");
+        let committed = host
+            .commit_inner_with_native_size(
+                GpuSelectorPerfCommitV1 {
+                    qa_session_id: started.qa_session_id,
+                    sample_id: started.sample_id,
+                    mounted_row_ids: rows(),
+                },
+                Instant::now() + Duration::from_millis(1),
+                Some((1280, 720)),
+            )
+            .unwrap();
+        assert!(committed.duration_us >= 1);
     }
 
     #[test]
