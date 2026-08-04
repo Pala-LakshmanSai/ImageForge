@@ -309,7 +309,10 @@ function logOccurrences(path, needle) {
 
 async function waitForArm(logPath, expectedCount, child, description) {
   const needle = 'selector arm accepted';
-  const deadline = Date.now() + 10_000;
+  // Exact native viewport settling may take the same 30-second startup budget
+  // used by windowMetrics; the five-second native arm TTL begins only after
+  // this acceptance trace, so waiting here does not weaken the gate.
+  const deadline = Date.now() + 30_000;
   while (logOccurrences(logPath, needle) < expectedCount) {
     if (child.exitCode !== null) fail(`${description} exited ${child.exitCode} before native arm ${expectedCount}`);
     if (Date.now() >= deadline) fail(`${description} timed out waiting for native arm ${expectedCount}`);
