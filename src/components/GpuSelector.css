@@ -10,9 +10,11 @@
   overflow: hidden;
   border: 1px solid var(--border-bright);
   border-radius: 26px;
-  background: rgba(12, 15, 33, 0.97);
+  /* This surface is visually opaque. Sampling and blurring the full app
+     backdrop forced an expensive first compositor pass in WKWebView and made
+     cold selector input miss the installed 100 ms feedback budget. */
+  background: #0c0f21;
   box-shadow: 0 30px 90px rgba(0, 0, 0, 0.58), inset 0 1px 0 rgba(255, 255, 255, 0.045);
-  backdrop-filter: blur(28px) saturate(125%);
 }
 
 .gpu-selector__header {
