@@ -583,11 +583,12 @@ export function GpuSelectorPerfSmoke() {
                 height: '100vh',
                 border: 0,
                 padding: 0,
-                // Keep a nonzero composited paint so WebKit does not remove
-                // the invisible QA target from hit testing during warm-ups.
-                background: 'rgba(0, 0, 0, 0.001)',
+                // Give WebKit one real painted layer for hit testing. Combining
+                // a nearly transparent background with element opacity made
+                // the effective alpha too small for macOS compositing.
+                background: 'rgba(0, 0, 0, 0.01)',
                 color: 'transparent',
-                opacity: 0.01,
+                opacity: 1,
               }}
             >
               Close QA sheet
