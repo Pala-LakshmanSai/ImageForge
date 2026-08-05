@@ -363,28 +363,7 @@ impl GpuSelectorPerfHost {
                 self.emit_warmup_input_if_needed(window, input)?;
                 return Ok(None);
             };
-            // WebView2's AcceleratorKeyPressed and WH_MOUSE callbacks are
-            // thread-affine native hooks.  Do not synchronously call Tauri's
-            // WebView emitter from those callbacks: a second authenticated
-            // notification can otherwise race the blocked emit and consume
-            // the one-use arm while the renderer never receives its event.
-            // The sample identity and monotonic timestamp were already
-            // generated and bound above the dispatch boundary.
-            let event_for_emit = event.clone();
-            let window_for_emit = window.clone();
-            let host_for_emit = self.clone();
-            window
-                .run_on_main_thread(move || {
-                    if window_for_emit.emit(QA_EVENT, &event_for_emit).is_err() {
-                        host_for_emit.clear_pending_sample(&event_for_emit.sample_id);
-                        let error = gpu_selector_perf_event_failed();
-                        host_for_emit.report_qa_error(&window_for_emit, &error);
-                    }
-                })
-                .map_err(|_| {
-                    self.clear_pending_sample(&event.sample_id);
-                    gpu_selector_perf_event_failed()
-                })?;
+            self.emit_started_event(window, &event)?;
             Ok(Some(event))
         })();
         match &result {
@@ -405,6 +384,52 @@ impl GpuSelectorPerfHost {
             self.report_qa_error(window, error);
         }
         result
+    }
+
+    fn emit_started_event(
+        &self,
+        window: &WebviewWindow,
+        event: &GpuSelectorPerfStartedEventV1,
+    ) -> NativeResult<()> {
+        #[cfg(target_os = "macos")]
+        {
+            // The NSEvent monitor rejects the input unless it is already on
+            // the AppKit main thread. Re-queueing here lets WKWebView process
+            // the same mouse-up and cold-mount the selector before the start
+            // event, forcing the gate to wait two extra frames after paint.
+            // Emit before returning the event to WebKit so the native start,
+            // React transition, and double-rAF acknowledgement stay ordered.
+            window.emit(QA_EVENT, event).map_err(|_| {
+                self.clear_pending_sample(&event.sample_id);
+                gpu_selector_perf_event_failed()
+            })?;
+            Ok(())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            // WebView2's AcceleratorKeyPressed and WH_MOUSE callbacks are
+            // thread-affine native hooks. Do not synchronously call Tauri's
+            // WebView emitter from those callbacks: a second authenticated
+            // notification can otherwise race the blocked emit and consume
+            // the one-use arm while the renderer never receives its event.
+            // The sample identity and monotonic timestamp were already
+            // generated and bound above the dispatch boundary.
+            let event_for_emit = event.clone();
+            let window_for_emit = window.clone();
+            let host_for_emit = self.clone();
+            window
+                .run_on_main_thread(move || {
+                    if window_for_emit.emit(QA_EVENT, &event_for_emit).is_err() {
+                        host_for_emit.clear_pending_sample(&event_for_emit.sample_id);
+                        let error = gpu_selector_perf_event_failed();
+                        host_for_emit.report_qa_error(&window_for_emit, &error);
+                    }
+                })
+                .map_err(|_| {
+                    self.clear_pending_sample(&event.sample_id);
+                    gpu_selector_perf_event_failed()
+                })
+        }
     }
 
     fn emit_warmup_input_if_needed(

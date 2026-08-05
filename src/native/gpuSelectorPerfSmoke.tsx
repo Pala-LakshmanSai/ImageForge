@@ -277,6 +277,8 @@ export function GpuSelectorPerfSmoke() {
   const scheduleWarmArmRef = useRef<() => void>(() => undefined);
   const probeWarmupReadyRef = useRef<() => void>(() => undefined);
   const action = config.action;
+  const nativeEventOwnsColdTransition = action === 'cold_open'
+    && /mac/iu.test(window.navigator.platform);
   const maxSamples = action === 'cold_open' ? 1 : 30;
   const readySnapshot = useMemo(() => fixtureSnapshot('ready'), []);
 
@@ -335,6 +337,15 @@ export function GpuSelectorPerfSmoke() {
         armedRef.current = false;
         setArmState('idle');
         pendingRef.current = started;
+        if (nativeEventOwnsColdTransition) {
+          // The trusted native event owns the QA-only cold transition. Letting
+          // the DOM click mount first can block WKWebView's event delivery and
+          // make the timer wait another double-rAF after the sheet has already
+          // painted. This still starts from a never-mounted selector and uses
+          // the same React state transition as the production click path.
+          openRef.current = true;
+          setOpen(true);
+        }
         await nextPaint();
         const deadline = Date.now() + 2_000;
         let mounted = rowsFromDom();
@@ -656,6 +667,9 @@ export function GpuSelectorPerfSmoke() {
             // Native pointer warm-ups arrive through the authenticated Tauri
             // event. Keyboard activation still needs this DOM fallback.
             if (event.detail === 0 && advanceWarmupInput()) return;
+            // macOS cold_open is measured from the authenticated native event
+            // above; the corresponding DOM click must not race an early mount.
+            if (nativeEventOwnsColdTransition) return;
             if (
               action === 'warm_open'
               && (
