@@ -322,6 +322,9 @@ def test_runtime_identity_contract_is_packaged_strict_complete_and_not_overridab
     assert packaged == root_contract
     provider_ids = {item.providerGpuId for item in packaged.identities}
     assert {
+        "NVIDIA A100 80GB PCIe",
+        "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+        "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
         "NVIDIA RTX PRO 4500 Blackwell",
         "NVIDIA RTX PRO 4000 Blackwell",
     }.issubset(provider_ids)

@@ -295,6 +295,38 @@ describe('GpuSelector', () => {
     expect(onRefresh).not.toHaveBeenCalled();
   });
 
+  it('renders the newly approved exact A100 and RTX PRO 6000 offers', () => {
+    renderSelector(snapshot({
+      offers: [
+        offer({
+          gpuId: 'NVIDIA A100 80GB PCIe',
+          policyKey: 'a100_pcie',
+          displayName: 'A100 PCIe',
+          memoryGb: 80,
+          hourlyPriceMicroUsd: 1_390_000,
+        }),
+        offer({
+          gpuId: 'NVIDIA RTX PRO 6000 Blackwell Server Edition',
+          policyKey: 'rtx_pro_6000_blackwell_server',
+          displayName: 'RTX PRO 6000 Blackwell Server Edition',
+          memoryGb: 96,
+          hourlyPriceMicroUsd: 2_090_000,
+        }),
+        offer({
+          gpuId: 'NVIDIA RTX PRO 6000 Blackwell Workstation Edition',
+          policyKey: 'rtx_pro_6000_blackwell_workstation',
+          displayName: 'RTX PRO 6000 Blackwell Workstation Edition',
+          memoryGb: 96,
+          hourlyPriceMicroUsd: 1_890_000,
+        }),
+      ],
+    }));
+    expect(screen.getByRole('radio', { name: /A100 PCIe/i })).toBeVisible();
+    expect(screen.getByRole('radio', { name: /RTX PRO 6000 Blackwell Server Edition/i })).toBeVisible();
+    expect(screen.getByRole('radio', { name: /RTX PRO 6000 Blackwell Workstation Edition/i })).toBeVisible();
+    expect(screen.queryByRole('radio', { name: /B200/i })).not.toBeInTheDocument();
+  });
+
   it('mounts the exact deterministic 10-row fixture and stays below the 20-row cap', () => {
     const policies = [
       ['rtx_4090', 'NVIDIA GeForce RTX 4090', 'RTX 4090', 24],

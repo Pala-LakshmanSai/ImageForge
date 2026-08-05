@@ -41,15 +41,19 @@ Approved IDs:
 - `NVIDIA L4`
 - `NVIDIA RTX A4500`
 - `NVIDIA RTX 4000 Ada Generation`
+- `NVIDIA A100 80GB PCIe`
+- `NVIDIA RTX PRO 6000 Blackwell Server Edition`
+- `NVIDIA RTX PRO 6000 Blackwell Workstation Edition`
 - RTX PRO 4500 Blackwell (use the exact catalog ID)
 - RTX PRO 4000 Blackwell (use the exact catalog ID)
 - `NVIDIA RTX 2000 Ada Generation` (slow emergency opt-in only)
 
 The current studio profile targets `EU-RO-1`. Its observed cold-start priority
 is RTX 4090, RTX PRO 4500 Blackwell, RTX 5090, RTX PRO 4000 Blackwell, L4, RTX
-A4500, and RTX 4000 Ada. RTX 2000 Ada is an explicitly labeled slow/emergency
-fallback. Intersect this profile with the exact IDs and availability returned by
-the live catalog; do not manufacture a new GPU ID from its display label.
+A4500, RTX 4000 Ada, A100 80GB PCIe, and the two RTX PRO 6000 Blackwell
+editions. RTX 2000 Ada is an explicitly labeled slow/emergency fallback.
+Intersect this profile with the exact IDs and availability returned by the live
+catalog; do not manufacture a new GPU ID from its display label.
 
 After comparable benchmarks exist, rank by estimated whole-batch cost, not
 hourly price alone.
@@ -58,8 +62,8 @@ documented at roughly 13 GB, but each must pass the real 1280x720 smoke gate.
 
 RTX 2000 Ada is the only emergency opt-in because its throughput may be
 impractical for 300-450 images. Never include it in an ordinary create request.
-B200, RTX PRO 6000 variants, A40/A6000, L40/L40S, and every GPU not listed above
-remain excluded even if the catalog reports stock.
+B200, A40/A6000, L40/L40S, and every GPU not listed above remain excluded even if
+the catalog reports stock.
 
 The worker image and catalog/create constraints require CUDA 13.0 or newer so
 the same immutable image covers both Ada/Ampere fallbacks and RTX 50/RTX PRO

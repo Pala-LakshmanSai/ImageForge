@@ -44,11 +44,12 @@ application took 30-60 minutes to become usable.
   connect to the resulting worker without copying a Pod ID or proxy URL.
 - AC-2: Start selection is fixed to EU-RO-1 Secure Cloud and the approved
   ordinary ladder: RTX 4090, RTX PRO 4500 Blackwell, RTX 5090, RTX PRO 4000
-  Blackwell, L4, RTX A4500, and RTX 4000 Ada. RTX 2000 Ada is a visibly slow,
+  Blackwell, L4, RTX A4500, RTX 4000 Ada, A100 80GB PCIe, and the RTX PRO 6000
+  Blackwell Server and Workstation editions. RTX 2000 Ada is a visibly slow,
   opt-in emergency only. Current catalog availability and price are evaluated,
   and the final choice resolves at creation time through RunPod's ordered
-  fallback. It chooses exactly one GPU and never silently adds B200, RTX PRO
-  6000, A40/A6000, L40/L40S, or another unapproved type.
+  fallback. It chooses exactly one GPU and never silently adds B200, A40/A6000,
+  L40/L40S, or another unapproved type.
 - AC-3: Stop terminates compute only after an explicit confirmation. No timer,
   background monitor, or completed-job event can terminate a Pod.
 - AC-4: The app parses, previews, and submits any finite ordered prompt list,

@@ -16,6 +16,27 @@
       "minimumComputeCapability": { "major": 12, "minor": 0 }
     },
     {
+      "providerGpuId": "NVIDIA A100 80GB PCIe",
+      "cudaNames": ["NVIDIA A100 80GB PCIe", "NVIDIA A100-PCIE-80GB"],
+      "pciDeviceIds": ["0x20b5"],
+      "minimumMemoryBytes": 68719476736,
+      "minimumComputeCapability": { "major": 8, "minor": 0 }
+    },
+    {
+      "providerGpuId": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "cudaNames": ["NVIDIA RTX PRO 6000 Blackwell Server Edition"],
+      "pciDeviceIds": ["0x2bb5"],
+      "minimumMemoryBytes": 68719476736,
+      "minimumComputeCapability": { "major": 12, "minor": 0 }
+    },
+    {
+      "providerGpuId": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "cudaNames": ["NVIDIA RTX PRO 6000 Blackwell Workstation Edition"],
+      "pciDeviceIds": ["0x2bb1"],
+      "minimumMemoryBytes": 68719476736,
+      "minimumComputeCapability": { "major": 12, "minor": 0 }
+    },
+    {
       "providerGpuId": "NVIDIA RTX PRO 4500 Blackwell",
       "cudaNames": [
         "NVIDIA RTX PRO 4500 Blackwell",

@@ -6,6 +6,9 @@ export const PRIMARY_APPROVED_GPU_IDS = [
   "NVIDIA L4",
   "NVIDIA RTX A4500",
   "NVIDIA RTX 4000 Ada Generation",
+  "NVIDIA A100 80GB PCIe",
+  "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+  "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
 ] as const;
 
 export const EMERGENCY_GPU_IDS = [

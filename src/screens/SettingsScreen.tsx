@@ -157,7 +157,7 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
             </div>
             <div className="setting-rows pod-preferences">
               <label className="select-row"><span><strong>GPU preference</strong><small>Ranks the compatible pool; it never pins one GPU model.</small></span><select value={state.settings.gpuPreference} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'gpuPreference', value: event.target.value as 'best_value' | 'fastest' })}><option value="best_value">Best whole-batch value</option><option value="fastest">Fastest measured</option></select></label>
-              <label className="toggle-row"><span><strong>Slow emergency RTX 2000 Ada</strong><small>Add only as the final fallback after the seven ordinary EU-RO-1 candidates.</small></span><input type="checkbox" checked={state.settings.slowEmergencyGpuEnabled} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'slowEmergencyGpuEnabled', value: event.target.checked })} /><i /></label>
+              <label className="toggle-row"><span><strong>Slow emergency RTX 2000 Ada</strong><small>Add only as the final fallback after the ten ordinary EU-RO-1 candidates.</small></span><input type="checkbox" checked={state.settings.slowEmergencyGpuEnabled} onChange={(event) => dispatch({ type: 'SET_SETTING', key: 'slowEmergencyGpuEnabled', value: event.target.checked })} /><i /></label>
             </div>
             {state.pod.matchingPodIds.length > 1 ? (
               <div className="duplicate-pod-card" role="alert"><AlertTriangle size={19} /><div><strong>Duplicate hourly spend detected</strong><small>{state.pod.matchingPodIds.join(' · ')}. Neither Pod will be silently deleted.</small></div></div>
@@ -175,7 +175,7 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
                 <div><dt>Health timeout</dt><dd>12 seconds · 2 misses</dd></div>
                 <div><dt>Diagnostics</dt><dd>Prompt + secret logging off</dd></div>
               </dl>
-              <p>EU-RO-1 cold order: RTX 4090, RTX PRO 4500 Blackwell, RTX 5090, RTX PRO 4000 Blackwell, L4, RTX A4500, and RTX 4000 Ada. RTX 2000 Ada is slow emergency-only.</p>
+              <p>EU-RO-1 cold order includes RTX 4090, RTX PRO 4500/4000 Blackwell, RTX 5090, L4, RTX A4500, RTX 4000 Ada, A100 PCIe, and both RTX PRO 6000 Blackwell editions. RTX 2000 Ada is slow emergency-only; B200 remains excluded.</p>
             </details>
           </section>
 

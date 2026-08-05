@@ -16,6 +16,9 @@ export const EU_RO_ORDINARY_GPUS = [
   'L4',
   'RTX A4500',
   'RTX 4000 Ada',
+  'A100 PCIe',
+  'RTX PRO 6000 Blackwell Server Edition',
+  'RTX PRO 6000 Blackwell Workstation Edition',
 ] as const;
 
 // These are the production bindings validated by the paid EU-RO-1 smoke and
@@ -197,7 +200,7 @@ function podSteps(policy: GpuSelectionPolicy): Array<Omit<PodLifecycleUpdate, 'p
   const selected = selectionFor(policy);
   const fallbackDetail = policy.allowSlowEmergency
     ? ' · RTX 2000 Ada enabled as the final slow emergency fallback'
-    : ' · seven ordinary EU-RO-1 candidates';
+    : ' · ten ordinary EU-RO-1 candidates';
   return [
     {
       at: 260,

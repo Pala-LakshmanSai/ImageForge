@@ -7,6 +7,7 @@ import {
   GPU_POLICY,
   RunPodLifecycleController,
   approveCatalogGpu,
+  approveManagedPodGpu,
   createRunPodClientConfig,
   staticGpuPolicy,
   type RunPodClientConfig,
@@ -221,6 +222,9 @@ describe("EU-RO-1 GPU policy", () => {
         "l4",
         "rtx_a4500",
         "rtx_4000_ada",
+        "a100_pcie",
+        "rtx_pro_6000_blackwell_server",
+        "rtx_pro_6000_blackwell_workstation",
       ],
     );
     assert.equal(
@@ -266,6 +270,39 @@ describe("EU-RO-1 GPU policy", () => {
       ),
       null,
     );
+    for (const candidate of [
+      {
+        id: "NVIDIA A100 80GB PCIe",
+        name: "A100 PCIe",
+        memoryGb: 80,
+        policyKey: "a100_pcie",
+      },
+      {
+        id: "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+        name: "RTX PRO 6000 Blackwell Server Edition",
+        memoryGb: 96,
+        policyKey: "rtx_pro_6000_blackwell_server",
+      },
+      {
+        id: "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+        name: "RTX PRO 6000 Blackwell Workstation Edition",
+        memoryGb: 96,
+        policyKey: "rtx_pro_6000_blackwell_workstation",
+      },
+    ]) {
+      assert.equal(
+        approveCatalogGpu({ ...candidate, manufacturer: "NVIDIA" }, false)?.policyKey,
+        candidate.policyKey,
+      );
+      assert.equal(
+        approveManagedPodGpu(candidate.id, candidate.name)?.policyKey,
+        candidate.policyKey,
+      );
+      assert.equal(
+        approveCatalogGpu({ ...candidate, manufacturer: "NVIDIA", memoryGb: 32 }, false),
+        null,
+      );
+    }
   });
 
   it("allows only RTX 2000 Ada behind emergency opt-in", () => {

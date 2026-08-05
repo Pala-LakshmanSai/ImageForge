@@ -69,7 +69,8 @@ secret references; user credentials remain in the OS vault.
 ## EU-RO-1 GPU policy
 
 The ordinary cold-start order is RTX 4090, RTX PRO 4500 Blackwell, RTX 5090,
-RTX PRO 4000 Blackwell, L4, RTX A4500, and RTX 4000 Ada. Unknown Blackwell IDs
+RTX PRO 4000 Blackwell, L4, RTX A4500, RTX 4000 Ada, A100 80GB PCIe, and both
+RTX PRO 6000 Blackwell editions. Unknown Blackwell IDs
 are never manufactured: the live catalog display name is allowlisted and its
 exact returned ID is passed to creation. Candidates must be NVIDIA, at least
 16 GB, CUDA 13.0 compatible, Secure Cloud, one-GPU Pod stock in EU-RO-1.
@@ -77,8 +78,7 @@ exact returned ID is passed to creation. Candidates must be NVIDIA, at least
 RTX 2000 Ada is the only slow emergency candidate and requires the explicit
 `allowEmergencyGpuTier` setting. An existing managed RTX 2000 Ada remains
 visible and explicitly stoppable after opt-out, but is never reused. A40, RTX
-A6000, L40, L40S, B200, and RTX PRO 6000 variants are not in the studio
-allowlist. Comparable benchmark profiles
+A6000, L40, L40S, and B200 are not in the studio allowlist. Comparable benchmark profiles
 must match the pinned model revision, BF16, 1280x720, four steps, guidance 1.0,
 JPEG 95, and the exact software image.
 Ranking then uses:

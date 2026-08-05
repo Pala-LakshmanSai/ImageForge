@@ -1670,16 +1670,24 @@ impl RunPodTransport {
             };
             let manufacturer = gpu.get("manufacturer").and_then(Value::as_str);
             let memory = gpu.get("memory").and_then(Value::as_f64);
-            let Some(canonical_name) = canonical_dynamic_gpu_name(name) else {
+            let canonical_name = canonical_dynamic_gpu_name(name);
+            let static_approved = approved_gpu_id(id);
+            if !static_approved && canonical_name.is_none() {
                 continue;
-            };
+            }
+            // Exact static IDs, including the 80/96 GB additions, are
+            // validated by `approved_gpu_id` and the native inventory parser.
+            // This map intentionally stores only the older dynamic Blackwell
+            // IDs, whose catalog memory contract is 16..=32 GB.
+            let memory_is_approved = memory.is_some_and(|memory| (16.0..=32.0).contains(&memory));
             if manufacturer.is_some_and(|value| normalize_catalog_name(value) == "NVIDIA")
-                && memory.is_some_and(|memory| (16.0..=32.0).contains(&memory))
+                && memory_is_approved
                 && safe_gpu_identifier(id)
-                && !id.to_ascii_uppercase().contains("RTX PRO 6000")
                 && id != "NVIDIA B200"
             {
-                approved.insert(id.to_owned(), canonical_name.to_owned());
+                if let Some(canonical_name) = canonical_name {
+                    approved.insert(id.to_owned(), canonical_name.to_owned());
+                }
             }
         }
         *self
@@ -3253,6 +3261,9 @@ fn approved_gpu_id(value: &str) -> bool {
         "NVIDIA L4",
         "NVIDIA RTX A4500",
         "NVIDIA RTX 4000 Ada Generation",
+        "NVIDIA A100 80GB PCIe",
+        "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+        "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
         EMERGENCY_GPU_ID,
     ];
     STATIC.contains(&value)
@@ -3364,6 +3375,9 @@ mod tests {
             Some(create_body(&[
                 "NVIDIA GeForce RTX 4090",
                 "NVIDIA GeForce RTX 5090",
+                "NVIDIA A100 80GB PCIe",
+                "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+                "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
             ])),
         );
         assert!(ValidatedRequest::try_from(create).is_ok());
@@ -4006,6 +4020,31 @@ mod tests {
             &transport.dynamic_catalog_for_pod("abc123xy").unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn expanded_static_gpu_ids_are_createable_but_b200_is_not() {
+        let temporary = tempfile::tempdir().unwrap();
+        let transport = RunPodTransport::new_for_test(
+            Arc::new(MemoryVault::default()),
+            temporary.path().join("marker"),
+        )
+        .unwrap();
+        for gpu_id in [
+            "NVIDIA A100 80GB PCIe",
+            "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+            "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+        ] {
+            assert!(
+                transport
+                    .validate_create_gpu_policy(Some(&create_body(&[gpu_id])))
+                    .is_ok(),
+                "{gpu_id}"
+            );
+        }
+        assert!(transport
+            .validate_create_gpu_policy(Some(&create_body(&["NVIDIA B200"])))
+            .is_err());
     }
 
     #[test]

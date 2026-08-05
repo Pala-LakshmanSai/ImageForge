@@ -192,6 +192,8 @@ struct Policy {
     exact_ids: &'static [&'static str],
     priority: u8,
     emergency: bool,
+    minimum_memory_gb: u16,
+    maximum_memory_gb: u16,
     expected_memory_gb: u16,
 }
 
@@ -202,6 +204,8 @@ const POLICIES: &[Policy] = &[
         exact_ids: &["NVIDIA GeForce RTX 4090"],
         priority: 0,
         emergency: false,
+        minimum_memory_gb: 16,
+        maximum_memory_gb: 32,
         expected_memory_gb: 24,
     },
     Policy {
@@ -210,6 +214,8 @@ const POLICIES: &[Policy] = &[
         exact_ids: &[],
         priority: 1,
         emergency: false,
+        minimum_memory_gb: 16,
+        maximum_memory_gb: 32,
         expected_memory_gb: 32,
     },
     Policy {
@@ -218,6 +224,8 @@ const POLICIES: &[Policy] = &[
         exact_ids: &["NVIDIA GeForce RTX 5090"],
         priority: 2,
         emergency: false,
+        minimum_memory_gb: 16,
+        maximum_memory_gb: 32,
         expected_memory_gb: 32,
     },
     Policy {
@@ -226,6 +234,8 @@ const POLICIES: &[Policy] = &[
         exact_ids: &[],
         priority: 3,
         emergency: false,
+        minimum_memory_gb: 16,
+        maximum_memory_gb: 32,
         expected_memory_gb: 24,
     },
     Policy {
@@ -234,6 +244,8 @@ const POLICIES: &[Policy] = &[
         exact_ids: &["NVIDIA L4"],
         priority: 4,
         emergency: false,
+        minimum_memory_gb: 16,
+        maximum_memory_gb: 32,
         expected_memory_gb: 24,
     },
     Policy {
@@ -242,6 +254,8 @@ const POLICIES: &[Policy] = &[
         exact_ids: &["NVIDIA RTX A4500"],
         priority: 5,
         emergency: false,
+        minimum_memory_gb: 16,
+        maximum_memory_gb: 32,
         expected_memory_gb: 20,
     },
     Policy {
@@ -250,7 +264,39 @@ const POLICIES: &[Policy] = &[
         exact_ids: &["NVIDIA RTX 4000 Ada Generation"],
         priority: 6,
         emergency: false,
+        minimum_memory_gb: 16,
+        maximum_memory_gb: 32,
         expected_memory_gb: 20,
+    },
+    Policy {
+        key: "a100_pcie",
+        display_name: "A100 PCIe",
+        exact_ids: &["NVIDIA A100 80GB PCIe"],
+        priority: 7,
+        emergency: false,
+        minimum_memory_gb: 64,
+        maximum_memory_gb: 128,
+        expected_memory_gb: 80,
+    },
+    Policy {
+        key: "rtx_pro_6000_blackwell_server",
+        display_name: "RTX PRO 6000 Blackwell Server Edition",
+        exact_ids: &["NVIDIA RTX PRO 6000 Blackwell Server Edition"],
+        priority: 8,
+        emergency: false,
+        minimum_memory_gb: 64,
+        maximum_memory_gb: 128,
+        expected_memory_gb: 96,
+    },
+    Policy {
+        key: "rtx_pro_6000_blackwell_workstation",
+        display_name: "RTX PRO 6000 Blackwell Workstation Edition",
+        exact_ids: &["NVIDIA RTX PRO 6000 Blackwell Workstation Edition"],
+        priority: 9,
+        emergency: false,
+        minimum_memory_gb: 64,
+        maximum_memory_gb: 128,
+        expected_memory_gb: 96,
     },
     Policy {
         key: "rtx_2000_ada",
@@ -258,6 +304,8 @@ const POLICIES: &[Policy] = &[
         exact_ids: &["NVIDIA RTX 2000 Ada Generation"],
         priority: 100,
         emergency: true,
+        minimum_memory_gb: 16,
+        maximum_memory_gb: 32,
         expected_memory_gb: 16,
     },
 ];
@@ -2073,7 +2121,7 @@ fn policy_for(
 ) -> Option<&'static Policy> {
     POLICIES.iter().find(|policy| {
         (!policy.emergency || include_emergency_tier)
-            && (16..=32).contains(&memory_gb)
+            && (policy.minimum_memory_gb..=policy.maximum_memory_gb).contains(&memory_gb)
             && if policy.exact_ids.is_empty() {
                 name == policy.display_name
             } else {
@@ -3132,6 +3180,30 @@ mod tests {
         assert_eq!(parsed.offers.len(), 1);
         assert_eq!(parsed.offers[0].hourly_price_micro_usd, Some(500_001));
         assert_eq!(parsed.offers[0].gpu_id, "NVIDIA GeForce RTX 4090");
+    }
+
+    #[test]
+    fn expanded_policy_accepts_exact_80_and_96_gb_ids_but_rejects_b200() {
+        let body = r#"{"gpus":[
+          {"id":"NVIDIA A100 80GB PCIe","name":"A100 PCIe","manufacturer":"NVIDIA","memory":80,"secure":true,"price":{"secure":1.39},"maxCount":{"secure":1},"dataCenters":[{"id":"EU-RO-1","availability":"HIGH"}]},
+          {"id":"NVIDIA RTX PRO 6000 Blackwell Server Edition","name":"RTX PRO 6000 Blackwell Server Edition","manufacturer":"NVIDIA","memory":96,"secure":true,"price":{"secure":2.09},"maxCount":{"secure":1},"dataCenters":[{"id":"EU-RO-1","availability":"HIGH"}]},
+          {"id":"NVIDIA RTX PRO 6000 Blackwell Workstation Edition","name":"RTX PRO 6000 Blackwell Workstation Edition","manufacturer":"NVIDIA","memory":96,"secure":true,"price":{"secure":1.89},"maxCount":{"secure":1},"dataCenters":[{"id":"EU-RO-1","availability":"HIGH"}]},
+          {"id":"NVIDIA B200","name":"B200","manufacturer":"NVIDIA","memory":180,"secure":true,"price":{"secure":6.79},"maxCount":{"secure":1},"dataCenters":[{"id":"EU-RO-1","availability":"HIGH"}]}
+        ]}"#;
+        let parsed = parse_gpu_catalog(body, false).unwrap();
+        assert_eq!(
+            parsed
+                .offers
+                .iter()
+                .map(|offer| offer.gpu_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "NVIDIA A100 80GB PCIe",
+                "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+                "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+            ]
+        );
+        assert!(parsed.offers.iter().all(|offer| !offer.emergency));
     }
 
     #[test]

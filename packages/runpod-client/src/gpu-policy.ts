@@ -20,7 +20,9 @@ export interface GpuPolicyEntry {
 
 /**
  * EU-RO-1 studio policy. Display-name matches are exact and byte-preserving.
- * The returned catalog ID is always passed through unchanged.
+ * The returned catalog ID is always passed through unchanged. Provider IDs
+ * are exact allowlist entries; only the older Blackwell 4500/4000 rows use
+ * exact display-name matching because RunPod returns those IDs dynamically.
  */
 const GPU_POLICY_DEFINITIONS: readonly GpuPolicyEntry[] = [
   {
@@ -94,6 +96,36 @@ const GPU_POLICY_DEFINITIONS: readonly GpuPolicyEntry[] = [
     expectedMemoryGb: 20,
   },
   {
+    key: "a100_pcie",
+    catalogNames: ["A100 PCIe", "NVIDIA A100 80GB PCIe"],
+    exactIds: ["NVIDIA A100 80GB PCIe"],
+    coldPriority: 7,
+    emergency: false,
+    minimumMemoryGb: 64,
+    maximumMemoryGb: 128,
+    expectedMemoryGb: 80,
+  },
+  {
+    key: "rtx_pro_6000_blackwell_server",
+    catalogNames: ["RTX PRO 6000 Blackwell Server Edition"],
+    exactIds: ["NVIDIA RTX PRO 6000 Blackwell Server Edition"],
+    coldPriority: 8,
+    emergency: false,
+    minimumMemoryGb: 64,
+    maximumMemoryGb: 128,
+    expectedMemoryGb: 96,
+  },
+  {
+    key: "rtx_pro_6000_blackwell_workstation",
+    catalogNames: ["RTX PRO 6000 Blackwell Workstation Edition"],
+    exactIds: ["NVIDIA RTX PRO 6000 Blackwell Workstation Edition"],
+    coldPriority: 9,
+    emergency: false,
+    minimumMemoryGb: 64,
+    maximumMemoryGb: 128,
+    expectedMemoryGb: 96,
+  },
+  {
     key: "rtx_2000_ada",
     catalogNames: ["RTX 2000 Ada"],
     exactIds: ["NVIDIA RTX 2000 Ada Generation"],
@@ -139,7 +171,7 @@ const REMOVED_GPU_IDS = new Set<string>([
 ]);
 
 function isExplicitlyRemovedGpuId(value: string): boolean {
-  return REMOVED_GPU_IDS.has(value) || value.includes("RTX PRO 6000");
+  return REMOVED_GPU_IDS.has(value);
 }
 
 export interface CatalogGpuIdentity {
@@ -196,8 +228,8 @@ export function approveCatalogGpu(
 
 /**
  * Validates identity fields available on the Pod API. Static types require the
- * documented exact ID. Only the two Blackwell types may use an exact catalog
- * ID discovered from their canonical display name.
+ * documented exact ID. The two existing dynamic Blackwell policies may use an
+ * exact catalog ID discovered from their canonical display name.
  */
 export function approveManagedPodGpu(
   gpuId: string,

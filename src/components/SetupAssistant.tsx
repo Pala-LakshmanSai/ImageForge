@@ -230,7 +230,7 @@ export function SetupAssistant({
           <div className="setup-step" key="studio-profile-step">
             <Eyebrow>Import studio connection</Eyebrow>
             <h1 id="setup-title">Bring in the studio profile.</h1>
-            <p>The non-secret profile describes the template, volume, seven-GPU EU-RO-1 policy, worker port, and pinned model preset.</p>
+            <p>The non-secret profile describes the template, volume, ten-GPU EU-RO-1 policy, worker port, and pinned model preset.</p>
             <label className="setup-field"><span>Connection profile</span><textarea key="studio-profile" readOnly={locked || credentialOnly} data-autofocus={!credentialOnly} value={state.setup.studioProfile} onChange={(event) => dispatch({ type: 'SET_STUDIO_PROFILE', profile: event.target.value })} /></label>
             <label className="setup-field"><span>Worker token</span><input aria-label="Worker token" key="worker-token" ref={workerTokenRef} disabled={locked && !credentialOnly} data-autofocus={credentialOnly} type="password" autoComplete="off" placeholder={state.setup.credentials.workerToken.configured ? `Configured · •••• ${state.setup.credentials.workerToken.suffix}` : 'Paste personal worker token'} /><small>Stored separately; never included in the profile or a URL.</small></label>
           </div>

@@ -53,7 +53,10 @@ cannot create or terminate a Pod.
   the existing ImageForge studio profile: one NVIDIA GPU, Secure Cloud,
   `EU-RO-1`, compatible with the configured network volume and CUDA/image
   contract, and one of the ordinary approved policies: RTX 4090, RTX PRO 4500
-  Blackwell, RTX 5090, RTX PRO 4000 Blackwell, L4, RTX A4500, or RTX 4000 Ada.
+  Blackwell, RTX 5090, RTX PRO 4000 Blackwell, L4, RTX A4500, RTX 4000 Ada,
+  A100 80GB PCIe, RTX PRO 6000 Blackwell Server Edition, or RTX PRO 6000
+  Blackwell Workstation Edition. The A100/RTX PRO 6000 entries require their
+  exact RunPod provider IDs and the checked-in runtime identity contract.
   RTX 2000 Ada is visible only when the existing emergency opt-in is enabled and
   is labelled **Slow emergency option**. A dynamic Blackwell catalog ID is
   selectable only after the existing exact-name, memory, manufacturer, and live
@@ -61,7 +64,7 @@ cannot create or terminate a Pod.
   converted into an invented GPU ID.
 - **All GPUs** in this feature means all currently returned policy-approved
   offers above, including unavailable rows for explanation. It does not mean
-  the global RunPod catalog. B200, RTX PRO 6000 variants, A40/A6000, L40/L40S,
+  the global RunPod catalog. B200, A40/A6000, L40/L40S,
   Community Cloud, interruptible, multi-GPU, another datacenter, an unknown
   dynamic ID, and every other unapproved offer remain excluded even when cheap
   or available.
@@ -2974,7 +2977,8 @@ service is permitted.
 - The existing top status bar's current GPU chip is the sole entry point. When
   offline it opens **Choose a GPU**; with one current Pod it opens **Current GPU
   / Switch GPU**. There is no new navigation destination, dashboard card,
-  decorative utilization gauge, or searchable catalog for eight policy rows.
+  decorative utilization gauge, or searchable catalog for the ten ordinary
+  policy rows plus the explicit emergency row.
 - The compact sheet pins the current GPU, then shows **Auto best value** only in
   offline Start mode, followed by ordinary approved rows and the opt-in
   emergency row. Each row has exact name, VRAM, availability, observed price/hr,
@@ -3025,8 +3029,11 @@ service is permitted.
 ### Installed selector interaction performance gate
 
 The production macOS Apple-silicon and Windows-x64 installed artifacts run the
-same deterministic 10-row fixture: pinned current, Auto, seven ordinary policy
-rows, and opted-in emergency. The provider/worker are local deterministic
+same deterministic 10-row baseline fixture: pinned current, Auto, seven
+ordinary baseline policy rows, and opted-in emergency. The live production
+policy additionally includes A100 80GB PCIe and the two exact RTX PRO 6000
+Blackwell editions; focused policy/native identity tests cover those expanded
+rows while this installed timing fixture remains byte-stable. The provider/worker are local deterministic
 servers, reduced motion is on, and no network completion time is measured. Each
 platform runs at 1280×720 and 1440×900. After three unrecorded warm-ups where
 applicable, it records exactly 30 valid samples for each action:

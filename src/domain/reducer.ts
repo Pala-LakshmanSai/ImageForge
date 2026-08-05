@@ -797,7 +797,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           ...podDetails(
             'selecting',
             4,
-            `Checking seven ordinary EU-RO-1 GPUs${state.settings.slowEmergencyGpuEnabled ? ' plus RTX 2000 Ada as a slow emergency fallback' : ''}`,
+            `Checking ten ordinary EU-RO-1 GPUs${state.settings.slowEmergencyGpuEnabled ? ' plus RTX 2000 Ada as a slow emergency fallback' : ''}`,
             state.pod,
           ),
           lifecycleSequence: state.pod.lifecycleSequence + 1,
