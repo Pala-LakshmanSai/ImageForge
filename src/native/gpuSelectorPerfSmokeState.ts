@@ -17,3 +17,10 @@ export function advanceWarmOpen(warmupsRemaining: number): {
     open: remaining !== 0,
   };
 }
+
+export function isWarmArmCandidate(
+  warmupsRemaining: number,
+  open: boolean,
+): boolean {
+  return warmupsRemaining === 0 && !open;
+}

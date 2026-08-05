@@ -17,6 +17,7 @@ import {
 import {
   advanceWarmOpen,
   isMeasuredInputReady,
+  isWarmArmCandidate,
   type SelectorPerfArmState,
 } from './gpuSelectorPerfSmokeState';
 
@@ -37,6 +38,7 @@ const OBSERVATION_ID = '11111111-1111-4111-8111-111111111111';
 const RECEIPT_ID = '22222222-2222-4222-8222-222222222222';
 const PROCESS_EPOCH_ID = '33333333-3333-4333-8333-333333333333';
 const OBSERVED_AT = '2026-08-04T00:00:00.000Z';
+const WARM_ARM_RESIZE_SETTLE_MS = 250;
 
 const OFFER_DEFINITIONS = [
   ['NVIDIA GeForce RTX 4090', 'rtx_4090', 'RTX 4090', 24, false],
@@ -237,7 +239,6 @@ export function GpuSelectorPerfSmoke() {
   const [snapshot, setSnapshot] = useState(() => fixtureSnapshot());
   const [cycle, setCycle] = useState(0);
   const [warmupsRemaining, setWarmupsRemaining] = useState(config.action === 'warm_open' ? 3 : 0);
-  const [warmupSettled, setWarmupSettled] = useState(config.action !== 'warm_open');
   const [armState, setArmState] = useState<SelectorPerfArmState>('idle');
   const [error, setError] = useState<string | null>(null);
   const openRef = useRef(open);
@@ -253,6 +254,10 @@ export function GpuSelectorPerfSmoke() {
   const listenerReadyRef = useRef(false);
   const nativeWindowReadyRef = useRef(false);
   const mountedRef = useRef(true);
+  const lastNativeResizeAtRef = useRef(performance.now());
+  const warmArmTimerRef = useRef<number | undefined>(undefined);
+  const scheduleWarmArmRef = useRef<() => void>(() => undefined);
+  const warmOpenMouseUpHandledRef = useRef(false);
   const action = config.action;
   const maxSamples = action === 'cold_open' ? 1 : 30;
   const readySnapshot = useMemo(() => fixtureSnapshot('ready'), []);
@@ -282,12 +287,16 @@ export function GpuSelectorPerfSmoke() {
     listenerReadyRef.current = false;
     nativeWindowReadyRef.current = false;
     let disposed = false;
-    let unlisten: (() => void) | undefined;
+    let unlistenEvents: (() => void) | undefined;
+    let unlistenResize: (() => void) | undefined;
 
     const markReady = () => {
       if (!listenerReadyRef.current || !nativeWindowReadyRef.current || disposed) return;
       sizeReadyRef.current = true;
       if (mountedRef.current) setCycle((value) => value + 1);
+      if (action === 'warm_open' && isWarmArmCandidate(warmupsRef.current, openRef.current)) {
+        scheduleWarmArmRef.current();
+      }
     };
 
     const handleStarted = async (payload: unknown) => {
@@ -355,7 +364,13 @@ export function GpuSelectorPerfSmoke() {
         }
         ordinalRef.current += 1;
         if (action === 'warm_open') {
+          openRef.current = false;
           setOpen(false);
+          // A committed sample reopens the same measured cycle. Start a fresh
+          // quiet period now; any native resize raised by closing the sheet
+          // restarts it through the window listener below.
+          lastNativeResizeAtRef.current = performance.now();
+          scheduleWarmArmRef.current();
         } else if (action === 'refresh_loading') {
           setSnapshot(readySnapshot);
         }
@@ -378,7 +393,7 @@ export function GpuSelectorPerfSmoke() {
         removeStarted();
         removeError();
       } else {
-        unlisten = () => {
+        unlistenEvents = () => {
           removeStarted();
           removeError();
         };
@@ -390,6 +405,17 @@ export function GpuSelectorPerfSmoke() {
     void (async () => {
       try {
         const appWindow = getCurrentWindow();
+        const removeResize = await appWindow.onResized(() => {
+          lastNativeResizeAtRef.current = performance.now();
+          if (action === 'warm_open' && isWarmArmCandidate(warmupsRef.current, openRef.current)) {
+            scheduleWarmArmRef.current();
+          }
+        });
+        if (disposed) {
+          removeResize();
+          return;
+        }
+        unlistenResize = removeResize;
         await setExactViewport(appWindow, config.viewportWidth, config.viewportHeight);
         await appWindow.setFocus();
         nativeWindowReadyRef.current = true;
@@ -402,7 +428,12 @@ export function GpuSelectorPerfSmoke() {
     return () => {
       disposed = true;
       mountedRef.current = false;
-      unlisten?.();
+      unlistenEvents?.();
+      unlistenResize?.();
+      if (warmArmTimerRef.current !== undefined) {
+        window.clearTimeout(warmArmTimerRef.current);
+        warmArmTimerRef.current = undefined;
+      }
     };
   }, [action, config, maxSamples, readySnapshot]);
 
@@ -439,6 +470,55 @@ export function GpuSelectorPerfSmoke() {
     })();
   };
 
+  const scheduleWarmArm = () => {
+    if (action !== 'warm_open' || reportedRef.current) return;
+    if (warmArmTimerRef.current !== undefined) {
+      window.clearTimeout(warmArmTimerRef.current);
+    }
+    const elapsedSinceResize = performance.now() - lastNativeResizeAtRef.current;
+    const delayMs = Math.max(16, WARM_ARM_RESIZE_SETTLE_MS - elapsedSinceResize);
+    warmArmTimerRef.current = window.setTimeout(() => {
+      warmArmTimerRef.current = undefined;
+      if (
+        reportedRef.current
+        || !isWarmArmCandidate(warmupsRef.current, openRef.current)
+        || armedRef.current
+        || armingRef.current
+        || pendingRef.current !== null
+      ) return;
+      if (!sizeReadyRef.current) {
+        scheduleWarmArmRef.current();
+        return;
+      }
+      console.info('IMAGEFORGE_GPU_SELECTOR_PERF_ARM_REQUEST_V1', JSON.stringify({
+        action,
+        ordinal: ordinalRef.current,
+        warmupsRemaining: warmupsRef.current,
+        open: openRef.current,
+        resizeQuietMs: Math.round(performance.now() - lastNativeResizeAtRef.current),
+      }));
+      requestNativeArm();
+    }, delayMs);
+  };
+  scheduleWarmArmRef.current = scheduleWarmArm;
+
+  const advanceWarmup = (): boolean => {
+    if (action !== 'warm_open' || warmupsRef.current <= 0) return false;
+    const next = advanceWarmOpen(warmupsRef.current);
+    warmupsRef.current = next.warmupsRemaining;
+    openRef.current = next.open;
+    setWarmupsRemaining(next.warmupsRemaining);
+    setArmState('idle');
+    // Leave the sheet closed after the last unrecorded warm-up so native arm
+    // has one unambiguous state before measurement.
+    setOpen(next.open);
+    if (isWarmArmCandidate(next.warmupsRemaining, next.open)) {
+      lastNativeResizeAtRef.current = performance.now();
+      scheduleWarmArmRef.current();
+    }
+    return true;
+  };
+
   useLayoutEffect(() => {
     // Warm-open must arm only after the final closed state has painted. The
     // unmeasured close/open transitions can otherwise race the arm with the
@@ -452,29 +532,7 @@ export function GpuSelectorPerfSmoke() {
     // final warm-up click.
     if (action !== 'cold_open' && !openRef.current) return;
     requestNativeArm();
-  }, [action, config, cycle, maxSamples, open, warmupSettled, warmupsRemaining]);
-
-  useEffect(() => {
-    if (action !== 'warm_open' || !warmupSettled || warmupsRemaining !== 0 || open) return undefined;
-    // Passive effects run after the committed closed state and after the ref
-    // synchronization effects above. Keep waiting for native/listener setup
-    // without arming from a stale warm-up render.
-    let cancelled = false;
-    let frame: number | undefined;
-    const tryArm = () => {
-      if (cancelled || reportedRef.current || armedRef.current || armingRef.current || pendingRef.current !== null) return;
-      if (!sizeReadyRef.current) {
-        frame = window.requestAnimationFrame(tryArm);
-        return;
-      }
-      requestNativeArm();
-    };
-    frame = window.requestAnimationFrame(tryArm);
-    return () => {
-      cancelled = true;
-      if (frame !== undefined) window.cancelAnimationFrame(frame);
-    };
-  }, [action, config, cycle, maxSamples, open, warmupSettled, warmupsRemaining]);
+  }, [action, config, cycle, maxSamples, open, warmupsRemaining]);
 
   const measuredInputReady = isMeasuredInputReady(warmupsRemaining, armState);
 
@@ -498,7 +556,19 @@ export function GpuSelectorPerfSmoke() {
             <button
               type="button"
               data-gpu-selector-perf-close="true"
-              onClick={() => setOpen(false)}
+              onMouseUp={() => {
+                openRef.current = false;
+                setOpen(false);
+              }}
+              onClick={(event) => {
+                // Keyboard activation has no mouse-up. Pointer warm-ups are
+                // intentionally advanced from mouse-up because that is the
+                // exact trusted native boundary used by the installed gate.
+                if (event.detail === 0) {
+                  openRef.current = false;
+                  setOpen(false);
+                }
+              }}
               aria-label="Close QA sheet"
               // During unmeasured warm-ups this transparent QA-only target
               // covers the content frame. The installed smoke uses OS-level
@@ -543,19 +613,27 @@ export function GpuSelectorPerfSmoke() {
           type="button"
           data-gpu-selector-perf-open="true"
           aria-busy={warmupsRemaining === 0 && armState !== 'armed'}
-          onClick={() => {
-            if (action === 'warm_open' && warmupsRemaining > 0) {
-              const next = advanceWarmOpen(warmupsRemaining);
-              setWarmupsRemaining(next.warmupsRemaining);
-              setWarmupSettled(next.warmupsRemaining === 0);
-              setArmState('idle');
-              // Leave the sheet closed after the last unrecorded warm-up so
-              // the native arm effect has one unambiguous closed state before
-              // the first measured open.
-              setOpen(next.open);
+          onMouseDown={() => {
+            // Clear a stale marker when the prior warm-up changed the target
+            // before the browser could dispatch its follow-on click.
+            warmOpenMouseUpHandledRef.current = false;
+          }}
+          onMouseUp={() => {
+            if (action === 'warm_open' && warmupsRef.current > 0) {
+              warmOpenMouseUpHandledRef.current = true;
+              advanceWarmup();
+            }
+          }}
+          onClick={(event) => {
+            if (event.detail > 0 && warmOpenMouseUpHandledRef.current) {
+              warmOpenMouseUpHandledRef.current = false;
               return;
             }
+            // Keyboard activation has no mouse-up; onClick is also a fallback
+            // if a platform emits click without the corresponding DOM mouse-up.
+            if (advanceWarmup()) return;
             setArmState('idle');
+            openRef.current = true;
             setOpen(true);
           }}
           style={{ width: '100vw', height: '100vh' }}

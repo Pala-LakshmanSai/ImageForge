@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { advanceWarmOpen, isMeasuredInputReady } from './gpuSelectorPerfSmokeState';
+import {
+  advanceWarmOpen,
+  isMeasuredInputReady,
+  isWarmArmCandidate,
+} from './gpuSelectorPerfSmokeState';
 
 describe('selector performance warm-up state', () => {
   it('keeps the sheet open while unmeasured warm-ups remain', () => {
@@ -24,5 +28,11 @@ describe('selector performance warm-up state', () => {
   it('does not expose the measured control during unrecorded warm-ups', () => {
     expect(isMeasuredInputReady(1, 'idle')).toBe(false);
     expect(isMeasuredInputReady(1, 'armed')).toBe(false);
+  });
+
+  it('arms warm-open only from the final committed closed state', () => {
+    expect(isWarmArmCandidate(1, false)).toBe(false);
+    expect(isWarmArmCandidate(0, true)).toBe(false);
+    expect(isWarmArmCandidate(0, false)).toBe(true);
   });
 });
