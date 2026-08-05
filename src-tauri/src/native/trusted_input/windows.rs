@@ -1,6 +1,6 @@
 //! Windows trusted input authority.
 //!
-//! WebView2's accelerator event and thread-scoped Win32 mouse hooks are the
+//! WebView2's accelerator event and thread-scoped Win32 mouse/keyboard hooks are the
 //! only inputs that can create a broker activation. Renderer events are never
 //! consulted. The host thread hook covers native-window messages; the
 //! packaged helper DLL installs the same thread-scoped `WH_MOUSE` hook in the
@@ -37,7 +37,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetWindow, GetWindowLongPtrW, GetWindowThreadProcessId, IsChild, IsIconic, IsWindow,
     IsWindowVisible, SetWindowLongPtrW, SetWindowsHookExW, UnhookWindowsHookEx, GA_ROOT,
     GA_ROOTOWNER, GUITHREADINFO, GWLP_WNDPROC, GWL_STYLE, GW_CHILD, GW_HWNDNEXT, HC_ACTION,
-    MOUSEHOOKSTRUCT, WH_MOUSE, WM_APP, WM_LBUTTONUP, WNDPROC, WS_DISABLED,
+    MOUSEHOOKSTRUCT, WH_KEYBOARD, WH_MOUSE, WM_APP, WM_LBUTTONUP, WNDPROC, WS_DISABLED,
 };
 
 const VK_RETURN: u32 = 0x0D;
@@ -50,6 +50,8 @@ const TRUSTED_INPUT_VERSION: u32 = 1;
 const TRUSTED_INPUT_HOOK_DLL: &str = "imageforge-trusted-input-hook.dll";
 const HOOK_EVENT_EMPTY: i32 = 0;
 const HOOK_EVENT_READY: i32 = 2;
+const HOOK_EVENT_POINTER: u32 = 1;
+const HOOK_EVENT_KEYBOARD_SELECT: u32 = 2;
 
 #[repr(C)]
 struct HookConfig {
@@ -63,6 +65,12 @@ struct HookConfig {
     event_target: usize,
     event_x: i32,
     event_y: i32,
+    event_kind: u32,
+}
+
+enum HookEvent {
+    Pointer { target: usize, point: POINT },
+    KeyboardSelect,
 }
 
 #[derive(Clone)]
@@ -81,6 +89,7 @@ struct Registration {
     accelerator_token: i64,
     host_mouse_hook: usize,
     browser_mouse_hook: usize,
+    browser_keyboard_hook: usize,
     hook_module: usize,
     mapping: usize,
     mapping_view: usize,
@@ -196,6 +205,7 @@ impl NativeInputHook {
             let _ = controller.remove_AcceleratorKeyPressed(registration.accelerator_token);
             let _ = UnhookWindowsHookEx(registration.host_mouse_hook as _);
             let _ = UnhookWindowsHookEx(registration.browser_mouse_hook as _);
+            let _ = UnhookWindowsHookEx(registration.browser_keyboard_hook as _);
             let _ = FreeLibrary(registration.hook_module as _);
             close_hook_mapping(registration.mapping as _, registration.mapping_view as _);
         }
@@ -480,6 +490,27 @@ pub(crate) fn install(
             return;
         }
 
+        let browser_keyboard_hook = unsafe {
+            SetWindowsHookExW(
+                WH_KEYBOARD,
+                Some(browser_hook_proc),
+                hook_module as HINSTANCE,
+                browser_thread_id,
+            )
+        };
+        if browser_keyboard_hook.is_null() {
+            unsafe {
+                let _ = UnhookWindowsHookEx(host_mouse_hook);
+                let _ = UnhookWindowsHookEx(browser_mouse_hook);
+                let _ = FreeLibrary(hook_module);
+                let _ = controller.remove_AcceleratorKeyPressed(accelerator_token);
+                close_hook_mapping(mapping, mapping_view);
+            }
+            restore_failed_setup(expected_hwnd, original_window_proc);
+            selector_for_hook.trace_qa("windows native input rejected WebView2 keyboard hook registration");
+            return;
+        }
+
         MOUSE_HOOK_CONTEXT.with(|context_slot| {
             *context_slot.borrow_mut() = Some(context);
         });
@@ -495,6 +526,7 @@ pub(crate) fn install(
                 unsafe {
                     let _ = UnhookWindowsHookEx(host_mouse_hook);
                     let _ = UnhookWindowsHookEx(browser_mouse_hook);
+                    let _ = UnhookWindowsHookEx(browser_keyboard_hook);
                     let _ = FreeLibrary(hook_module);
                     let _ = controller.remove_AcceleratorKeyPressed(accelerator_token);
                     close_hook_mapping(mapping, mapping_view);
@@ -508,6 +540,7 @@ pub(crate) fn install(
                 accelerator_token,
                 host_mouse_hook: host_mouse_hook as usize,
                 browser_mouse_hook: browser_mouse_hook as usize,
+                browser_keyboard_hook: browser_keyboard_hook as usize,
                 hook_module: hook_module as usize,
                 mapping: mapping as usize,
                 mapping_view: mapping_view as usize,
@@ -528,6 +561,7 @@ pub(crate) fn install(
             unsafe {
                 let _ = UnhookWindowsHookEx(host_mouse_hook);
                 let _ = UnhookWindowsHookEx(browser_mouse_hook);
+                let _ = UnhookWindowsHookEx(browser_keyboard_hook);
                 let _ = FreeLibrary(hook_module);
                 let _ = controller.remove_AcceleratorKeyPressed(accelerator_token);
                 close_hook_mapping(mapping, mapping_view);
@@ -580,8 +614,15 @@ unsafe extern "system" fn trusted_window_proc(
                         .map(|event| (state.context.clone(), event))
                 })
         });
-        if let Some((context, (target, point))) = native_event {
-            handle_pointer_up(&context, target, point, "browser-thread");
+        if let Some((context, event)) = native_event {
+            match event {
+                HookEvent::Pointer { target, point } => {
+                    handle_pointer_up(&context, target, point, "browser-thread");
+                }
+                HookEvent::KeyboardSelect => {
+                    handle_keyboard_select(&context);
+                }
+            }
             return 0;
         }
     }
@@ -674,6 +715,37 @@ fn handle_pointer_up(context: &MouseHookContext, target: usize, point: POINT, so
     let _ = context
         .selector_perf
         .start_native_input(&context.window, NativeSelectorInputKind::PrimaryMouseUp);
+}
+
+fn handle_keyboard_select(context: &MouseHookContext) {
+    context
+        .selector_perf
+        .trace_qa("windows browser keyboard hook received Space keydown");
+    if !context.active.load(Ordering::Acquire)
+        || !window_is_authorized(
+            context.expected_hwnd,
+            context.host_thread_id,
+            context.browser_thread_id,
+        )
+        || !controller_parent_is_authorized(
+            context.expected_hwnd,
+            context.expected_controller_hwnd,
+            context.host_thread_id,
+        )
+    {
+        context
+            .selector_perf
+            .trace_qa("windows browser keyboard hook ignored unauthorized window");
+        return;
+    }
+    context.broker.record(
+        &context.window_label,
+        TrustedActivationKind::KeyboardActivation,
+        Instant::now(),
+    );
+    let _ = context
+        .selector_perf
+        .start_native_input(&context.window, NativeSelectorInputKind::KeyboardSelect);
 }
 
 fn window_is_authorized(
@@ -896,6 +968,7 @@ fn create_hook_mapping(
                 event_target: 0,
                 event_x: 0,
                 event_y: 0,
+                event_kind: 0,
             },
         );
     }
@@ -922,7 +995,7 @@ fn clear_mapping_event(view: *mut HookConfig) {
     }
 }
 
-fn consume_hook_event(view: *mut HookConfig, sequence: u64) -> Option<(usize, POINT)> {
+fn consume_hook_event(view: *mut HookConfig, sequence: u64) -> Option<HookEvent> {
     if view.is_null() || sequence == 0 {
         return None;
     }
@@ -943,7 +1016,10 @@ fn consume_hook_event(view: *mut HookConfig, sequence: u64) -> Option<(usize, PO
             x: std::ptr::read_volatile(std::ptr::addr_of!((*view).event_x)),
             y: std::ptr::read_volatile(std::ptr::addr_of!((*view).event_y)),
         };
-        if target == 0
+        let event_kind = std::ptr::read_volatile(std::ptr::addr_of!((*view).event_kind));
+        if (event_kind == HOOK_EVENT_POINTER && target == 0)
+            || (event_kind != HOOK_EVENT_POINTER && event_kind != HOOK_EVENT_KEYBOARD_SELECT)
+            || (event_kind == HOOK_EVENT_KEYBOARD_SELECT && target != 0)
             || AtomicI32::from_ptr(std::ptr::addr_of_mut!((*view).event_state))
                 .compare_exchange(
                     HOOK_EVENT_READY,
@@ -955,7 +1031,11 @@ fn consume_hook_event(view: *mut HookConfig, sequence: u64) -> Option<(usize, PO
         {
             return None;
         }
-        Some((target, point))
+        Some(match event_kind {
+            HOOK_EVENT_POINTER => HookEvent::Pointer { target, point },
+            HOOK_EVENT_KEYBOARD_SELECT => HookEvent::KeyboardSelect,
+            _ => unreachable!(),
+        })
     }
 }
 

@@ -8,6 +8,8 @@
 #define IMAGEFORGE_TRUSTED_INPUT_EVENT_EMPTY 0
 #define IMAGEFORGE_TRUSTED_INPUT_EVENT_WRITING 1
 #define IMAGEFORGE_TRUSTED_INPUT_EVENT_READY 2
+#define IMAGEFORGE_TRUSTED_INPUT_EVENT_POINTER 1u
+#define IMAGEFORGE_TRUSTED_INPUT_EVENT_KEYBOARD_SELECT 2u
 
 typedef struct ImageForgeTrustedInputConfig {
     uint32_t magic;
@@ -20,6 +22,7 @@ typedef struct ImageForgeTrustedInputConfig {
     uintptr_t event_target;
     LONG event_x;
     LONG event_y;
+    uint32_t event_kind;
 } ImageForgeTrustedInputConfig;
 
 static HANDLE config_mapping = NULL;
@@ -56,49 +59,92 @@ static int load_config(void) {
     return 1;
 }
 
+static int authorized_window_event(
+    ImageForgeTrustedInputConfig *config,
+    HWND expected,
+    HWND receiver
+) {
+    return config->magic == IMAGEFORGE_TRUSTED_INPUT_MAGIC
+        && config->version == IMAGEFORGE_TRUSTED_INPUT_VERSION
+        && InterlockedCompareExchange((LONG *)&config->active, 0, 0) != 0
+        && IsWindow(expected) != FALSE
+        && IsWindowVisible(expected) != FALSE
+        && IsIconic(expected) == FALSE
+        && GetForegroundWindow() == expected
+        && IsWindow(receiver) != FALSE;
+}
+
+static void publish_event(
+    ImageForgeTrustedInputConfig *config,
+    HWND receiver,
+    uint32_t event_kind,
+    uintptr_t event_target,
+    LONG event_x,
+    LONG event_y
+) {
+    if (InterlockedCompareExchange(
+            &config->event_state,
+            IMAGEFORGE_TRUSTED_INPUT_EVENT_WRITING,
+            IMAGEFORGE_TRUSTED_INPUT_EVENT_EMPTY
+        ) != IMAGEFORGE_TRUSTED_INPUT_EVENT_EMPTY) {
+        return;
+    }
+    LONGLONG sequence = InterlockedIncrement64(&config->event_sequence);
+    config->event_target = event_target;
+    config->event_x = event_x;
+    config->event_y = event_y;
+    config->event_kind = event_kind;
+    MemoryBarrier();
+    InterlockedExchange(&config->event_state, IMAGEFORGE_TRUSTED_INPUT_EVENT_READY);
+    // The message carries only the opaque one-use sequence. The host consumes
+    // the hook-written payload from the shared slot after verifying it.
+    if (!PostMessageW(receiver, IMAGEFORGE_TRUSTED_INPUT_MESSAGE, (WPARAM)sequence, 0)) {
+        InterlockedExchange(&config->event_state, IMAGEFORGE_TRUSTED_INPUT_EVENT_EMPTY);
+    }
+}
+
 __declspec(dllexport) LRESULT CALLBACK imageforge_trusted_mouse_hook(
     int code,
     WPARAM w_param,
     LPARAM l_param
 ) {
-    if (code == HC_ACTION && w_param == WM_LBUTTONUP && l_param != 0 && load_config()) {
+    if (code == HC_ACTION && load_config()) {
         ImageForgeTrustedInputConfig *config = config_view;
         HWND expected = (HWND)config->expected_hwnd;
         HWND receiver = (HWND)config->receiver_hwnd;
-        MOUSEHOOKSTRUCT *event = (MOUSEHOOKSTRUCT *)l_param;
-        HWND target = event->hwnd;
-        if (config->magic == IMAGEFORGE_TRUSTED_INPUT_MAGIC
-            && config->version == IMAGEFORGE_TRUSTED_INPUT_VERSION
-            && InterlockedCompareExchange((LONG *)&config->active, 0, 0) != 0
-            && IsWindow(expected) != FALSE
-            && IsWindowVisible(expected) != FALSE
-            && IsIconic(expected) == FALSE
-            && GetForegroundWindow() == expected
-            && IsWindow(target) != FALSE
-            && IsWindowVisible(target) != FALSE
-            && is_descendant(expected, target)
-            && IsWindow(receiver) != FALSE) {
-            // Reserve one native event slot before publishing its payload. The
-            // host consumes the slot with an interlocked one-use transition and
-            // never trusts target/coordinates supplied by the window message.
-            if (InterlockedCompareExchange(
-                    &config->event_state,
-                    IMAGEFORGE_TRUSTED_INPUT_EVENT_WRITING,
-                    IMAGEFORGE_TRUSTED_INPUT_EVENT_EMPTY
-                ) == IMAGEFORGE_TRUSTED_INPUT_EVENT_EMPTY) {
-                LONGLONG sequence = InterlockedIncrement64(&config->event_sequence);
-                config->event_target = (uintptr_t)target;
-                config->event_x = event->pt.x;
-                config->event_y = event->pt.y;
-                MemoryBarrier();
-                InterlockedExchange(&config->event_state, IMAGEFORGE_TRUSTED_INPUT_EVENT_READY);
-                // The message carries only the opaque one-use sequence. A
-                // forged WM_APP message without a hook-published slot fails
-                // closed in the host window procedure.
-                if (!PostMessageW(receiver, IMAGEFORGE_TRUSTED_INPUT_MESSAGE, (WPARAM)sequence, 0)) {
-                    InterlockedExchange(&config->event_state, IMAGEFORGE_TRUSTED_INPUT_EVENT_EMPTY);
-                }
+        if (w_param == WM_LBUTTONUP && l_param != 0) {
+            MOUSEHOOKSTRUCT *event = (MOUSEHOOKSTRUCT *)l_param;
+            HWND target = event->hwnd;
+            if (authorized_window_event(config, expected, receiver)
+                && IsWindow(target) != FALSE
+                && IsWindowVisible(target) != FALSE
+                && is_descendant(expected, target)) {
+                publish_event(
+                    config,
+                    receiver,
+                    IMAGEFORGE_TRUSTED_INPUT_EVENT_POINTER,
+                    (uintptr_t)target,
+                    event->pt.x,
+                    event->pt.y
+                );
             }
+        } else if (w_param == VK_SPACE
+            && l_param != 0
+            && (((ULONG_PTR)l_param & 0x80000000u) == 0)
+            && (((ULONG_PTR)l_param & 0x40000000u) == 0)
+            && authorized_window_event(config, expected, receiver)) {
+            // WH_KEYBOARD runs on the exact WebView2 browser UI thread. Space
+            // is delivered to the DOM but is not consistently surfaced by
+            // WebView2's AcceleratorKeyPressed event, so publish its first
+            // native keydown through the same one-use authenticated slot.
+            publish_event(
+                config,
+                receiver,
+                IMAGEFORGE_TRUSTED_INPUT_EVENT_KEYBOARD_SELECT,
+                0,
+                0,
+                0
+            );
         }
     }
     return CallNextHookEx(NULL, code, w_param, l_param);
