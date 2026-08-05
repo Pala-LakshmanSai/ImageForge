@@ -339,6 +339,12 @@ function logOccurrences(path, needle) {
   return count;
 }
 
+function logTail(path, limit = 4_000) {
+  if (!existsSync(path)) return '(application log was not created)';
+  const log = readFileSync(path, 'utf8');
+  return log.length <= limit ? log : `…${log.slice(-limit)}`;
+}
+
 async function waitForArm(logPath, expectedCount, child, description) {
   const needle = 'selector arm accepted';
   // Exact native viewport settling may take the same 30-second startup budget
@@ -347,7 +353,9 @@ async function waitForArm(logPath, expectedCount, child, description) {
   const deadline = Date.now() + 30_000;
   while (logOccurrences(logPath, needle) < expectedCount) {
     if (child.exitCode !== null) fail(`${description} exited ${child.exitCode} before native arm ${expectedCount}`);
-    if (Date.now() >= deadline) fail(`${description} timed out waiting for native arm ${expectedCount}`);
+    if (Date.now() >= deadline) {
+      fail(`${description} timed out waiting for native arm ${expectedCount}; application log tail:\n${logTail(logPath)}`);
+    }
     await sleep(50);
   }
   // The native trace is written before the invoke promise resumes in the

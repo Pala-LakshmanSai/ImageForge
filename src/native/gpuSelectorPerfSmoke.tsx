@@ -463,21 +463,28 @@ export function GpuSelectorPerfSmoke() {
             onCommit={() => fail(new Error('The selector performance harness must not commit a provider action.'))}
             busy={false}
           />
-          {action === 'warm_open' ? (
+          {action === 'warm_open' && warmupsRemaining > 0 ? (
             <button
               type="button"
               data-gpu-selector-perf-close="true"
               onClick={() => setOpen(false)}
-              // Keep this QA-only target large and below the native title bar.
-              // The installed smoke uses OS-level coordinates, so a tiny
-              // target makes warm-up results depend on window-frame metrics.
+              aria-label="Close QA sheet"
+              // During unmeasured warm-ups this transparent QA-only target
+              // covers the content frame. The installed smoke uses OS-level
+              // coordinates, so a small target makes warm-up results depend
+              // on title-bar/frame metrics. It disappears before measured
+              // samples and cannot intercept selector input.
               style={{
                 position: 'fixed',
-                top: 16,
-                right: 16,
+                inset: 0,
                 zIndex: 130,
-                width: 180,
-                height: 48,
+                width: '100vw',
+                height: '100vh',
+                border: 0,
+                padding: 0,
+                background: 'transparent',
+                color: 'transparent',
+                opacity: 0,
               }}
             >
               Close QA sheet

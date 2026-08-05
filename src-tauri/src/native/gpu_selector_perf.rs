@@ -321,11 +321,15 @@ impl GpuSelectorPerfHost {
             // a second Tauri window query can return a stale or incompatible
             // value.  This method is crate-private and has no renderer-call
             // path; all callers are the platform adapters above it.
-            let native_window_size = native_window_size(window)?;
+            // The arm's native size is retained in the pending sample. Window
+            // resize/scale lifecycle events clear that arm before another
+            // native event can be accepted, so querying Tauri again here is
+            // both redundant and unsafe on the WebView2 hook thread.
+            let native_window_size = self.armed_native_window_size();
             let event = self.start_native_inner_with_native_size(
                 input,
                 Instant::now(),
-                Some(native_window_size),
+                native_window_size,
             )?;
             let Some(event) = event else {
                 return Ok(None);
@@ -356,6 +360,15 @@ impl GpuSelectorPerfHost {
             self.report_qa_error(window, error);
         }
         result
+    }
+
+    fn armed_native_window_size(&self) -> Option<NativeWindowSize> {
+        self.inner
+            .lock()
+            .expect("selector perf lock")
+            .armed
+            .as_ref()
+            .and_then(|armed| armed.native_window_size)
     }
 
     /// Report a native selector failure only to the explicitly opted-in QA
