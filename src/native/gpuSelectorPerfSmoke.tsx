@@ -443,24 +443,7 @@ export function GpuSelectorPerfSmoke() {
     // Warm-open must arm only after the final closed state has painted. The
     // unmeasured close/open transitions can otherwise race the arm with the
     // native focus lifecycle on macOS.
-    if (action === 'warm_open') {
-      if (warmupsRemaining !== 0 || open) return undefined;
-      let cancelled = false;
-      let frame: number | undefined;
-      const tryArm = () => {
-        if (cancelled || reportedRef.current || armedRef.current || armingRef.current || pendingRef.current !== null) return;
-        if (!sizeReadyRef.current || openRef.current || warmupsRef.current !== 0) {
-          frame = window.requestAnimationFrame(tryArm);
-          return;
-        }
-        requestNativeArm();
-      };
-      frame = window.requestAnimationFrame(tryArm);
-      return () => {
-        cancelled = true;
-        if (frame !== undefined) window.cancelAnimationFrame(frame);
-      };
-    }
+    if (action === 'warm_open') return undefined;
     if (!sizeReadyRef.current || reportedRef.current || armedRef.current || armingRef.current || pendingRef.current !== null) return undefined;
     // Use the committed render state for the warm-up gate. The refs are
     // useful inside native-event callbacks, but an arm request must observe
@@ -469,6 +452,28 @@ export function GpuSelectorPerfSmoke() {
     // final warm-up click.
     if (action !== 'cold_open' && !openRef.current) return;
     requestNativeArm();
+  }, [action, config, cycle, maxSamples, open, warmupSettled, warmupsRemaining]);
+
+  useEffect(() => {
+    if (action !== 'warm_open' || !warmupSettled || warmupsRemaining !== 0 || open) return undefined;
+    // Passive effects run after the committed closed state and after the ref
+    // synchronization effects above. Keep waiting for native/listener setup
+    // without arming from a stale warm-up render.
+    let cancelled = false;
+    let frame: number | undefined;
+    const tryArm = () => {
+      if (cancelled || reportedRef.current || armedRef.current || armingRef.current || pendingRef.current !== null) return;
+      if (!sizeReadyRef.current) {
+        frame = window.requestAnimationFrame(tryArm);
+        return;
+      }
+      requestNativeArm();
+    };
+    frame = window.requestAnimationFrame(tryArm);
+    return () => {
+      cancelled = true;
+      if (frame !== undefined) window.cancelAnimationFrame(frame);
+    };
   }, [action, config, cycle, maxSamples, open, warmupSettled, warmupsRemaining]);
 
   const measuredInputReady = isMeasuredInputReady(warmupsRemaining, armState);
