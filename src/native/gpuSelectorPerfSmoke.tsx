@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import type {
   GpuSelectorOfferV1,
   NativeGpuInventorySnapshotV1,
@@ -341,10 +342,13 @@ export function GpuSelectorPerfSmoke() {
           // The trusted native event owns the QA-only cold transition. Letting
           // the DOM click mount first can block WKWebView's event delivery and
           // make the timer wait another double-rAF after the sheet has already
-          // painted. This still starts from a never-mounted selector and uses
-          // the same React state transition as the production click path.
-          openRef.current = true;
-          setOpen(true);
+          // painted. Tauri events arrive outside React's discrete event lane,
+          // so flush this update with the same immediate commit semantics as
+          // the production click before waiting for the measured paint.
+          flushSync(() => {
+            openRef.current = true;
+            setOpen(true);
+          });
         }
         await nextPaint();
         const deadline = Date.now() + 2_000;

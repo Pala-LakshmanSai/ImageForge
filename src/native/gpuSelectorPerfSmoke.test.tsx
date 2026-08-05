@@ -170,7 +170,7 @@ describe('GpuSelectorPerfSmoke cold-open ordering', () => {
     expect(screen.queryByTestId('selector-surface')).not.toBeInTheDocument();
 
     const listener = mocks.listeners.get('gpu-selector-perf-started-v1');
-    await act(async () => listener?.({
+    act(() => listener?.({
       payload: {
         schemaVersion: 1,
         event: 'gpu-selector-perf-started-v1',
@@ -183,6 +183,8 @@ describe('GpuSelectorPerfSmoke cold-open ordering', () => {
       },
     }));
 
+    // The native macOS event must commit the same turn, matching React's
+    // discrete production click semantics before the measured paint wait.
     expect(screen.getByTestId('selector-surface')).toBeVisible();
     await waitFor(() => {
       expect(mocks.invoke).toHaveBeenCalledWith('native_smoke_result', expect.objectContaining({ passed: true }));
