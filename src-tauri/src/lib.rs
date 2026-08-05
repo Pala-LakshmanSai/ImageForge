@@ -223,9 +223,17 @@ impl StartForegroundGate {
         // or focus-stolen confirmation from minting authority.
         let _activation_kind = self.trusted_input.consume(window.label(), Instant::now())?;
         let accepted = self.show_native_confirmation(window, action, &description);
-        if !accepted || !window_is_foreground(window)? {
+        if !accepted {
             self.trusted_input.invalidate();
             return Err(gpu_start_foreground_required());
+        }
+        // rfd owns the native confirmation surface. On macOS the parent
+        // WebView can return from that modal with key-window focus still
+        // settling; restore focus only after the user accepted the native
+        // dialog, then require the normal visibility/focus checks again.
+        if let Err(error) = restore_foreground_after_confirmation(window) {
+            self.trusted_input.invalidate();
+            return Err(error);
         }
         let permit = StartForegroundPermit {
             id: Uuid::new_v4().to_string(),
@@ -339,6 +347,33 @@ fn window_is_foreground(window: &WebviewWindow) -> NativeResult<bool> {
         && !window
             .is_minimized()
             .map_err(|_| gpu_start_foreground_required())?)
+}
+
+fn restore_foreground_after_confirmation(window: &WebviewWindow) -> NativeResult<()> {
+    if !window
+        .is_visible()
+        .map_err(|_| gpu_start_foreground_required())?
+        || window
+            .is_minimized()
+            .map_err(|_| gpu_start_foreground_required())?
+    {
+        return Err(gpu_start_foreground_required());
+    }
+    window
+        .set_focus()
+        .map_err(|_| gpu_start_foreground_required())?;
+    // Focus propagation is asynchronous on macOS after an AppKit modal
+    // closes. Give the OS a short bounded settle window, but never proceed
+    // without the same strict foreground check used by the later consume.
+    for attempt in 0..5 {
+        if window_is_foreground(window)? {
+            return Ok(());
+        }
+        if attempt < 4 {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    Err(gpu_start_foreground_required())
 }
 
 fn gpu_start_foreground_required() -> NativeError {

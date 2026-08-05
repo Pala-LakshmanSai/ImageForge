@@ -426,6 +426,30 @@ describe('ImageForge shell', () => {
     expect(production.adapter.runPodLifecycle).not.toHaveBeenCalled();
   });
 
+  it('preserves a structured native Start rejection and keeps the selector available for recovery', async () => {
+    const production = productionAdapter();
+    production.setGpuInventory(liveGpuInventory());
+    vi.mocked(production.runtime.startGpuChoice).mockRejectedValueOnce({
+      code: 'gpu_start_target_changed',
+      message: 'The selected GPU changed. Review the refreshed choice.',
+      retryable: true,
+    });
+    render(<App initialState={createConfiguredInitialState()} adapter={production.adapter} />);
+
+    await waitFor(() => expect(production.runtime.loadGpuSwitch).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getAllByRole('button', { name: 'Start GPU' })[0]);
+    const gpuRow = await screen.findByRole('radio', { name: /RTX 4090/i });
+    expect(gpuRow).toBeVisible();
+    fireEvent.click(gpuRow);
+    fireEvent.click(screen.getByRole('button', { name: 'Start selected GPU at $0.69/hr' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start RTX 4090' }));
+
+    await waitFor(() => expect(production.runtime.startGpuChoice).toHaveBeenCalledOnce());
+    expect(await screen.findByText('The selected GPU changed. Review the refreshed choice.')).toBeVisible();
+    expect(screen.getByRole('dialog', { name: 'Choose a GPU' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Close GPU selector' })).toBeVisible();
+  });
+
   it('shows GPU rows after delayed Start inventory preparation resolves', async () => {
     const production = productionAdapter();
     let resolvePreparation: ((snapshot: NativeGpuInventorySnapshotV1) => void) | null = null;

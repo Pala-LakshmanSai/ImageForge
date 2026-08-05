@@ -47,6 +47,7 @@ import type { AppAction, AppState } from './domain/types';
 import type { GpuSelectorConfirmationV1, GpuSelectorModeV1 } from './domain/gpuSelector';
 import type { NativeGpuStartResultV1 } from './native/gpuStartBridge';
 import type { NativeGpuSwitchSnapshotV1 } from './native/gpuSwitchBridge';
+import { asNativeError } from './native/tauriBridge';
 import { CreateScreen } from './screens/CreateScreen';
 import { LibraryScreen } from './screens/LibraryScreen';
 import { ProgressScreen } from './screens/ProgressScreen';
@@ -62,6 +63,12 @@ export interface AppProps {
 
 const CROSS_CLIENT_HEARTBEAT_MS = 4_000;
 const GPU_SELECTOR_LOAD_TIMEOUT_MS = 15_000;
+
+function userFacingErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message) return error.message;
+  const native = asNativeError(error);
+  return native.code === 'native_operation_failed' ? fallback : native.message;
+}
 
 export default function App({ initialState, adapter: injectedAdapter, alarmPort: injectedAlarm }: AppProps) {
   const [state, dispatch] = useReducer(appReducer, initialState, (provided) => provided ?? createInitialState());
@@ -601,7 +608,7 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
   }, [state.toast]);
 
   const showQueueError = useCallback((error: unknown, fallback: string) => {
-    const message = error instanceof Error && error.message ? error.message : fallback;
+    const message = userFacingErrorMessage(error, fallback);
     dispatch({ type: 'SHOW_TOAST', tone: 'error', title: 'Queue update failed', message });
   }, []);
 
@@ -1303,7 +1310,7 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
       setGpuSelectorError(null);
     } catch (error) {
       if (gpuSelectorRequestRef.current !== requestId) return;
-      const message = error instanceof Error ? error.message : 'Live GPU inventory could not be refreshed.';
+      const message = userFacingErrorMessage(error, 'Live GPU inventory could not be refreshed.');
       setGpuSelectorSnapshot(null);
       setGpuSelectorError(message);
       dispatch({ type: 'RUNTIME_ERROR', scope: 'pod', message });
@@ -1324,7 +1331,7 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
           closeGpuSelector();
         },
         (error: unknown) => {
-          const message = error instanceof Error ? error.message : 'The coordinated GPU Switch could not begin safely.';
+          const message = userFacingErrorMessage(error, 'The coordinated GPU Switch could not begin safely.');
           dispatch({ type: 'RUNTIME_ERROR', scope: 'pod', message });
         },
       ).finally(() => setGpuSelectorBusy(false));
@@ -1337,7 +1344,7 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
         setGpuPriceAttention(result.state === 'price_attention' ? result : null);
       },
       (error: unknown) => {
-        const message = error instanceof Error ? error.message : 'The selected GPU could not be started safely.';
+        const message = userFacingErrorMessage(error, 'The selected GPU could not be started safely.');
         dispatch({ type: 'RUNTIME_ERROR', scope: 'pod', message });
       },
     ).finally(() => setGpuSelectorBusy(false));
@@ -1357,7 +1364,7 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
     ).then((result) => {
       setGpuPriceAttention(result.state === 'price_attention' ? result : null);
     }, (error: unknown) => {
-      const message = error instanceof Error ? error.message : 'The actual GPU price could not be confirmed safely.';
+      const message = userFacingErrorMessage(error, 'The actual GPU price could not be confirmed safely.');
       dispatch({ type: 'RUNTIME_ERROR', scope: 'pod', message });
     }).finally(() => setGpuPriceConfirmBusy(false));
   }, [gpuPriceAttention, runtime]);
