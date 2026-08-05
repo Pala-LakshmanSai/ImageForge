@@ -201,13 +201,39 @@ public static class ImageForgePerfInput {
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int command);
   [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr processId);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint sourceThreadId, uint targetThreadId, bool attach);
+  [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hWnd);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern uint SendInput(uint count, INPUT[] inputs, int size);
   public const uint INPUT_MOUSE = 0, INPUT_KEYBOARD = 1, MOUSE_DOWN = 0x0002, MOUSE_UP = 0x0004, KEY_UP = 0x0002, KEY_SCANCODE = 0x0008;
   public static bool FocusWindow(IntPtr hWnd) {
+    if (hWnd == IntPtr.Zero) return false;
+    if (GetForegroundWindow() == hWnd) return true;
     ShowWindow(hWnd, 9);
-    BringWindowToTop(hWnd);
-    return SetForegroundWindow(hWnd);
+    var currentThread = GetCurrentThreadId();
+    var targetThread = GetWindowThreadProcessId(hWnd, IntPtr.Zero);
+    var foregroundWindow = GetForegroundWindow();
+    var foregroundThread = foregroundWindow == IntPtr.Zero
+      ? 0u
+      : GetWindowThreadProcessId(foregroundWindow, IntPtr.Zero);
+    var attachedForeground = foregroundThread != 0
+      && foregroundThread != currentThread
+      && AttachThreadInput(currentThread, foregroundThread, true);
+    var attachedTarget = targetThread != 0
+      && targetThread != currentThread
+      && targetThread != foregroundThread
+      && AttachThreadInput(currentThread, targetThread, true);
+    try {
+      BringWindowToTop(hWnd);
+      SetForegroundWindow(hWnd);
+      SetFocus(hWnd);
+      return GetForegroundWindow() == hWnd;
+    } finally {
+      if (attachedTarget) AttachThreadInput(currentThread, targetThread, false);
+      if (attachedForeground) AttachThreadInput(currentThread, foregroundThread, false);
+    }
   }
   public static void Click() {
     var inputs = new INPUT[2];

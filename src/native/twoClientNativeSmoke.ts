@@ -123,6 +123,27 @@ async function waitFor(
   invariant(predicate(), message);
 }
 
+async function waitForFreshWorkerEvent<T extends ProductionRuntimeEvent['type']>(
+  runtime: ProductionRuntimeFacade,
+  state: AppState,
+  events: readonly ProductionRuntimeEvent[],
+  eventOffset: number,
+  type: T,
+  message: string,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await runtime.pollBatch(state);
+    if (events.slice(eventOffset).some((event) => event.type === type)) return;
+    await new Promise((resolve) => window.setTimeout(resolve, 50));
+  }
+  invariant(
+    events.slice(eventOffset).some((event) => event.type === type),
+    message,
+  );
+}
+
 function renderedTextIncludes(...needles: string[]): boolean {
   const text = document.body.textContent ?? '';
   return needles.every((needle) => text.includes(needle));
@@ -225,9 +246,16 @@ async function runRole(
     invariant(lastEvent(events, 'stop-blocked')?.type === 'stop-blocked', 'active batch did not veto B Stop');
   }
   await controls.checkpoint('veto_done');
+  const initialReleaseEventOffset = events.length;
   await controls.checkpoint('release_initial_batch');
-  await runtime.pollBatch(readyState(FIRST_POD_ID));
-  invariant(lastEvent(events, 'idle')?.type === 'idle', `${role} did not observe busy release`);
+  await waitForFreshWorkerEvent(
+    runtime,
+    readyState(FIRST_POD_ID),
+    events,
+    initialReleaseEventOffset,
+    'idle',
+    `${role} did not observe busy release`,
+  );
   await controls.checkpoint('idle_after_release');
 
   await heartbeat(runtime, FIRST_POD_ID);
@@ -287,8 +315,16 @@ async function runRole(
     await heartbeat(runtime, SECOND_POD_ID);
     invariant(stopPhase(events)?.phase === 'cancelled', 'A pending Stop was not cancelled by generation');
   }
+  const generatedReleaseEventOffset = events.length;
   await controls.checkpoint('release_generated_batch');
-  await runtime.pollBatch(readyState(SECOND_POD_ID));
+  await waitForFreshWorkerEvent(
+    runtime,
+    readyState(SECOND_POD_ID),
+    events,
+    generatedReleaseEventOffset,
+    'idle',
+    `${role} did not observe generated-batch release`,
+  );
 
   await heartbeat(runtime, SECOND_POD_ID);
   if (role === 'B') await runtime.requestGpuStop(readyState(SECOND_POD_ID));
