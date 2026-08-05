@@ -373,9 +373,10 @@ impl GpuSelectorPerfHost {
                 "selector native input accepted action={:?} ordinal={}",
                 event.action, event.ordinal
             )),
-            Ok(None) => {
-                self.trace_qa("selector native input ignored because no matching arm was available")
-            }
+            Ok(None) => self.trace_qa(&format!(
+                "selector native input ignored because no matching arm was available lifecycle=native_input {}",
+                self.qa_state_summary()
+            )),
             Err(error) => self.trace_qa(&format!(
                 "selector native input rejected code={} message={}",
                 error.code, error.message
@@ -394,6 +395,21 @@ impl GpuSelectorPerfHost {
             .armed
             .as_ref()
             .and_then(|armed| armed.native_window_size)
+    }
+
+    fn qa_state_summary(&self) -> String {
+        let inner = self.inner.lock().expect("selector perf lock");
+        let armed = inner
+            .armed
+            .as_ref()
+            .map(|sample| format!("{:?}#{}", sample.action, sample.ordinal))
+            .unwrap_or_else(|| "none".to_owned());
+        let pending = inner
+            .pending
+            .as_ref()
+            .map(|sample| format!("{:?}#{}", sample.action, sample.ordinal))
+            .unwrap_or_else(|| "none".to_owned());
+        format!("armed={armed} pending={pending}")
     }
 
     fn clear_pending_sample(&self, sample_id: &str) {
@@ -446,9 +462,25 @@ impl GpuSelectorPerfHost {
     /// conditions required by the installed gate.  This is deliberately
     /// native-side; a renderer cannot rescue a backgrounded or resized sample.
     pub(crate) fn invalidate_native_sample(&self) {
-        let mut inner = self.inner.lock().expect("selector perf lock");
-        inner.armed = None;
-        inner.pending = None;
+        self.invalidate_native_sample_with_reason("direct");
+    }
+
+    pub(crate) fn invalidate_native_sample_with_reason(&self, reason: &str) {
+        let (armed, pending) = {
+            let mut inner = self.inner.lock().expect("selector perf lock");
+            (inner.armed.take(), inner.pending.take())
+        };
+        let armed_summary = armed
+            .as_ref()
+            .map(|sample| format!("{:?}#{}", sample.action, sample.ordinal))
+            .unwrap_or_else(|| "none".to_owned());
+        let pending_summary = pending
+            .as_ref()
+            .map(|sample| format!("{:?}#{}", sample.action, sample.ordinal))
+            .unwrap_or_else(|| "none".to_owned());
+        self.trace_qa(&format!(
+            "selector native sample invalidated reason={reason} lifecycle=window_event armed={armed_summary} pending={pending_summary}"
+        ));
     }
 
     pub fn commit(

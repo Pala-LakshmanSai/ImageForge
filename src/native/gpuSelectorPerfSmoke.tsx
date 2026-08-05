@@ -440,16 +440,28 @@ export function GpuSelectorPerfSmoke() {
   };
 
   useLayoutEffect(() => {
+    // Warm-open must arm only after the final closed state has painted. The
+    // unmeasured close/open transitions can otherwise race the arm with the
+    // native focus lifecycle on macOS.
+    if (action === 'warm_open') return;
     if (!sizeReadyRef.current || reportedRef.current || armedRef.current || armingRef.current || pendingRef.current !== null) return;
     // Use the committed render state for the warm-up gate. The refs are
     // useful inside native-event callbacks, but an arm request must observe
     // the same state transition that just closed the sheet; relying on a ref
     // updated by a separate effect can miss the first measured arm after the
     // final warm-up click.
-    if (action === 'warm_open' && (!warmupSettled || warmupsRemaining > 0 || open)) return;
-    if (action !== 'cold_open' && action !== 'warm_open' && !openRef.current) return;
+    if (action !== 'cold_open' && !openRef.current) return;
     requestNativeArm();
   }, [action, config, cycle, maxSamples, open, warmupSettled, warmupsRemaining]);
+
+  useEffect(() => {
+    if (action !== 'warm_open' || !warmupSettled || warmupsRemaining !== 0 || open) return undefined;
+    // Defer until after the final closed render has painted. `cycle` also
+    // retries this state-bound request when native viewport/listener setup
+    // completes after the warm-up clicks.
+    const frame = window.requestAnimationFrame(() => requestNativeArm());
+    return () => window.cancelAnimationFrame(frame);
+  }, [action, cycle, open, warmupSettled, warmupsRemaining]);
 
   const measuredInputReady = isMeasuredInputReady(warmupsRemaining, armState);
 
@@ -528,13 +540,6 @@ export function GpuSelectorPerfSmoke() {
               // the native arm effect has one unambiguous closed state before
               // the first measured open.
               setOpen(next.open);
-              if (next.warmupsRemaining === 0) {
-                // The final warm-up transition is an explicit renderer state
-                // boundary. Request the arm on the next frame as a fallback
-                // to the layout effect so a delayed effect cannot leave the
-                // installed gate waiting forever with no native trace.
-                window.requestAnimationFrame(() => requestNativeArm());
-              }
               return;
             }
             setArmState('idle');

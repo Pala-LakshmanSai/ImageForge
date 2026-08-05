@@ -4238,14 +4238,14 @@ pub fn run() {
             .ok();
             window.on_window_event(move |event| match event {
                 WindowEvent::Focused(false) => {
-                    selector_perf.invalidate_native_sample();
+                    selector_perf.invalidate_native_sample_with_reason("window_focus_lost");
                     gpu_start_foreground.invalidate();
                     if let Some(hook) = &native_input_hook {
                         hook.invalidate();
                     }
                 }
                 WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-                    selector_perf.invalidate_native_sample();
+                    selector_perf.invalidate_native_sample_with_reason("window_resize_lifecycle");
                     gpu_start_foreground.invalidate();
                     if let Some(hook) = &native_input_hook {
                         hook.invalidate();
@@ -4263,7 +4263,7 @@ pub fn run() {
                     }
                 }
                 WindowEvent::Destroyed => {
-                    selector_perf.invalidate_native_sample();
+                    selector_perf.invalidate_native_sample_with_reason("window_destroyed");
                     gpu_start_foreground.invalidate();
                     if let Some(hook) = &native_input_hook {
                         hook.remove_on_main_thread();
