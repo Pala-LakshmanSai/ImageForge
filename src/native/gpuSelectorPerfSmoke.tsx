@@ -468,7 +468,17 @@ export function GpuSelectorPerfSmoke() {
               type="button"
               data-gpu-selector-perf-close="true"
               onClick={() => setOpen(false)}
-              style={{ position: 'fixed', top: 8, right: 8, zIndex: 20 }}
+              // Keep this QA-only target large and below the native title bar.
+              // The installed smoke uses OS-level coordinates, so a tiny
+              // target makes warm-up results depend on window-frame metrics.
+              style={{
+                position: 'fixed',
+                top: 16,
+                right: 16,
+                zIndex: 20,
+                width: 180,
+                height: 48,
+              }}
             >
               Close QA sheet
             </button>
