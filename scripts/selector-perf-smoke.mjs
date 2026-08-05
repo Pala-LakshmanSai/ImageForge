@@ -478,9 +478,10 @@ function locationForMetrics(metrics, kind) {
     // close target. Use its center rather than a title-bar-relative point so
     // native smoke coordinates remain valid across frame metrics and DPI.
     close: center,
-    // Keep warm-up clicks away from the selector surface if the transparent
-    // QA close target is composited below a native/WebView layer.
-    warmup: { x: metrics.left + 16, y: metrics.top + metrics.height - 16 },
+    // The warm-up target covers the full content frame. The centered point is
+    // inside that frame on both target window implementations; frame-edge
+    // coordinates can land in the native resize border instead.
+    warmup: center,
     refresh: { x: metrics.left + 80, y: metrics.top + 55 },
   };
   const location = locations[kind];
