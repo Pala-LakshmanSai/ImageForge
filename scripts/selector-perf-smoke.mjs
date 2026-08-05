@@ -70,7 +70,11 @@ end tell`;
 }
 
 function macFocus(pid) {
-  run('osascript', ['-e', macProcessScript(pid, 'set frontmost to true')]);
+  const result = run('osascript', ['-e', macProcessScript(pid, `set wasFrontmost to frontmost
+    if not wasFrontmost then set frontmost to true
+    return wasFrontmost`)]).toLowerCase();
+  if (!['true', 'false'].includes(result)) fail(`invalid macOS foreground state: ${result}`);
+  return result === 'true';
 }
 
 const MAC_INPUT_HELPER_SOURCE = String.raw`
@@ -532,7 +536,16 @@ async function clickAt(platform, pid, location, macInputHelperPath, focus = fals
   // after the native arm is accepted. Those queries can trigger a focus
   // lifecycle transition and invalidate the one-use authorization.
   if (platform === 'macos-arm64') {
-    macClick(pid, location, macInputHelperPath, focus);
+    if (focus) {
+      const alreadyFrontmost = macFocus(pid);
+      // An activation click can pass the AppKit native focus checks while the
+      // WKWebView is still completing activation and never reach the DOM.
+      // Do not reassert focus for every warm-up; when activation was actually
+      // required, give that one lifecycle transition a run-loop turn before
+      // posting the unmeasured click.
+      if (!alreadyFrontmost) await sleep(100);
+    }
+    macClick(pid, location, macInputHelperPath, false);
   } else if (inputSession !== null) {
     await inputSession.click(location);
   } else {
