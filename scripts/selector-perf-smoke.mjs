@@ -270,9 +270,13 @@ function clickAt(platform, pid, kind, macInputHelperPath) {
   // every click so titlebar/content movement cannot send a sample to stale
   // coordinates.
   const metrics = windowMetrics(platform, pid);
+  const center = { x: metrics.left + metrics.width / 2, y: metrics.top + metrics.height / 2 };
   const locations = {
-    center: { x: metrics.left + metrics.width / 2, y: metrics.top + metrics.height / 2 },
-    close: { x: metrics.left + metrics.width - 80, y: metrics.top + 55 },
+    center,
+    // The warm-open harness intentionally renders a full-frame transparent
+    // close target. Use its center rather than a title-bar-relative point so
+    // native smoke coordinates remain valid across frame metrics and DPI.
+    close: center,
     refresh: { x: metrics.left + 80, y: metrics.top + 55 },
   };
   const location = locations[kind];
@@ -291,7 +295,7 @@ function sendKey(platform, pid, key, macInputHelperPath) {
   }
 }
 
-function waitForFile(path, timeoutMs, child, description) {
+function waitForFile(path, timeoutMs, child, description, logPath) {
   return new Promise((resolvePromise, reject) => {
     const deadline = Date.now() + timeoutMs;
     const poll = () => {
@@ -300,11 +304,11 @@ function waitForFile(path, timeoutMs, child, description) {
         return;
       }
       if (child.exitCode !== null) {
-        reject(new Error(`${description} process exited ${child.exitCode} before its result was written.`));
+        reject(new Error(`${description} process exited ${child.exitCode} before its result was written; application log tail:\n${logTail(logPath)}`));
         return;
       }
       if (Date.now() >= deadline) {
-        reject(new Error(`${description} timed out waiting for ${path}.`));
+        reject(new Error(`${description} timed out waiting for ${path}; application log tail:\n${logTail(logPath)}`));
         return;
       }
       setTimeout(poll, 250);
@@ -318,11 +322,11 @@ function sampleCount(path) {
   return readFileSync(path, 'utf8').split('\n').filter((line) => line.trim()).length;
 }
 
-async function waitForSamples(path, count, child, description) {
+async function waitForSamples(path, count, child, description, logPath) {
   const deadline = Date.now() + 15_000;
   while (sampleCount(path) < count) {
-    if (child.exitCode !== null) fail(`${description} exited ${child.exitCode} before sample ${count}`);
-    if (Date.now() >= deadline) fail(`${description} timed out after ${sampleCount(path)} samples; expected ${count}`);
+    if (child.exitCode !== null) fail(`${description} exited ${child.exitCode} before sample ${count}; application log tail:\n${logTail(logPath)}`);
+    if (Date.now() >= deadline) fail(`${description} timed out after ${sampleCount(path)} samples; expected ${count}; application log tail:\n${logTail(logPath)}`);
     await sleep(100);
   }
 }
@@ -450,7 +454,7 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
       if (action === 'cold_open') {
         await waitForNextArm();
         clickAt(config.platform, child.pid, 'center', macInputHelperPath);
-        await waitForFile(resultPath, 20_000, child, `${action} launch ${launchIndex + 1}`);
+        await waitForFile(resultPath, 20_000, child, `${action} launch ${launchIndex + 1}`, logPath);
       } else if (action === 'warm_open') {
         // Three close/open cycles are intentionally unrecorded warm-ups. The
         // harness explicitly leaves the sheet closed after the third open so
@@ -465,17 +469,17 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
         for (let ordinal = 1; ordinal <= 30; ordinal += 1) {
           await waitForNextArm();
           clickAt(config.platform, child.pid, 'center', macInputHelperPath);
-          await waitForSamples(samplesPath, ordinal, child, `${action} ${width}x${height}`);
+          await waitForSamples(samplesPath, ordinal, child, `${action} ${width}x${height}`, logPath);
           await sleep(250);
         }
-        await waitForFile(resultPath, 10_000, child, `${action} ${width}x${height}`);
+        await waitForFile(resultPath, 10_000, child, `${action} ${width}x${height}`, logPath);
       } else if (action === 'refresh_loading') {
         for (let ordinal = 1; ordinal <= 30; ordinal += 1) {
           await waitForNextArm();
           clickAt(config.platform, child.pid, 'refresh', macInputHelperPath);
-          await waitForSamples(samplesPath, ordinal, child, `${action} ${width}x${height}`);
+          await waitForSamples(samplesPath, ordinal, child, `${action} ${width}x${height}`, logPath);
         }
-        await waitForFile(resultPath, 10_000, child, `${action} ${width}x${height}`);
+        await waitForFile(resultPath, 10_000, child, `${action} ${width}x${height}`, logPath);
       } else {
         for (let ordinal = 1; ordinal <= 30; ordinal += 1) {
           const key = action === 'keyboard_move'
@@ -483,9 +487,9 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
             : 'space';
           await waitForNextArm();
           sendKey(config.platform, child.pid, key, macInputHelperPath);
-          await waitForSamples(samplesPath, ordinal, child, `${action} ${width}x${height}`);
+          await waitForSamples(samplesPath, ordinal, child, `${action} ${width}x${height}`, logPath);
         }
-        await waitForFile(resultPath, 10_000, child, `${action} ${width}x${height}`);
+        await waitForFile(resultPath, 10_000, child, `${action} ${width}x${height}`, logPath);
       }
       if (readFileSync(resultPath, 'utf8').split('\n')[0] !== 'PASS') {
         fail(`${action} ${width}x${height} reported failure: ${readFileSync(resultPath, 'utf8').trim()}`);
