@@ -1,6 +1,6 @@
 [package]
 name = "imageforge-desktop-core"
-version = "0.1.10"
+version = "0.1.11"
 description = "Narrow native host for the ImageForge desktop production console"
 authors = ["ImageForge"]
 edition = "2021"

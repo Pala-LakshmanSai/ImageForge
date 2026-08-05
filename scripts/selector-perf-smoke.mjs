@@ -174,13 +174,13 @@ function macMetrics(pid) {
   return { left: values[0], top: values[1], width: values[2], height: values[3] };
 }
 
-function macClick(pid, location, inputHelperPath) {
-  macFocus(pid);
+function macClick(pid, location, inputHelperPath, focus = true) {
+  if (focus) macFocus(pid);
   run(inputHelperPath, ['click', String(Math.round(location.x)), String(Math.round(location.y))]);
 }
 
-function macKey(pid, keyCode, inputHelperPath) {
-  macFocus(pid);
+function macKey(pid, keyCode, inputHelperPath, focus = true) {
+  if (focus) macFocus(pid);
   run(inputHelperPath, ['key', String(keyCode)]);
 }
 
@@ -228,36 +228,35 @@ public static class ImageForgePerfInput {
   }
 }`;
 
-function windowsCommand(pid, action) {
+function windowsCommand(pid, action, focus = true) {
   const script = `Add-Type @'
 ${WINDOWS_HELPER}
 '@
 $process = Get-Process -Id ${pid} -ErrorAction Stop
 $handle = $process.MainWindowHandle
 if ($handle -eq 0) { throw 'main window is unavailable' }
-[ImageForgePerfInput]::FocusWindow($handle) | Out-Null
-if ([ImageForgePerfInput]::GetForegroundWindow() -ne $handle) { throw 'main window could not be focused' }
+${focus ? '[ImageForgePerfInput]::FocusWindow($handle) | Out-Null\nif ([ImageForgePerfInput]::GetForegroundWindow() -ne $handle) { throw \'main window could not be focused\' }' : ''}
 ${action}`;
   return run('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script]);
 }
 
-function windowsMetrics(pid) {
-  const output = windowsCommand(pid, '$rect = New-Object ImageForgePerfInput+RECT\n[ImageForgePerfInput]::GetWindowRect($handle, [ref]$rect) | Out-Null\nWrite-Output ("{0},{1},{2},{3}" -f $rect.Left,$rect.Top,($rect.Right-$rect.Left),($rect.Bottom-$rect.Top))');
+function windowsMetrics(pid, focus = true) {
+  const output = windowsCommand(pid, '$rect = New-Object ImageForgePerfInput+RECT\n[ImageForgePerfInput]::GetWindowRect($handle, [ref]$rect) | Out-Null\nWrite-Output ("{0},{1},{2},{3}" -f $rect.Left,$rect.Top,($rect.Right-$rect.Left),($rect.Bottom-$rect.Top))', focus);
   const values = output.split(',').map((value) => Number(value));
   if (values.length !== 4 || values.some((value) => !Number.isFinite(value))) fail(`invalid Windows window metrics: ${output}`);
   return { left: values[0], top: values[1], width: values[2], height: values[3] };
 }
 
-function windowsClick(pid, location) {
-  windowsCommand(pid, `[ImageForgePerfInput]::SetCursorPos(${Math.round(location.x)}, ${Math.round(location.y)}) | Out-Null\n[ImageForgePerfInput]::Click()`);
+function windowsClick(pid, location, focus = true) {
+  windowsCommand(pid, `[ImageForgePerfInput]::SetCursorPos(${Math.round(location.x)}, ${Math.round(location.y)}) | Out-Null\n[ImageForgePerfInput]::Click()`, focus);
 }
 
-function windowsKey(pid, virtualKey) {
-  windowsCommand(pid, `[ImageForgePerfInput]::Key(${virtualKey})`);
+function windowsKey(pid, virtualKey, focus = true) {
+  windowsCommand(pid, `[ImageForgePerfInput]::Key(${virtualKey})`, focus);
 }
 
-function windowMetrics(platform, pid) {
-  return platform === 'macos-arm64' ? macMetrics(pid) : windowsMetrics(pid);
+function windowMetrics(platform, pid, focus = true) {
+  return platform === 'macos-arm64' ? macMetrics(pid) : windowsMetrics(pid, focus);
 }
 
 function focusWindow(platform, pid) {
@@ -265,11 +264,11 @@ function focusWindow(platform, pid) {
   else windowsCommand(pid, '');
 }
 
-function clickAt(platform, pid, kind, macInputHelperPath) {
+function clickAt(platform, pid, kind, macInputHelperPath, focus = true) {
   // Resize is asynchronous in the renderer. Re-read the native frame for
   // every click so titlebar/content movement cannot send a sample to stale
   // coordinates.
-  const metrics = windowMetrics(platform, pid);
+  const metrics = windowMetrics(platform, pid, focus);
   const center = { x: metrics.left + metrics.width / 2, y: metrics.top + metrics.height / 2 };
   const locations = {
     center,
@@ -281,17 +280,17 @@ function clickAt(platform, pid, kind, macInputHelperPath) {
   };
   const location = locations[kind];
   if (!location) fail(`unknown click target ${kind}`);
-  if (platform === 'macos-arm64') macClick(pid, location, macInputHelperPath);
-  else windowsClick(pid, location);
+  if (platform === 'macos-arm64') macClick(pid, location, macInputHelperPath, focus);
+  else windowsClick(pid, location, focus);
 }
 
-function sendKey(platform, pid, key, macInputHelperPath) {
+function sendKey(platform, pid, key, macInputHelperPath, focus = true) {
   if (platform === 'macos-arm64') {
     const codes = { up: 126, down: 125, space: 49 };
-    macKey(pid, codes[key], macInputHelperPath);
+    macKey(pid, codes[key], macInputHelperPath, focus);
   } else {
     const codes = { up: 0x26, down: 0x28, space: 0x20 };
-    windowsKey(pid, codes[key]);
+    windowsKey(pid, codes[key], focus);
   }
 }
 
@@ -453,7 +452,10 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
 
       if (action === 'cold_open') {
         await waitForNextArm();
-        clickAt(config.platform, child.pid, 'center', macInputHelperPath);
+        // The native arm is invalidated by a focus transition. Coordinates
+        // and focus are settled before arm; the measured event must not
+        // refocus the window while the one-use authorization is live.
+        clickAt(config.platform, child.pid, 'center', macInputHelperPath, false);
         await waitForFile(resultPath, 20_000, child, `${action} launch ${launchIndex + 1}`, logPath);
       } else if (action === 'warm_open') {
         // Three close/open cycles are intentionally unrecorded warm-ups. The
@@ -468,7 +470,7 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
         await sleep(500);
         for (let ordinal = 1; ordinal <= 30; ordinal += 1) {
           await waitForNextArm();
-          clickAt(config.platform, child.pid, 'center', macInputHelperPath);
+          clickAt(config.platform, child.pid, 'center', macInputHelperPath, false);
           await waitForSamples(samplesPath, ordinal, child, `${action} ${width}x${height}`, logPath);
           await sleep(250);
         }
@@ -476,7 +478,7 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
       } else if (action === 'refresh_loading') {
         for (let ordinal = 1; ordinal <= 30; ordinal += 1) {
           await waitForNextArm();
-          clickAt(config.platform, child.pid, 'refresh', macInputHelperPath);
+          clickAt(config.platform, child.pid, 'refresh', macInputHelperPath, false);
           await waitForSamples(samplesPath, ordinal, child, `${action} ${width}x${height}`, logPath);
         }
         await waitForFile(resultPath, 10_000, child, `${action} ${width}x${height}`, logPath);
@@ -486,7 +488,7 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
             ? (ordinal % 2 === 1 ? 'down' : 'up')
             : 'space';
           await waitForNextArm();
-          sendKey(config.platform, child.pid, key, macInputHelperPath);
+          sendKey(config.platform, child.pid, key, macInputHelperPath, false);
           await waitForSamples(samplesPath, ordinal, child, `${action} ${width}x${height}`, logPath);
         }
         await waitForFile(resultPath, 10_000, child, `${action} ${width}x${height}`, logPath);
