@@ -13,7 +13,7 @@ use ::windows::core::Interface;
 use ::windows::Win32::Foundation::HWND;
 use std::cell::RefCell;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{Manager, WebviewWindow};
@@ -22,9 +22,10 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2Controller, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN, COREWEBVIEW2_PHYSICAL_KEY_STATUS,
 };
 use windows_sys::Win32::Foundation::{
-    CloseHandle, HANDLE, HINSTANCE, HMODULE, INVALID_HANDLE_VALUE, LPARAM, LRESULT, POINT, WPARAM,
+    CloseHandle, FreeLibrary, HANDLE, HINSTANCE, HMODULE, INVALID_HANDLE_VALUE, LPARAM, LRESULT,
+    POINT, WPARAM,
 };
-use windows_sys::Win32::System::LibraryLoader::{FreeLibrary, GetProcAddress, LoadLibraryW};
+use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::System::Memory::{
     CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS,
     MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
@@ -556,7 +557,7 @@ unsafe extern "system" fn trusted_window_proc(
     hwnd: windows_sys::Win32::Foundation::HWND,
     message: u32,
     w_param: WPARAM,
-    _l_param: LPARAM,
+    l_param: LPARAM,
 ) -> LRESULT {
     if message == TRUSTED_INPUT_MESSAGE {
         // The browser helper's WM_APP is only a wake-up carrying a one-use
@@ -899,10 +900,8 @@ fn set_mapping_active(view: *mut HookConfig, active: bool) {
         return;
     }
     unsafe {
-        windows_sys::Win32::System::Threading::InterlockedExchange(
-            std::ptr::addr_of_mut!((*view).active),
-            if active { 1 } else { 0 },
-        );
+        AtomicI32::from_ptr(std::ptr::addr_of_mut!((*view).active))
+            .store(if active { 1 } else { 0 }, Ordering::Release);
     }
 }
 
@@ -911,10 +910,8 @@ fn clear_mapping_event(view: *mut HookConfig) {
         return;
     }
     unsafe {
-        windows_sys::Win32::System::Threading::InterlockedExchange(
-            std::ptr::addr_of_mut!((*view).event_state),
-            HOOK_EVENT_EMPTY,
-        );
+        AtomicI32::from_ptr(std::ptr::addr_of_mut!((*view).event_state))
+            .store(HOOK_EVENT_EMPTY, Ordering::Release);
     }
 }
 
@@ -925,8 +922,11 @@ fn consume_hook_event(view: *mut HookConfig, sequence: u64) -> Option<(usize, PO
     unsafe {
         if std::ptr::read_volatile(std::ptr::addr_of!((*view).magic)) != TRUSTED_INPUT_MAGIC
             || std::ptr::read_volatile(std::ptr::addr_of!((*view).version)) != TRUSTED_INPUT_VERSION
-            || std::ptr::read_volatile(std::ptr::addr_of!((*view).active)) == 0
-            || std::ptr::read_volatile(std::ptr::addr_of!((*view).event_state)) != HOOK_EVENT_READY
+            || AtomicI32::from_ptr(std::ptr::addr_of_mut!((*view).active)).load(Ordering::Acquire)
+                == 0
+            || AtomicI32::from_ptr(std::ptr::addr_of_mut!((*view).event_state))
+                .load(Ordering::Acquire)
+                != HOOK_EVENT_READY
             || std::ptr::read_volatile(std::ptr::addr_of!((*view).event_sequence)) != sequence
         {
             return None;
@@ -937,11 +937,14 @@ fn consume_hook_event(view: *mut HookConfig, sequence: u64) -> Option<(usize, PO
             y: std::ptr::read_volatile(std::ptr::addr_of!((*view).event_y)),
         };
         if target == 0
-            || windows_sys::Win32::System::Threading::InterlockedCompareExchange(
-                std::ptr::addr_of_mut!((*view).event_state),
-                HOOK_EVENT_EMPTY,
-                HOOK_EVENT_READY,
-            ) != HOOK_EVENT_READY
+            || AtomicI32::from_ptr(std::ptr::addr_of_mut!((*view).event_state))
+                .compare_exchange(
+                    HOOK_EVENT_READY,
+                    HOOK_EVENT_EMPTY,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_err()
         {
             return None;
         }
