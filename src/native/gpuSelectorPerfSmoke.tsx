@@ -243,7 +243,7 @@ export function GpuSelectorPerfSmoke() {
   const openRef = useRef(open);
   const snapshotRef = useRef(snapshot);
   const warmupsRef = useRef(warmupsRemaining);
-  const ordinalRef = useRef(1);
+  const ordinalRef = useRef(config.initialOrdinal);
   const armedRef = useRef(false);
   const armingRef = useRef(false);
   const armProbeDoneRef = useRef(false);

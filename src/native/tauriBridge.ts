@@ -358,6 +358,7 @@ declare global {
     __IMAGEFORGE_GPU_SELECTOR_PERF_QA__?: boolean;
     __IMAGEFORGE_GPU_SELECTOR_PERF_QA_CONFIG__?: {
       action: GpuSelectorPerfActionV1;
+      initialOrdinal: number;
       viewportWidth: 1280 | 1440;
       viewportHeight: 720 | 900;
     };

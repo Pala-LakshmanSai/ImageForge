@@ -4160,8 +4160,19 @@ pub fn run() {
                                 "The selector performance viewport height is invalid.",
                             )
                         })?;
+                    let initial_ordinal = std::env::var("IMAGEFORGE_GPU_SELECTOR_PERF_ORDINAL")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .filter(|value| (1..=30).contains(value))
+                        .ok_or_else(|| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                "The selector performance ordinal is invalid.",
+                            )
+                        })?;
                     let config = serde_json::json!({
                         "action": action,
+                        "initialOrdinal": initial_ordinal,
                         "viewportWidth": viewport_width,
                         "viewportHeight": viewport_height,
                     });

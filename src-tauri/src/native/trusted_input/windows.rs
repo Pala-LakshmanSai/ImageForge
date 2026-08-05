@@ -341,8 +341,15 @@ pub(crate) fn install(
                         && args.VirtualKey(&mut virtual_key).is_ok()
                         && args.PhysicalKeyStatus(&mut physical_status).is_ok()
                 };
-                if !read_ok
-                    || event_kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
+                if !read_ok {
+                    selector_for_accelerator.trace_qa("windows accelerator key event read failed");
+                    return Ok(());
+                }
+                selector_for_accelerator.trace_qa(&format!(
+                    "windows accelerator key received virtual_key={} repeat_count={}",
+                    virtual_key, physical_status.RepeatCount
+                ));
+                if event_kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
                     || physical_status.RepeatCount != 1
                 {
                     return Ok(());

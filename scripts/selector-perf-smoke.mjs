@@ -203,7 +203,7 @@ public static class ImageForgePerfInput {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern uint SendInput(uint count, INPUT[] inputs, int size);
-  public const uint INPUT_MOUSE = 0, INPUT_KEYBOARD = 1, MOUSE_DOWN = 0x0002, MOUSE_UP = 0x0004, KEY_UP = 0x0002;
+  public const uint INPUT_MOUSE = 0, INPUT_KEYBOARD = 1, MOUSE_DOWN = 0x0002, MOUSE_UP = 0x0004, KEY_UP = 0x0002, KEY_SCANCODE = 0x0008;
   public static bool FocusWindow(IntPtr hWnd) {
     ShowWindow(hWnd, 9);
     BringWindowToTop(hWnd);
@@ -219,11 +219,15 @@ public static class ImageForgePerfInput {
   }
   public static void Key(ushort virtualKey) {
     var inputs = new INPUT[2];
+    var scanCode = virtualKey == 0x20 ? (ushort)0x39 : (ushort)0;
     inputs[0].type = INPUT_KEYBOARD;
-    inputs[0].u.ki.wVk = virtualKey;
+    inputs[0].u.ki.wVk = scanCode == 0 ? virtualKey : (ushort)0;
+    inputs[0].u.ki.wScan = scanCode;
+    inputs[0].u.ki.dwFlags = scanCode == 0 ? 0u : KEY_SCANCODE;
     inputs[1].type = INPUT_KEYBOARD;
-    inputs[1].u.ki.wVk = virtualKey;
-    inputs[1].u.ki.dwFlags = KEY_UP;
+    inputs[1].u.ki.wVk = scanCode == 0 ? virtualKey : (ushort)0;
+    inputs[1].u.ki.wScan = scanCode;
+    inputs[1].u.ki.dwFlags = scanCode == 0 ? KEY_UP : KEY_SCANCODE | KEY_UP;
     if (SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>()) != inputs.Length) throw new InvalidOperationException("SendInput keyboard failed");
   }
 }`;
@@ -620,7 +624,7 @@ async function waitForArm(logPath, expectedCount, child, description) {
   await sleep(100);
 }
 
-function launch(config, action, width, height, samplesPath, resultPath, logPath) {
+function launch(config, action, width, height, samplesPath, resultPath, logPath, initialOrdinal = 1) {
   const qaSessionId = randomUUID();
   const session = JSON.stringify({
     schemaVersion: 1,
@@ -640,6 +644,7 @@ function launch(config, action, width, height, samplesPath, resultPath, logPath)
     IMAGEFORGE_GPU_SELECTOR_PERF_QA_SESSION: session,
     IMAGEFORGE_GPU_SELECTOR_PERF_QA_SAMPLES: samplesPath,
     IMAGEFORGE_GPU_SELECTOR_PERF_ACTION: action,
+    IMAGEFORGE_GPU_SELECTOR_PERF_ORDINAL: String(initialOrdinal),
     IMAGEFORGE_GPU_SELECTOR_PERF_VIEWPORT_WIDTH: String(width),
     IMAGEFORGE_GPU_SELECTOR_PERF_VIEWPORT_HEIGHT: String(height),
   };
@@ -687,7 +692,8 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
     // and expire its five-second native authorization before the first click.
     let inputSession = null;
     if (config.platform === 'windows-x64') inputSession = await WindowsInputSession.start();
-    const child = launch(config, action, width, height, samplesPath, resultPath, logPath);
+    const initialOrdinal = action === 'cold_open' ? launchIndex + 1 : 1;
+    const child = launch(config, action, width, height, samplesPath, resultPath, logPath, initialOrdinal);
     let expectedArmCount = 0;
     const waitForNextArm = async () => {
       expectedArmCount += 1;
