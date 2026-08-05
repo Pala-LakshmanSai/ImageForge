@@ -475,7 +475,7 @@ export function GpuSelectorPerfSmoke() {
                 position: 'fixed',
                 top: 16,
                 right: 16,
-                zIndex: 20,
+                zIndex: 130,
                 width: 180,
                 height: 48,
               }}

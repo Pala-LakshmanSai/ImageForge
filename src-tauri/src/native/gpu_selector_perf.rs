@@ -315,14 +315,12 @@ impl GpuSelectorPerfHost {
     ) -> NativeResult<Option<GpuSelectorPerfStartedEventV1>> {
         let result: NativeResult<Option<GpuSelectorPerfStartedEventV1>> = (|| {
             // The platform adapter has just authenticated the OS event with
-            // its exact native window/focus checks.  Do not repeat that check
-            // through Tauri here: on Windows, WebView2 can have focus in its
-            // browser thread while the top-level Tauri window reports false
-            // for `is_focused()` during the same input dispatch.  Requiring
-            // visibility here still fails closed for a destroyed/hidden QA
-            // window without rejecting a native event that already passed the
-            // platform authority check.
-            require_main_visible(window)?;
+            // its exact native window, visibility, foreground, and focus
+            // checks.  Do not repeat that state read through Tauri here: the
+            // native callback may run on a WebView2/host dispatch thread where
+            // a second Tauri window query can return a stale or incompatible
+            // value.  This method is crate-private and has no renderer-call
+            // path; all callers are the platform adapters above it.
             let native_window_size = native_window_size(window)?;
             let event = self.start_native_inner_with_native_size(
                 input,
