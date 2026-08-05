@@ -143,6 +143,27 @@ describe('NativeGpuInventoryCoordinator', () => {
     coordinator.dispose();
   });
 
+  it('does not resolve visible selector rows from a non-terminal loading event', async () => {
+    const port = fakePort();
+    const coordinator = new NativeGpuInventoryCoordinator(port);
+    let settled = false;
+    const pending = coordinator.refreshForVisibleSelector(false).finally(() => {
+      settled = true;
+    });
+
+    await vi.waitFor(() => expect(port.beginRefresh).toHaveBeenCalledTimes(1));
+    port.emit(terminalEvent(snapshot('loading')));
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    port.emit(terminalEvent());
+    await expect(pending).resolves.toMatchObject({
+      state: 'ready',
+      receipt: { receiptId: RECEIPT },
+    });
+    coordinator.dispose();
+  });
+
   it('reconciles terminal rows from the native journal when the terminal event is missed', async () => {
     let loads = 0;
     const loading = snapshot('loading');

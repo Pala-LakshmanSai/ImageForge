@@ -336,6 +336,15 @@ export class NativeGpuInventoryCoordinator implements GpuAutoSelectionSourceV1 {
       this.#settlePendingFromSnapshot(event.snapshot);
       return;
     }
+    if (
+      accepted
+      && event.snapshot.state === 'loading'
+      && event.snapshot.includeEmergencyTier === pending.includeEmergencyTier
+    ) {
+      // Loading is progress, not selector authority. Keep the waiter alive
+      // until the matching terminal journal snapshot carries live rows.
+      return;
+    }
     this.#pending.delete(event.observationId);
     pending.cleanup();
     if (
