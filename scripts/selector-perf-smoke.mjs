@@ -283,7 +283,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
       'key' {
         if ($handle -eq 0) { throw 'main window is unavailable' }
         if ($parts.Count -ne 2) { throw 'key code is invalid' }
-        [ImageForgePerfInput]::Key([ushort]$parts[1])
+    [ImageForgePerfInput]::Key([uint16]$parts[1])
         Reply 'OK'
         break
       }
@@ -478,6 +478,9 @@ function locationForMetrics(metrics, kind) {
     // close target. Use its center rather than a title-bar-relative point so
     // native smoke coordinates remain valid across frame metrics and DPI.
     close: center,
+    // Keep warm-up clicks away from the selector surface if the transparent
+    // QA close target is composited below a native/WebView layer.
+    warmup: { x: metrics.left + 16, y: metrics.top + metrics.height - 16 },
     refresh: { x: metrics.left + 80, y: metrics.top + 55 },
   };
   const location = locations[kind];
@@ -720,9 +723,9 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
         // the next native arm has one deterministic starting state.
         let measuredLocation;
         for (let warmup = 0; warmup < 3; warmup += 1) {
-          await clickTarget(config.platform, child.pid, 'close', macInputHelperPath, true, inputSession);
+          await clickTarget(config.platform, child.pid, 'warmup', macInputHelperPath, true, inputSession);
           await sleep(250);
-          measuredLocation = await clickTarget(config.platform, child.pid, 'center', macInputHelperPath, true, inputSession);
+          measuredLocation = await clickTarget(config.platform, child.pid, 'warmup', macInputHelperPath, true, inputSession);
           await sleep(400);
         }
         await sleep(500);
