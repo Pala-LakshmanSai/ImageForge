@@ -15,7 +15,7 @@ import {
   type GpuSelectorPerfStartedEventV1,
 } from './tauriBridge';
 import {
-  advanceWarmOpen,
+  advanceWarmInput,
   isMeasuredInputReady,
   isWarmArmCandidate,
   type SelectorPerfArmState,
@@ -502,9 +502,9 @@ export function GpuSelectorPerfSmoke() {
   };
   scheduleWarmArmRef.current = scheduleWarmArm;
 
-  const advanceWarmup = (): boolean => {
+  const advanceWarmupInput = (): boolean => {
     if (action !== 'warm_open' || warmupsRef.current <= 0) return false;
-    const next = advanceWarmOpen(warmupsRef.current);
+    const next = advanceWarmInput(warmupsRef.current, openRef.current);
     warmupsRef.current = next.warmupsRemaining;
     openRef.current = next.open;
     setWarmupsRemaining(next.warmupsRemaining);
@@ -541,7 +541,33 @@ export function GpuSelectorPerfSmoke() {
   }
 
   return (
-    <main data-gpu-selector-perf-qa="v1" style={{ width: '100%', minWidth: 0 }}>
+    <main
+      data-gpu-selector-perf-qa="v1"
+      onMouseDownCapture={() => {
+        warmOpenMouseUpHandledRef.current = false;
+      }}
+      onMouseUpCapture={(event) => {
+        if (!advanceWarmupInput()) return;
+        // The warm-up state follows the trusted mouse-up synchronously, even
+        // when WebKit has not replaced the previous open/close target yet.
+        // Consume the stale target event so its own handler cannot undo the
+        // authoritative ref transition.
+        warmOpenMouseUpHandledRef.current = true;
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+      onClickCapture={(event) => {
+        if (action !== 'warm_open' || event.detail === 0) return;
+        const handledMouseUp = warmOpenMouseUpHandledRef.current;
+        warmOpenMouseUpHandledRef.current = false;
+        if (!handledMouseUp && !advanceWarmupInput()) return;
+        // Some WebKit paths expose click without a React mouse-up. Handle that
+        // fallback here while keeping the measured warm-open click untouched.
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+      style={{ width: '100%', minWidth: 0 }}
+    >
       {open ? (
         <>
           <GpuSelector
@@ -556,17 +582,9 @@ export function GpuSelectorPerfSmoke() {
             <button
               type="button"
               data-gpu-selector-perf-close="true"
-              onMouseUp={() => {
-                openRef.current = false;
-                setOpen(false);
-              }}
               onClick={(event) => {
-                // Keyboard activation has no mouse-up. Pointer warm-ups are
-                // intentionally advanced from mouse-up because that is the
-                // exact trusted native boundary used by the installed gate.
                 if (event.detail === 0) {
-                  openRef.current = false;
-                  setOpen(false);
+                  advanceWarmupInput();
                 }
               }}
               aria-label="Close QA sheet"
@@ -614,25 +632,11 @@ export function GpuSelectorPerfSmoke() {
           type="button"
           data-gpu-selector-perf-open="true"
           aria-busy={warmupsRemaining === 0 && armState !== 'armed'}
-          onMouseDown={() => {
-            // Clear a stale marker when the prior warm-up changed the target
-            // before the browser could dispatch its follow-on click.
-            warmOpenMouseUpHandledRef.current = false;
-          }}
-          onMouseUp={() => {
-            if (action === 'warm_open' && warmupsRef.current > 0) {
-              warmOpenMouseUpHandledRef.current = true;
-              advanceWarmup();
-            }
-          }}
           onClick={(event) => {
-            if (event.detail > 0 && warmOpenMouseUpHandledRef.current) {
-              warmOpenMouseUpHandledRef.current = false;
-              return;
-            }
-            // Keyboard activation has no mouse-up; onClick is also a fallback
-            // if a platform emits click without the corresponding DOM mouse-up.
-            if (advanceWarmup()) return;
+            // Keyboard activation has no mouse-up. Pointer warm-ups are
+            // consumed by the main capture boundary above.
+            if (event.detail === 0 && advanceWarmupInput()) return;
+            if (action === 'warm_open' && warmupsRef.current > 0) return;
             setArmState('idle');
             openRef.current = true;
             setOpen(true);

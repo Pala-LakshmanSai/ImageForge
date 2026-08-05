@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  advanceWarmInput,
   advanceWarmOpen,
   isMeasuredInputReady,
   isWarmArmCandidate,
@@ -17,6 +18,23 @@ describe('selector performance warm-up state', () => {
 
   it('does not produce a negative warm-up count', () => {
     expect(advanceWarmOpen(0)).toEqual({ warmupsRemaining: 0, open: false });
+  });
+
+  it('completes three close-open warm-ups from six inputs even when the rendered target is stale', () => {
+    let state = { warmupsRemaining: 3, open: true };
+    const states = Array.from({ length: 6 }, () => {
+      state = advanceWarmInput(state.warmupsRemaining, state.open);
+      return state;
+    });
+
+    expect(states).toEqual([
+      { warmupsRemaining: 3, open: false },
+      { warmupsRemaining: 2, open: true },
+      { warmupsRemaining: 2, open: false },
+      { warmupsRemaining: 1, open: true },
+      { warmupsRemaining: 1, open: false },
+      { warmupsRemaining: 0, open: false },
+    ]);
   });
 
   it('keeps a measured control disabled until native arm acceptance commits', () => {

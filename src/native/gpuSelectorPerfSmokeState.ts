@@ -18,6 +18,22 @@ export function advanceWarmOpen(warmupsRemaining: number): {
   };
 }
 
+export function advanceWarmInput(
+  warmupsRemaining: number,
+  open: boolean,
+): {
+  readonly warmupsRemaining: number;
+  readonly open: boolean;
+} {
+  if (warmupsRemaining <= 0) {
+    return { warmupsRemaining: 0, open };
+  }
+  if (open) {
+    return { warmupsRemaining, open: false };
+  }
+  return advanceWarmOpen(warmupsRemaining);
+}
+
 export function isWarmArmCandidate(
   warmupsRemaining: number,
   open: boolean,
