@@ -477,10 +477,8 @@ export function GpuSelectorPerfSmoke() {
             <button
               type="button"
               data-gpu-selector-perf-refresh="true"
-              disabled={!measuredInputReady}
-              aria-busy={armState !== 'armed'}
+              aria-busy={!measuredInputReady}
               onClick={() => {
-                if (!measuredInputReady) return;
                 setArmState('idle');
                 setSnapshot(fixtureSnapshot('loading'));
               }}
@@ -494,7 +492,6 @@ export function GpuSelectorPerfSmoke() {
         <button
           type="button"
           data-gpu-selector-perf-open="true"
-          disabled={warmupsRemaining === 0 && !measuredInputReady}
           aria-busy={warmupsRemaining === 0 && armState !== 'armed'}
           onClick={() => {
             if (action === 'warm_open' && warmupsRemaining > 0) {
@@ -507,7 +504,6 @@ export function GpuSelectorPerfSmoke() {
               setOpen(next.open);
               return;
             }
-            if (!measuredInputReady) return;
             setArmState('idle');
             setOpen(true);
           }}
