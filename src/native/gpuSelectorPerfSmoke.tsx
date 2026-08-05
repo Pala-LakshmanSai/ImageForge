@@ -444,14 +444,21 @@ export function GpuSelectorPerfSmoke() {
     // unmeasured close/open transitions can otherwise race the arm with the
     // native focus lifecycle on macOS.
     if (action === 'warm_open') {
-      if (warmupsRemaining !== 0 || open || !sizeReadyRef.current) return undefined;
+      if (warmupsRemaining !== 0 || open) return undefined;
       let cancelled = false;
-      const frame = window.requestAnimationFrame(() => {
-        if (!cancelled && !openRef.current && warmupsRef.current === 0) requestNativeArm();
-      });
+      let frame: number | undefined;
+      const tryArm = () => {
+        if (cancelled || reportedRef.current || armedRef.current || armingRef.current || pendingRef.current !== null) return;
+        if (!sizeReadyRef.current || openRef.current || warmupsRef.current !== 0) {
+          frame = window.requestAnimationFrame(tryArm);
+          return;
+        }
+        requestNativeArm();
+      };
+      frame = window.requestAnimationFrame(tryArm);
       return () => {
         cancelled = true;
-        window.cancelAnimationFrame(frame);
+        if (frame !== undefined) window.cancelAnimationFrame(frame);
       };
     }
     if (!sizeReadyRef.current || reportedRef.current || armedRef.current || armingRef.current || pendingRef.current !== null) return undefined;
