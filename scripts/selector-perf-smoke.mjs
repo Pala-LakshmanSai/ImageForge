@@ -264,7 +264,7 @@ function focusWindow(platform, pid) {
   else windowsCommand(pid, '');
 }
 
-function clickAt(platform, pid, kind, macInputHelperPath, focus = true) {
+function clickLocation(platform, pid, kind, focus = true) {
   // Resize is asynchronous in the renderer. Re-read the native frame for
   // every click so titlebar/content movement cannot send a sample to stale
   // coordinates.
@@ -280,8 +280,29 @@ function clickAt(platform, pid, kind, macInputHelperPath, focus = true) {
   };
   const location = locations[kind];
   if (!location) fail(`unknown click target ${kind}`);
+  return location;
+}
+
+function clickAt(platform, pid, location, macInputHelperPath, focus = false) {
+  // A measured click must not query the window or launch a helper process
+  // after the native arm is accepted. Those queries can trigger a focus
+  // lifecycle transition and invalidate the one-use authorization.
   if (platform === 'macos-arm64') macClick(pid, location, macInputHelperPath, focus);
   else windowsClick(pid, location, focus);
+}
+
+function clickTarget(platform, pid, kind, macInputHelperPath, focus = true) {
+  const location = clickLocation(platform, pid, kind, focus);
+  clickAt(platform, pid, location, macInputHelperPath, focus);
+}
+
+function prepareMeasuredClick(platform, pid, kind) {
+  const location = clickLocation(platform, pid, kind, true);
+  // macOS metric collection reads the frame but does not activate the app;
+  // finish foregrounding before the arm request. WindowsMetrics already does
+  // this in the same pre-arm helper invocation.
+  if (platform === 'macos-arm64') focusWindow(platform, pid);
+  return location;
 }
 
 function sendKey(platform, pid, key, macInputHelperPath, focus = true) {
@@ -451,34 +472,42 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
       await sleep(750);
 
       if (action === 'cold_open') {
+        const location = prepareMeasuredClick(config.platform, child.pid, 'center');
         await waitForNextArm();
         // The native arm is invalidated by a focus transition. Coordinates
         // and focus are settled before arm; the measured event must not
         // refocus the window while the one-use authorization is live.
-        clickAt(config.platform, child.pid, 'center', macInputHelperPath, false);
+        clickAt(config.platform, child.pid, location, macInputHelperPath, false);
         await waitForFile(resultPath, 20_000, child, `${action} launch ${launchIndex + 1}`, logPath);
       } else if (action === 'warm_open') {
         // Three close/open cycles are intentionally unrecorded warm-ups. The
         // harness explicitly leaves the sheet closed after the third open so
         // the next native arm has one deterministic starting state.
         for (let warmup = 0; warmup < 3; warmup += 1) {
-          clickAt(config.platform, child.pid, 'close', macInputHelperPath);
+          clickTarget(config.platform, child.pid, 'close', macInputHelperPath);
           await sleep(250);
-          clickAt(config.platform, child.pid, 'center', macInputHelperPath);
+          clickTarget(config.platform, child.pid, 'center', macInputHelperPath);
           await sleep(400);
         }
         await sleep(500);
+        // Warm-up helpers may briefly own the foreground transition. Settle
+        // focus once more before the first renderer arm; no helper is started
+        // after the arm is accepted.
+        focusWindow(config.platform, child.pid);
+        await sleep(250);
         for (let ordinal = 1; ordinal <= 30; ordinal += 1) {
+          const location = prepareMeasuredClick(config.platform, child.pid, 'center');
           await waitForNextArm();
-          clickAt(config.platform, child.pid, 'center', macInputHelperPath, false);
+          clickAt(config.platform, child.pid, location, macInputHelperPath, false);
           await waitForSamples(samplesPath, ordinal, child, `${action} ${width}x${height}`, logPath);
           await sleep(250);
         }
         await waitForFile(resultPath, 10_000, child, `${action} ${width}x${height}`, logPath);
       } else if (action === 'refresh_loading') {
         for (let ordinal = 1; ordinal <= 30; ordinal += 1) {
+          const location = prepareMeasuredClick(config.platform, child.pid, 'refresh');
           await waitForNextArm();
-          clickAt(config.platform, child.pid, 'refresh', macInputHelperPath, false);
+          clickAt(config.platform, child.pid, location, macInputHelperPath, false);
           await waitForSamples(samplesPath, ordinal, child, `${action} ${width}x${height}`, logPath);
         }
         await waitForFile(resultPath, 10_000, child, `${action} ${width}x${height}`, logPath);
@@ -487,6 +516,8 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
           const key = action === 'keyboard_move'
             ? (ordinal % 2 === 1 ? 'down' : 'up')
             : 'space';
+          focusWindow(config.platform, child.pid);
+          await sleep(100);
           await waitForNextArm();
           sendKey(config.platform, child.pid, key, macInputHelperPath, false);
           await waitForSamples(samplesPath, ordinal, child, `${action} ${width}x${height}`, logPath);

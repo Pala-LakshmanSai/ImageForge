@@ -251,7 +251,17 @@ impl GpuSelectorPerfHost {
         // foreground window at the exact OS event. Allowing the harness to
         // arm before its external focus helper runs avoids a startup race;
         // focus loss still invalidates the arm through the window lifecycle.
-        require_main_visible(window)?;
+        self.trace_qa(&format!(
+            "selector arm preflight action={:?} ordinal={}",
+            input.action, input.ordinal
+        ));
+        if let Err(error) = require_main_visible(window) {
+            self.trace_qa(&format!(
+                "selector arm preflight rejected code={} message={}",
+                error.code, error.message
+            ));
+            return Err(error);
+        }
         let native_window_size = native_window_size(window)?;
         let requested_action = input.action;
         let requested_ordinal = input.ordinal;

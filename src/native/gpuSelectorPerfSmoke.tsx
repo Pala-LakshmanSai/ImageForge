@@ -2,7 +2,7 @@ import { LogicalSize } from '@tauri-apps/api/dpi';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type {
   GpuSelectorOfferV1,
   NativeGpuInventorySnapshotV1,
@@ -237,6 +237,7 @@ export function GpuSelectorPerfSmoke() {
   const [snapshot, setSnapshot] = useState(() => fixtureSnapshot());
   const [cycle, setCycle] = useState(0);
   const [warmupsRemaining, setWarmupsRemaining] = useState(config.action === 'warm_open' ? 3 : 0);
+  const [warmupSettled, setWarmupSettled] = useState(config.action !== 'warm_open');
   const [armState, setArmState] = useState<SelectorPerfArmState>('idle');
   const [error, setError] = useState<string | null>(null);
   const openRef = useRef(open);
@@ -405,14 +406,14 @@ export function GpuSelectorPerfSmoke() {
     };
   }, [action, config, maxSamples, readySnapshot]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!sizeReadyRef.current || reportedRef.current || armedRef.current || armingRef.current || pendingRef.current !== null) return;
     // Use the committed render state for the warm-up gate. The refs are
     // useful inside native-event callbacks, but an arm request must observe
     // the same state transition that just closed the sheet; relying on a ref
     // updated by a separate effect can miss the first measured arm after the
     // final warm-up click.
-    if (action === 'warm_open' && (warmupsRemaining > 0 || open)) return;
+    if (action === 'warm_open' && (!warmupSettled || warmupsRemaining > 0 || open)) return;
     if (action !== 'cold_open' && action !== 'warm_open' && !openRef.current) return;
     const armInput = {
       fixtureSha256: FIXTURE_SHA256,
@@ -443,7 +444,7 @@ export function GpuSelectorPerfSmoke() {
         armingRef.current = false;
       }
     })();
-  }, [action, config, cycle, maxSamples, open, warmupsRemaining]);
+  }, [action, config, cycle, maxSamples, open, warmupSettled, warmupsRemaining]);
 
   const measuredInputReady = isMeasuredInputReady(warmupsRemaining, armState);
 
@@ -516,6 +517,7 @@ export function GpuSelectorPerfSmoke() {
             if (action === 'warm_open' && warmupsRemaining > 0) {
               const next = advanceWarmOpen(warmupsRemaining);
               setWarmupsRemaining(next.warmupsRemaining);
+              setWarmupSettled(next.warmupsRemaining === 0);
               setArmState('idle');
               // Leave the sheet closed after the last unrecorded warm-up so
               // the native arm effect has one unambiguous closed state before
