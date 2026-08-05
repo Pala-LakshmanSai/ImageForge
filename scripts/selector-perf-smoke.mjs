@@ -228,6 +228,191 @@ public static class ImageForgePerfInput {
   }
 }`;
 
+const WINDOWS_SESSION_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+$pidValue = [int]$env:IMAGEFORGE_PERF_PID
+Add-Type @'
+${WINDOWS_HELPER}
+'@
+$process = Get-Process -Id $pidValue -ErrorAction Stop
+$handle = $process.MainWindowHandle
+if ($handle -eq 0) { throw 'main window is unavailable' }
+function Reply([string]$message) {
+  [Console]::Out.WriteLine($message)
+  [Console]::Out.Flush()
+}
+Reply 'READY'
+while ($null -ne ($line = [Console]::In.ReadLine())) {
+  try {
+    $parts = $line.Split('|')
+    switch ($parts[0]) {
+      'focus' {
+        if (-not [ImageForgePerfInput]::FocusWindow($handle)) { throw 'main window could not be focused' }
+        if ([ImageForgePerfInput]::GetForegroundWindow() -ne $handle) { throw 'main window could not be focused' }
+        Reply 'OK'
+        break
+      }
+      'metrics' {
+        $rect = New-Object ImageForgePerfInput+RECT
+        if (-not [ImageForgePerfInput]::GetWindowRect($handle, [ref]$rect)) { throw 'main window metrics are unavailable' }
+        Reply ("METRICS|{0}|{1}|{2}|{3}" -f $rect.Left, $rect.Top, ($rect.Right - $rect.Left), ($rect.Bottom - $rect.Top))
+        break
+      }
+      'click' {
+        if ($parts.Count -ne 3) { throw 'click coordinates are invalid' }
+        if (-not [ImageForgePerfInput]::SetCursorPos([int]$parts[1], [int]$parts[2])) { throw 'cursor could not be positioned' }
+        [ImageForgePerfInput]::Click()
+        Reply 'OK'
+        break
+      }
+      'key' {
+        if ($parts.Count -ne 2) { throw 'key code is invalid' }
+        [ImageForgePerfInput]::Key([ushort]$parts[1])
+        Reply 'OK'
+        break
+      }
+      'quit' {
+        Reply 'BYE'
+        exit 0
+      }
+      default { throw "unknown input command: $($parts[0])" }
+    }
+  } catch {
+    Reply ("ERR|{0}" -f $_.Exception.Message.Replace([char]13, ' ').Replace([char]10, ' '))
+  }
+}
+`;
+
+class WindowsInputSession {
+  static async start(pid) {
+    const session = new WindowsInputSession(pid);
+    await session.ready;
+    return session;
+  }
+
+  constructor(pid) {
+    this.child = spawn('powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      WINDOWS_SESSION_SCRIPT,
+    ], {
+      env: { ...process.env, IMAGEFORGE_PERF_PID: String(pid) },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    this.closed = false;
+    this.buffer = '';
+    this.pending = [];
+    this.stderr = '';
+    this.ready = new Promise((resolve, reject) => {
+      this.resolveReady = resolve;
+      this.rejectReady = reject;
+    });
+    this.child.stdout.on('data', (chunk) => this.consumeOutput(chunk.toString()));
+    this.child.stderr.on('data', (chunk) => {
+      this.stderr += chunk.toString();
+    });
+    this.child.once('error', (error) => {
+      this.rejectReady(error);
+      this.rejectPending(error);
+    });
+    this.child.once('exit', (code, signal) => {
+      const detail = new Error(`Windows input session exited ${code ?? `by ${signal}`}${this.stderr ? `: ${this.stderr.trim()}` : ''}`);
+      if (!this.readySettled) this.rejectReady(detail);
+      this.rejectPending(detail);
+    });
+    this.readySettled = false;
+  }
+
+  consumeOutput(chunk) {
+    this.buffer += chunk;
+    let newline;
+    while ((newline = this.buffer.indexOf('\n')) !== -1) {
+      const line = this.buffer.slice(0, newline).replace(/\r$/u, '');
+      this.buffer = this.buffer.slice(newline + 1);
+      if (!this.readySettled) {
+        if (line !== 'READY') {
+          this.rejectReady(new Error(`Windows input session did not initialize: ${line}`));
+          return;
+        }
+        this.readySettled = true;
+        this.resolveReady();
+        continue;
+      }
+      const request = this.pending.shift();
+      if (request) request.resolve(line);
+    }
+  }
+
+  rejectPending(error) {
+    for (const request of this.pending.splice(0)) request.reject(error);
+  }
+
+  async request(command) {
+    await this.ready;
+    if (this.closed) fail('Windows input session is closed');
+    return new Promise((resolvePromise, rejectPromise) => {
+      this.pending.push({ resolve: resolvePromise, reject: rejectPromise });
+      this.child.stdin.write(`${command}\n`, (error) => {
+        if (error) {
+          const request = this.pending.pop();
+          request?.reject(error);
+        }
+      });
+    });
+  }
+
+  async focus() {
+    const response = await this.request('focus');
+    if (response !== 'OK') fail(`Windows input focus failed: ${response}`);
+  }
+
+  async metrics() {
+    const response = await this.request('metrics');
+    const values = response.split('|').slice(1).map((value) => Number(value));
+    if (!response.startsWith('METRICS|') || values.length !== 4 || values.some((value) => !Number.isFinite(value))) {
+      fail(`invalid Windows input metrics: ${response}`);
+    }
+    return { left: values[0], top: values[1], width: values[2], height: values[3] };
+  }
+
+  async click(location) {
+    const response = await this.request(`click|${Math.round(location.x)}|${Math.round(location.y)}`);
+    if (response !== 'OK') fail(`Windows input click failed: ${response}`);
+  }
+
+  async key(virtualKey) {
+    const response = await this.request(`key|${virtualKey}`);
+    if (response !== 'OK') fail(`Windows input key failed: ${response}`);
+  }
+
+  async close() {
+    if (this.closed) return;
+    this.closed = true;
+    try {
+      this.child.stdin.end('quit\n');
+    } catch {
+      // The helper may already have exited with the application.
+    }
+    await new Promise((resolvePromise) => {
+      if (this.child.exitCode !== null) {
+        resolvePromise();
+        return;
+      }
+      const timeout = setTimeout(() => {
+        if (this.child.exitCode === null) this.child.kill();
+        resolvePromise();
+      }, 1_000);
+      this.child.once('exit', () => {
+        clearTimeout(timeout);
+        resolvePromise();
+      });
+    });
+  }
+}
+
 function windowsCommand(pid, action, focus = true) {
   const script = `Add-Type @'
 ${WINDOWS_HELPER}
@@ -264,11 +449,7 @@ function focusWindow(platform, pid) {
   else windowsCommand(pid, '');
 }
 
-function clickLocation(platform, pid, kind, focus = true) {
-  // Resize is asynchronous in the renderer. Re-read the native frame for
-  // every click so titlebar/content movement cannot send a sample to stale
-  // coordinates.
-  const metrics = windowMetrics(platform, pid, focus);
+function locationForMetrics(metrics, kind) {
   const center = { x: metrics.left + metrics.width / 2, y: metrics.top + metrics.height / 2 };
   const locations = {
     center,
@@ -283,20 +464,43 @@ function clickLocation(platform, pid, kind, focus = true) {
   return location;
 }
 
-function clickAt(platform, pid, location, macInputHelperPath, focus = false) {
+function clickLocation(platform, pid, kind, focus = true) {
+  // Resize is asynchronous in the renderer. Re-read the native frame for
+  // every click so titlebar/content movement cannot send a sample to stale
+  // coordinates.
+  const metrics = windowMetrics(platform, pid, focus);
+  return locationForMetrics(metrics, kind);
+}
+
+async function clickAt(platform, pid, location, macInputHelperPath, focus = false, inputSession = null) {
   // A measured click must not query the window or launch a helper process
   // after the native arm is accepted. Those queries can trigger a focus
   // lifecycle transition and invalidate the one-use authorization.
-  if (platform === 'macos-arm64') macClick(pid, location, macInputHelperPath, focus);
-  else windowsClick(pid, location, focus);
+  if (platform === 'macos-arm64') {
+    macClick(pid, location, macInputHelperPath, focus);
+  } else if (inputSession !== null) {
+    await inputSession.click(location);
+  } else {
+    windowsClick(pid, location, focus);
+  }
 }
 
-function clickTarget(platform, pid, kind, macInputHelperPath, focus = true) {
-  const location = clickLocation(platform, pid, kind, focus);
-  clickAt(platform, pid, location, macInputHelperPath, focus);
+async function clickTarget(platform, pid, kind, macInputHelperPath, focus = true, inputSession = null) {
+  let location;
+  if (inputSession !== null) {
+    if (focus) await inputSession.focus();
+    location = locationForMetrics(await inputSession.metrics(), kind);
+  } else {
+    location = clickLocation(platform, pid, kind, focus);
+  }
+  await clickAt(platform, pid, location, macInputHelperPath, focus, inputSession);
 }
 
-function prepareMeasuredClick(platform, pid, kind) {
+async function prepareMeasuredClick(platform, pid, kind, inputSession = null) {
+  if (inputSession !== null) {
+    await inputSession.focus();
+    return locationForMetrics(await inputSession.metrics(), kind);
+  }
   const location = clickLocation(platform, pid, kind, true);
   // macOS metric collection reads the frame but does not activate the app;
   // finish foregrounding before the arm request. WindowsMetrics already does
@@ -305,13 +509,14 @@ function prepareMeasuredClick(platform, pid, kind) {
   return location;
 }
 
-function sendKey(platform, pid, key, macInputHelperPath, focus = true) {
+async function sendKey(platform, pid, key, macInputHelperPath, focus = true, inputSession = null) {
   if (platform === 'macos-arm64') {
     const codes = { up: 126, down: 125, space: 49 };
     macKey(pid, codes[key], macInputHelperPath, focus);
   } else {
     const codes = { up: 0x26, down: 0x28, space: 0x20 };
-    windowsKey(pid, codes[key], focus);
+    if (inputSession !== null) await inputSession.key(codes[key]);
+    else windowsKey(pid, codes[key], focus);
   }
 }
 
@@ -452,6 +657,7 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
     const resultPath = join(runRoot, 'result.txt');
     const logPath = join(runRoot, 'app.log');
     const child = launch(config, action, width, height, samplesPath, resultPath, logPath);
+    let inputSession = null;
     let expectedArmCount = 0;
     const waitForNextArm = async () => {
       expectedArmCount += 1;
@@ -470,44 +676,46 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
       if (!metrics) fail(`${action} ${width}x${height} did not create a measurable window`);
       focusWindow(config.platform, child.pid);
       await sleep(750);
+      if (config.platform === 'windows-x64') inputSession = await WindowsInputSession.start(child.pid);
 
       if (action === 'cold_open') {
-        const location = prepareMeasuredClick(config.platform, child.pid, 'center');
+        const location = await prepareMeasuredClick(config.platform, child.pid, 'center', inputSession);
         await waitForNextArm();
         // The native arm is invalidated by a focus transition. Coordinates
         // and focus are settled before arm; the measured event must not
         // refocus the window while the one-use authorization is live.
-        clickAt(config.platform, child.pid, location, macInputHelperPath, false);
+        await clickAt(config.platform, child.pid, location, macInputHelperPath, false, inputSession);
         await waitForFile(resultPath, 20_000, child, `${action} launch ${launchIndex + 1}`, logPath);
       } else if (action === 'warm_open') {
         // Three close/open cycles are intentionally unrecorded warm-ups. The
         // harness explicitly leaves the sheet closed after the third open so
         // the next native arm has one deterministic starting state.
         for (let warmup = 0; warmup < 3; warmup += 1) {
-          clickTarget(config.platform, child.pid, 'close', macInputHelperPath);
+          await clickTarget(config.platform, child.pid, 'close', macInputHelperPath, true, inputSession);
           await sleep(250);
-          clickTarget(config.platform, child.pid, 'center', macInputHelperPath);
+          await clickTarget(config.platform, child.pid, 'center', macInputHelperPath, true, inputSession);
           await sleep(400);
         }
         await sleep(500);
         // Warm-up helpers may briefly own the foreground transition. Settle
         // focus once more before the first renderer arm; no helper is started
         // after the arm is accepted.
-        focusWindow(config.platform, child.pid);
+        if (inputSession !== null) await inputSession.focus();
+        else focusWindow(config.platform, child.pid);
         await sleep(250);
         for (let ordinal = 1; ordinal <= 30; ordinal += 1) {
-          const location = prepareMeasuredClick(config.platform, child.pid, 'center');
+          const location = await prepareMeasuredClick(config.platform, child.pid, 'center', inputSession);
           await waitForNextArm();
-          clickAt(config.platform, child.pid, location, macInputHelperPath, false);
+          await clickAt(config.platform, child.pid, location, macInputHelperPath, false, inputSession);
           await waitForSamples(samplesPath, ordinal, child, `${action} ${width}x${height}`, logPath);
           await sleep(250);
         }
         await waitForFile(resultPath, 10_000, child, `${action} ${width}x${height}`, logPath);
       } else if (action === 'refresh_loading') {
         for (let ordinal = 1; ordinal <= 30; ordinal += 1) {
-          const location = prepareMeasuredClick(config.platform, child.pid, 'refresh');
+          const location = await prepareMeasuredClick(config.platform, child.pid, 'refresh', inputSession);
           await waitForNextArm();
-          clickAt(config.platform, child.pid, location, macInputHelperPath, false);
+          await clickAt(config.platform, child.pid, location, macInputHelperPath, false, inputSession);
           await waitForSamples(samplesPath, ordinal, child, `${action} ${width}x${height}`, logPath);
         }
         await waitForFile(resultPath, 10_000, child, `${action} ${width}x${height}`, logPath);
@@ -516,10 +724,11 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
           const key = action === 'keyboard_move'
             ? (ordinal % 2 === 1 ? 'down' : 'up')
             : 'space';
-          focusWindow(config.platform, child.pid);
+          if (inputSession !== null) await inputSession.focus();
+          else focusWindow(config.platform, child.pid);
           await sleep(100);
           await waitForNextArm();
-          sendKey(config.platform, child.pid, key, macInputHelperPath, false);
+          await sendKey(config.platform, child.pid, key, macInputHelperPath, false, inputSession);
           await waitForSamples(samplesPath, ordinal, child, `${action} ${width}x${height}`, logPath);
         }
         await waitForFile(resultPath, 10_000, child, `${action} ${width}x${height}`, logPath);
@@ -530,6 +739,7 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
       const lines = readFileSync(samplesPath, 'utf8').split('\n').filter((line) => line.trim());
       allSamples.push(...lines.map((line) => JSON.parse(line)));
     } finally {
+      await inputSession?.close();
       await stopChild(config, child);
     }
   }
