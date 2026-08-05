@@ -230,13 +230,10 @@ public static class ImageForgePerfInput {
 
 const WINDOWS_SESSION_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
-$pidValue = [int]$env:IMAGEFORGE_PERF_PID
 Add-Type @'
 ${WINDOWS_HELPER}
 '@
-$process = Get-Process -Id $pidValue -ErrorAction Stop
-$handle = $process.MainWindowHandle
-if ($handle -eq 0) { throw 'main window is unavailable' }
+$handle = [IntPtr]::Zero
 function Reply([string]$message) {
   [Console]::Out.WriteLine($message)
   [Console]::Out.Flush()
@@ -246,19 +243,37 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
   try {
     $parts = $line.Split('|')
     switch ($parts[0]) {
+      'attach' {
+        if ($parts.Count -ne 2) { throw 'process ID is invalid' }
+        $pidValue = [int]$parts[1]
+        $deadline = (Get-Date).AddSeconds(30)
+        do {
+          $process = Get-Process -Id $pidValue -ErrorAction Stop
+          $handle = $process.MainWindowHandle
+          if ($handle -eq 0) { Start-Sleep -Milliseconds 50 }
+        } while ($handle -eq 0 -and (Get-Date) -lt $deadline)
+        if ($handle -eq 0) { throw 'main window is unavailable' }
+        if (-not [ImageForgePerfInput]::FocusWindow($handle)) { throw 'main window could not be focused' }
+        if ([ImageForgePerfInput]::GetForegroundWindow() -ne $handle) { throw 'main window could not be focused' }
+        Reply 'OK'
+        break
+      }
       'focus' {
+        if ($handle -eq 0) { throw 'main window is unavailable' }
         if (-not [ImageForgePerfInput]::FocusWindow($handle)) { throw 'main window could not be focused' }
         if ([ImageForgePerfInput]::GetForegroundWindow() -ne $handle) { throw 'main window could not be focused' }
         Reply 'OK'
         break
       }
       'metrics' {
+        if ($handle -eq 0) { throw 'main window is unavailable' }
         $rect = New-Object ImageForgePerfInput+RECT
         if (-not [ImageForgePerfInput]::GetWindowRect($handle, [ref]$rect)) { throw 'main window metrics are unavailable' }
         Reply ("METRICS|{0}|{1}|{2}|{3}" -f $rect.Left, $rect.Top, ($rect.Right - $rect.Left), ($rect.Bottom - $rect.Top))
         break
       }
       'click' {
+        if ($handle -eq 0) { throw 'main window is unavailable' }
         if ($parts.Count -ne 3) { throw 'click coordinates are invalid' }
         if (-not [ImageForgePerfInput]::SetCursorPos([int]$parts[1], [int]$parts[2])) { throw 'cursor could not be positioned' }
         [ImageForgePerfInput]::Click()
@@ -266,6 +281,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         break
       }
       'key' {
+        if ($handle -eq 0) { throw 'main window is unavailable' }
         if ($parts.Count -ne 2) { throw 'key code is invalid' }
         [ImageForgePerfInput]::Key([ushort]$parts[1])
         Reply 'OK'
@@ -284,13 +300,13 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
 `;
 
 class WindowsInputSession {
-  static async start(pid) {
-    const session = new WindowsInputSession(pid);
+  static async start() {
+    const session = new WindowsInputSession();
     await session.ready;
     return session;
   }
 
-  constructor(pid) {
+  constructor() {
     this.child = spawn('powershell.exe', [
       '-NoProfile',
       '-NonInteractive',
@@ -299,7 +315,7 @@ class WindowsInputSession {
       '-Command',
       WINDOWS_SESSION_SCRIPT,
     ], {
-      env: { ...process.env, IMAGEFORGE_PERF_PID: String(pid) },
+      env: { ...process.env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.closed = false;
@@ -367,6 +383,11 @@ class WindowsInputSession {
   async focus() {
     const response = await this.request('focus');
     if (response !== 'OK') fail(`Windows input focus failed: ${response}`);
+  }
+
+  async attach(pid) {
+    const response = await this.request(`attach|${pid}`);
+    if (response !== 'OK') fail(`Windows input attach failed: ${response}`);
   }
 
   async metrics() {
@@ -494,6 +515,7 @@ async function clickTarget(platform, pid, kind, macInputHelperPath, focus = true
     location = clickLocation(platform, pid, kind, focus);
   }
   await clickAt(platform, pid, location, macInputHelperPath, focus, inputSession);
+  return location;
 }
 
 async function prepareMeasuredClick(platform, pid, kind, inputSession = null) {
@@ -656,27 +678,33 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
     const samplesPath = join(runRoot, 'samples.ndjson');
     const resultPath = join(runRoot, 'result.txt');
     const logPath = join(runRoot, 'app.log');
-    const child = launch(config, action, width, height, samplesPath, resultPath, logPath);
+    // Compile and start the persistent PowerShell input session before the
+    // app exists. Otherwise a slow Add-Type startup can let the renderer arm
+    // and expire its five-second native authorization before the first click.
     let inputSession = null;
+    if (config.platform === 'windows-x64') inputSession = await WindowsInputSession.start();
+    const child = launch(config, action, width, height, samplesPath, resultPath, logPath);
     let expectedArmCount = 0;
     const waitForNextArm = async () => {
       expectedArmCount += 1;
       await waitForArm(logPath, expectedArmCount, child, `${action} ${width}x${height}`);
     };
     try {
+      if (inputSession !== null) await inputSession.attach(child.pid);
       const windowDeadline = Date.now() + 30_000;
       let metrics;
       while (!metrics && Date.now() < windowDeadline) {
         try {
-          metrics = windowMetrics(config.platform, child.pid);
+          // The Windows session's attach command has already focused the
+          // app. Reading metrics must not refocus it after a renderer arm.
+          metrics = windowMetrics(config.platform, child.pid, config.platform === 'macos-arm64');
         } catch {
           await sleep(250);
         }
       }
       if (!metrics) fail(`${action} ${width}x${height} did not create a measurable window`);
-      focusWindow(config.platform, child.pid);
+      if (config.platform === 'macos-arm64') focusWindow(config.platform, child.pid);
       await sleep(750);
-      if (config.platform === 'windows-x64') inputSession = await WindowsInputSession.start(child.pid);
 
       if (action === 'cold_open') {
         const location = await prepareMeasuredClick(config.platform, child.pid, 'center', inputSession);
@@ -690,23 +718,18 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
         // Three close/open cycles are intentionally unrecorded warm-ups. The
         // harness explicitly leaves the sheet closed after the third open so
         // the next native arm has one deterministic starting state.
+        let measuredLocation;
         for (let warmup = 0; warmup < 3; warmup += 1) {
           await clickTarget(config.platform, child.pid, 'close', macInputHelperPath, true, inputSession);
           await sleep(250);
-          await clickTarget(config.platform, child.pid, 'center', macInputHelperPath, true, inputSession);
+          measuredLocation = await clickTarget(config.platform, child.pid, 'center', macInputHelperPath, true, inputSession);
           await sleep(400);
         }
         await sleep(500);
-        // Warm-up helpers may briefly own the foreground transition. Settle
-        // focus once more before the first renderer arm; no helper is started
-        // after the arm is accepted.
-        if (inputSession !== null) await inputSession.focus();
-        else focusWindow(config.platform, child.pid);
-        await sleep(250);
+        if (measuredLocation === undefined) fail(`${action} ${width}x${height} did not produce a measured coordinate`);
         for (let ordinal = 1; ordinal <= 30; ordinal += 1) {
-          const location = await prepareMeasuredClick(config.platform, child.pid, 'center', inputSession);
           await waitForNextArm();
-          await clickAt(config.platform, child.pid, location, macInputHelperPath, false, inputSession);
+          await clickAt(config.platform, child.pid, measuredLocation, macInputHelperPath, false, inputSession);
           await waitForSamples(samplesPath, ordinal, child, `${action} ${width}x${height}`, logPath);
           await sleep(250);
         }

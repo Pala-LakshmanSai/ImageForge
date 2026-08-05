@@ -456,12 +456,26 @@ export function GpuSelectorPerfSmoke() {
 
   useEffect(() => {
     if (action !== 'warm_open' || !warmupSettled || warmupsRemaining !== 0 || open) return undefined;
-    // This effect runs after the final closed render commits. Invoke the arm
-    // directly at that state boundary; `cycle` retries it if native
-    // viewport/listener setup completes after the warm-up clicks. The arm
-    // helper retains the readiness and one-use guards.
-    requestNativeArm();
-    return undefined;
+    // Keep the final closed state armed even when native viewport/listener
+    // setup completes after the warm-up clicks. This is a readiness wait, not
+    // a timed re-arm: the helper still performs the one-use and lifecycle
+    // checks, and the harness cannot receive a measured event until it is
+    // explicitly armed.
+    let cancelled = false;
+    let frame: number | undefined;
+    const tryArm = () => {
+      if (cancelled || reportedRef.current || armedRef.current || armingRef.current || pendingRef.current !== null) return;
+      if (sizeReadyRef.current) {
+        requestNativeArm();
+        return;
+      }
+      frame = window.requestAnimationFrame(tryArm);
+    };
+    frame = window.requestAnimationFrame(tryArm);
+    return () => {
+      cancelled = true;
+      if (frame !== undefined) window.cancelAnimationFrame(frame);
+    };
   }, [action, cycle, open, warmupSettled, warmupsRemaining]);
 
   const measuredInputReady = isMeasuredInputReady(warmupsRemaining, armState);
