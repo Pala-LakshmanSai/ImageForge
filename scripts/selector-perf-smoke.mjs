@@ -350,6 +350,11 @@ async function waitForArm(logPath, expectedCount, child, description) {
     if (Date.now() >= deadline) fail(`${description} timed out waiting for native arm ${expectedCount}`);
     await sleep(50);
   }
+  // The native trace is written before the invoke promise resumes in the
+  // renderer. Give React time to commit the arm-dependent control state before
+  // sending the trusted event; otherwise the event can reach a still-disabled
+  // QA button even though native input authorization has already succeeded.
+  await sleep(100);
 }
 
 function launch(config, action, width, height, samplesPath, resultPath, logPath) {
