@@ -148,6 +148,24 @@ function exactStartedEvent(value: unknown): GpuSelectorPerfStartedEventV1 {
   return record as unknown as GpuSelectorPerfStartedEventV1;
 }
 
+function exactWarmupInputEvent(value: unknown): void {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Selector performance warm-up input event is not an object.');
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  const expected = ['event', 'input', 'schemaVersion'];
+  if (
+    keys.length !== expected.length
+    || keys.some((key, index) => key !== expected[index])
+    || record.schemaVersion !== 1
+    || record.event !== 'gpu-selector-perf-warmup-input-v1'
+    || record.input !== 'primary_mouse_up'
+  ) {
+    throw new Error('Selector performance warm-up input event is invalid.');
+  }
+}
+
 function nextPaint(): Promise<void> {
   return new Promise((resolve) => {
     window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve()));
@@ -257,7 +275,7 @@ export function GpuSelectorPerfSmoke() {
   const lastNativeResizeAtRef = useRef(performance.now());
   const warmArmTimerRef = useRef<number | undefined>(undefined);
   const scheduleWarmArmRef = useRef<() => void>(() => undefined);
-  const warmOpenMouseUpHandledRef = useRef(false);
+  const probeWarmupReadyRef = useRef<() => void>(() => undefined);
   const action = config.action;
   const maxSamples = action === 'cold_open' ? 1 : 30;
   const readySnapshot = useMemo(() => fixtureSnapshot('ready'), []);
@@ -294,6 +312,9 @@ export function GpuSelectorPerfSmoke() {
       if (!listenerReadyRef.current || !nativeWindowReadyRef.current || disposed) return;
       sizeReadyRef.current = true;
       if (mountedRef.current) setCycle((value) => value + 1);
+      if (action === 'warm_open') {
+        probeWarmupReadyRef.current();
+      }
       if (action === 'warm_open' && isWarmArmCandidate(warmupsRef.current, openRef.current)) {
         scheduleWarmArmRef.current();
       }
@@ -388,14 +409,24 @@ export function GpuSelectorPerfSmoke() {
       listen<unknown>('gpu-selector-perf-error-v1', (event) => {
         fail(event.payload);
       }),
-    ]).then(([removeStarted, removeError]) => {
+      listen<unknown>('gpu-selector-perf-warmup-input-v1', (event) => {
+        try {
+          exactWarmupInputEvent(event.payload);
+          advanceWarmupInput();
+        } catch (caught) {
+          fail(caught);
+        }
+      }),
+    ]).then(([removeStarted, removeError, removeWarmupInput]) => {
       if (disposed) {
         removeStarted();
         removeError();
+        removeWarmupInput();
       } else {
         unlistenEvents = () => {
           removeStarted();
           removeError();
+          removeWarmupInput();
         };
         listenerReadyRef.current = true;
         markReady();
@@ -436,6 +467,21 @@ export function GpuSelectorPerfSmoke() {
       }
     };
   }, [action, config, maxSamples, readySnapshot]);
+
+  const probeWarmupReady = () => {
+    if (action !== 'warm_open' || armProbeDoneRef.current || reportedRef.current) return;
+    armProbeDoneRef.current = true;
+    void nativeGpuSelectorPerfArm({
+      fixtureSha256: '0'.repeat(64),
+      action,
+      ordinal: ordinalRef.current,
+      viewportWidth: config.viewportWidth,
+      viewportHeight: config.viewportHeight,
+    }).then(() => {
+      fail(new Error('The selector performance bridge accepted a forged fixture hash.'));
+    }).catch(() => undefined);
+  };
+  probeWarmupReadyRef.current = probeWarmupReady;
 
   const requestNativeArm = () => {
     if (!sizeReadyRef.current || reportedRef.current || armedRef.current || armingRef.current || pendingRef.current !== null) return;
@@ -541,33 +587,7 @@ export function GpuSelectorPerfSmoke() {
   }
 
   return (
-    <main
-      data-gpu-selector-perf-qa="v1"
-      onMouseDownCapture={() => {
-        warmOpenMouseUpHandledRef.current = false;
-      }}
-      onMouseUpCapture={(event) => {
-        if (!advanceWarmupInput()) return;
-        // The warm-up state follows the trusted mouse-up synchronously, even
-        // when WebKit has not replaced the previous open/close target yet.
-        // Consume the stale target event so its own handler cannot undo the
-        // authoritative ref transition.
-        warmOpenMouseUpHandledRef.current = true;
-        event.preventDefault();
-        event.stopPropagation();
-      }}
-      onClickCapture={(event) => {
-        if (action !== 'warm_open' || event.detail === 0) return;
-        const handledMouseUp = warmOpenMouseUpHandledRef.current;
-        warmOpenMouseUpHandledRef.current = false;
-        if (!handledMouseUp && !advanceWarmupInput()) return;
-        // Some WebKit paths expose click without a React mouse-up. Handle that
-        // fallback here while keeping the measured warm-open click untouched.
-        event.preventDefault();
-        event.stopPropagation();
-      }}
-      style={{ width: '100%', minWidth: 0 }}
-    >
+    <main data-gpu-selector-perf-qa="v1" style={{ width: '100%', minWidth: 0 }}>
       {open ? (
         <>
           <GpuSelector
@@ -633,10 +653,16 @@ export function GpuSelectorPerfSmoke() {
           data-gpu-selector-perf-open="true"
           aria-busy={warmupsRemaining === 0 && armState !== 'armed'}
           onClick={(event) => {
-            // Keyboard activation has no mouse-up. Pointer warm-ups are
-            // consumed by the main capture boundary above.
+            // Native pointer warm-ups arrive through the authenticated Tauri
+            // event. Keyboard activation still needs this DOM fallback.
             if (event.detail === 0 && advanceWarmupInput()) return;
-            if (action === 'warm_open' && warmupsRef.current > 0) return;
+            if (
+              action === 'warm_open'
+              && (
+                warmupsRef.current > 0
+                || (!armedRef.current && pendingRef.current === null)
+              )
+            ) return;
             setArmState('idle');
             openRef.current = true;
             setOpen(true);

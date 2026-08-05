@@ -24,6 +24,7 @@ const QA_OPT_IN_ENV: &str = "IMAGEFORGE_GPU_SELECTOR_PERF_QA";
 const QA_SESSION_ENV: &str = "IMAGEFORGE_GPU_SELECTOR_PERF_QA_SESSION";
 const QA_EVENT: &str = "gpu-selector-perf-started-v1";
 const QA_ERROR_EVENT: &str = "gpu-selector-perf-error-v1";
+const QA_WARMUP_INPUT_EVENT: &str = "gpu-selector-perf-warmup-input-v1";
 const ARM_VALID_FOR: Duration = Duration::from_secs(5);
 const MAX_DURATION_US: u64 = 10_000_000;
 type NativeWindowSize = (u32, u32);
@@ -116,6 +117,14 @@ pub struct GpuSelectorPerfStartedEventV1 {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+struct GpuSelectorPerfWarmupInputEventV1 {
+    schema_version: u8,
+    event: &'static str,
+    input: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct GpuSelectorPerfSampleV1 {
     pub schema_version: u8,
     pub sample_id: String,
@@ -142,6 +151,7 @@ struct GpuSelectorPerfQaSessionV1 {
     commit_sha: String,
     artifact_sha256: String,
     fixture_sha256: String,
+    action: GpuSelectorPerfActionV1,
     window_label: String,
 }
 
@@ -222,6 +232,11 @@ impl GpuSelectorPerfHost {
 
     #[cfg(test)]
     fn for_test() -> Self {
+        Self::for_test_action(GpuSelectorPerfActionV1::ColdOpen)
+    }
+
+    #[cfg(test)]
+    fn for_test_action(action: GpuSelectorPerfActionV1) -> Self {
         let session = GpuSelectorPerfQaSessionV1 {
             schema_version: 1,
             qa_session_id: "11111111-1111-4111-8111-111111111111".to_owned(),
@@ -230,6 +245,7 @@ impl GpuSelectorPerfHost {
             commit_sha: "a".repeat(40),
             artifact_sha256: "b".repeat(64),
             fixture_sha256: FIXTURE_SHA256.to_owned(),
+            action,
             window_label: "main".to_owned(),
         };
         let host = Self::default();
@@ -344,6 +360,7 @@ impl GpuSelectorPerfHost {
             let native_window_size = self.armed_native_window_size();
             let event = self.start_native_inner_with_native_size(input, now, native_window_size)?;
             let Some(event) = event else {
+                self.emit_warmup_input_if_needed(window, input)?;
                 return Ok(None);
             };
             // WebView2's AcceleratorKeyPressed and WH_MOUSE callbacks are
@@ -388,6 +405,53 @@ impl GpuSelectorPerfHost {
             self.report_qa_error(window, error);
         }
         result
+    }
+
+    fn emit_warmup_input_if_needed(
+        &self,
+        window: &WebviewWindow,
+        input: NativeSelectorInputKind,
+    ) -> NativeResult<()> {
+        let Some(event) = self.warmup_input_event(input) else {
+            return Ok(());
+        };
+        self.trace_qa("selector native warmup input scheduled");
+        let event_for_emit = event.clone();
+        let window_for_emit = window.clone();
+        let host_for_emit = self.clone();
+        window
+            .run_on_main_thread(move || {
+                if window_for_emit
+                    .emit(QA_WARMUP_INPUT_EVENT, &event_for_emit)
+                    .is_err()
+                {
+                    let error = gpu_selector_perf_event_failed();
+                    host_for_emit.report_qa_error(&window_for_emit, &error);
+                    return;
+                }
+                host_for_emit.trace_qa("selector native warmup input delivered");
+            })
+            .map_err(|_| gpu_selector_perf_event_failed())
+    }
+
+    fn warmup_input_event(
+        &self,
+        input: NativeSelectorInputKind,
+    ) -> Option<GpuSelectorPerfWarmupInputEventV1> {
+        let inner = self.inner.lock().expect("selector perf lock");
+        let session = inner.session.as_ref()?;
+        if session.action != GpuSelectorPerfActionV1::WarmOpen
+            || input != NativeSelectorInputKind::PrimaryMouseUp
+            || inner.armed.is_some()
+            || inner.pending.is_some()
+        {
+            return None;
+        }
+        Some(GpuSelectorPerfWarmupInputEventV1 {
+            schema_version: 1,
+            event: QA_WARMUP_INPUT_EVENT,
+            input: "primary_mouse_up",
+        })
     }
 
     fn armed_native_window_size(&self) -> Option<NativeWindowSize> {
@@ -1195,6 +1259,33 @@ mod tests {
         assert!(
             !NativeSelectorInputKind::PrimaryMouseUp.matches(GpuSelectorPerfActionV1::KeyboardMove)
         );
+    }
+
+    #[test]
+    fn warmup_input_event_is_native_pointer_only_and_session_bound() {
+        let warm = GpuSelectorPerfHost::for_test_action(GpuSelectorPerfActionV1::WarmOpen);
+        assert_eq!(
+            warm.warmup_input_event(NativeSelectorInputKind::PrimaryMouseUp),
+            Some(GpuSelectorPerfWarmupInputEventV1 {
+                schema_version: 1,
+                event: QA_WARMUP_INPUT_EVENT,
+                input: "primary_mouse_up",
+            })
+        );
+        assert!(warm
+            .warmup_input_event(NativeSelectorInputKind::KeyboardSelect)
+            .is_none());
+
+        warm.arm_for_test(arm(GpuSelectorPerfActionV1::WarmOpen))
+            .unwrap();
+        assert!(warm
+            .warmup_input_event(NativeSelectorInputKind::PrimaryMouseUp)
+            .is_none());
+
+        let cold = GpuSelectorPerfHost::for_test();
+        assert!(cold
+            .warmup_input_event(NativeSelectorInputKind::PrimaryMouseUp)
+            .is_none());
     }
 
     #[test]

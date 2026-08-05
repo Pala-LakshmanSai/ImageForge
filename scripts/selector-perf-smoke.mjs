@@ -630,19 +630,22 @@ function logTail(path, limit = 4_000) {
   return log.length <= limit ? log : `…${log.slice(-limit)}`;
 }
 
-async function waitForArm(logPath, expectedCount, child, description) {
-  const needle = 'selector arm accepted';
+async function waitForLogOccurrence(logPath, needle, expectedCount, child, description) {
   // Exact native viewport settling may take the same 30-second startup budget
   // used by windowMetrics; the five-second native arm TTL begins only after
   // this acceptance trace, so waiting here does not weaken the gate.
   const deadline = Date.now() + 30_000;
   while (logOccurrences(logPath, needle) < expectedCount) {
-    if (child.exitCode !== null) fail(`${description} exited ${child.exitCode} before native arm ${expectedCount}`);
+    if (child.exitCode !== null) fail(`${description} exited ${child.exitCode} before trace ${expectedCount}: ${needle}`);
     if (Date.now() >= deadline) {
-      fail(`${description} timed out waiting for native arm ${expectedCount}; application log tail:\n${logTail(logPath)}`);
+      fail(`${description} timed out waiting for trace ${expectedCount}: ${needle}; application log tail:\n${logTail(logPath)}`);
     }
     await sleep(50);
   }
+}
+
+async function waitForArm(logPath, expectedCount, child, description) {
+  await waitForLogOccurrence(logPath, 'selector arm accepted', expectedCount, child, description);
   // The native trace is written before the invoke promise resumes in the
   // renderer. Give React time to commit the arm-dependent control state before
   // sending the trusted event; otherwise the event can reach a still-disabled
@@ -660,6 +663,7 @@ function launch(config, action, width, height, samplesPath, resultPath, logPath,
     commitSha: config.commitSha,
     artifactSha256: config.artifactSha256,
     fixtureSha256: FIXTURE_SHA256,
+    action,
     windowLabel: 'main',
   });
   const environment = {
@@ -754,6 +758,16 @@ async function runGroup(config, action, width, height, groupRoot, macInputHelper
         // Three close/open cycles are intentionally unrecorded warm-ups. The
         // harness explicitly leaves the sheet closed after the third open so
         // the next native arm has one deterministic starting state.
+        // Wait for all renderer listeners and exact viewport setup before the
+        // first native warm-up event; unlike a measured sample, the unarmed
+        // setup clicks have no accepted-arm trace of their own.
+        await waitForLogOccurrence(
+          logPath,
+          'selector arm rejected code=gpu_selector_perf_arm_invalid',
+          1,
+          child,
+          `${action} ${width}x${height} warm-up readiness`,
+        );
         let measuredLocation;
         for (let warmup = 0; warmup < 3; warmup += 1) {
           await clickTarget(config.platform, child.pid, 'warmup', macInputHelperPath, true, inputSession);

@@ -1,16 +1,23 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GpuSelectorPerfSmoke } from './gpuSelectorPerfSmoke';
 
-const mocks = vi.hoisted(() => ({
-  arm: vi.fn(),
-  commit: vi.fn(),
-  invoke: vi.fn(),
-  listen: vi.fn(async () => () => undefined),
-  onResized: vi.fn(async () => () => undefined),
-  setFocus: vi.fn(async () => undefined),
-  setSize: vi.fn(async () => undefined),
-}));
+const mocks = vi.hoisted(() => {
+  const listeners = new Map<string, (event: { payload: unknown }) => void>();
+  return {
+    arm: vi.fn(),
+    commit: vi.fn(),
+    invoke: vi.fn(),
+    listeners,
+    listen: vi.fn(async (name: string, callback: (event: { payload: unknown }) => void) => {
+      listeners.set(name, callback);
+      return () => listeners.delete(name);
+    }),
+    onResized: vi.fn(async () => () => undefined),
+    setFocus: vi.fn(async () => undefined),
+    setSize: vi.fn(async () => undefined),
+  };
+});
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: mocks.listen }));
@@ -31,12 +38,6 @@ vi.mock('../components/GpuSelector', () => ({
 
 const originalWidth = window.innerWidth;
 const originalHeight = window.innerHeight;
-
-function pointerActivation(target: HTMLElement) {
-  fireEvent.mouseDown(target, { button: 0 });
-  fireEvent.mouseUp(target, { button: 0 });
-  fireEvent.click(target, { button: 0, detail: 1 });
-}
 
 describe('GpuSelectorPerfSmoke warm-open inputs', () => {
   beforeEach(() => {
@@ -59,25 +60,48 @@ describe('GpuSelectorPerfSmoke warm-open inputs', () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth });
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: originalHeight });
     vi.clearAllMocks();
+    mocks.listeners.clear();
   });
 
-  it('consumes six trusted pointer activations as three close-open warm-ups', () => {
+  it('consumes six authenticated native pointer events as three close-open warm-ups', async () => {
     render(<GpuSelectorPerfSmoke />);
+    await waitFor(() => {
+      expect(mocks.listeners.has('gpu-selector-perf-warmup-input-v1')).toBe(true);
+    });
+    const sendWarmupInput = () => {
+      const listener = mocks.listeners.get('gpu-selector-perf-warmup-input-v1');
+      expect(listener).toBeDefined();
+      act(() => listener?.({
+        payload: {
+          schemaVersion: 1,
+          event: 'gpu-selector-perf-warmup-input-v1',
+          input: 'primary_mouse_up',
+        },
+      }));
+    };
 
-    pointerActivation(screen.getByRole('button', { name: 'Close QA sheet' }));
+    sendWarmupInput();
     expect(screen.getByRole('button', { name: 'Open GPU selector' })).toBeVisible();
 
-    pointerActivation(screen.getByRole('button', { name: 'Open GPU selector' }));
+    sendWarmupInput();
     expect(screen.getByTestId('selector-surface')).toBeVisible();
 
-    pointerActivation(screen.getByRole('button', { name: 'Close QA sheet' }));
-    pointerActivation(screen.getByRole('button', { name: 'Open GPU selector' }));
+    sendWarmupInput();
+    sendWarmupInput();
     expect(screen.getByTestId('selector-surface')).toBeVisible();
 
-    pointerActivation(screen.getByRole('button', { name: 'Close QA sheet' }));
-    pointerActivation(screen.getByRole('button', { name: 'Open GPU selector' }));
+    sendWarmupInput();
+    sendWarmupInput();
 
     expect(screen.queryByTestId('selector-surface')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Open GPU selector' })).toHaveAttribute('aria-busy', 'true');
+    const measuredOpen = screen.getByRole('button', { name: 'Open GPU selector' });
+    expect(measuredOpen).toHaveAttribute('aria-busy', 'true');
+
+    // The native signal may reach React before WebKit dispatches the click
+    // belonging to the same sixth mouse-up. That trailing unarmed click must
+    // not reopen the measured sheet.
+    fireEvent.click(measuredOpen, { button: 0, detail: 1 });
+    expect(screen.queryByTestId('selector-surface')).not.toBeInTheDocument();
+    expect(measuredOpen).toHaveAttribute('aria-busy', 'true');
   });
 });
