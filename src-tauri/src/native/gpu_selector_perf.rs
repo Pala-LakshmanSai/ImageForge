@@ -335,12 +335,14 @@ impl GpuSelectorPerfHost {
             // resize/scale lifecycle events clear that arm before another
             // native event can be accepted, so querying Tauri again here is
             // both redundant and unsafe on the WebView2 hook thread.
+            let now = Instant::now();
+            self.trace_qa(&format!(
+                "selector native input preflight lifecycle=native_input now_arm={} native_window={:?}",
+                self.qa_arm_summary(now),
+                self.armed_native_window_size()
+            ));
             let native_window_size = self.armed_native_window_size();
-            let event = self.start_native_inner_with_native_size(
-                input,
-                Instant::now(),
-                native_window_size,
-            )?;
+            let event = self.start_native_inner_with_native_size(input, now, native_window_size)?;
             let Some(event) = event else {
                 return Ok(None);
             };
@@ -410,6 +412,23 @@ impl GpuSelectorPerfHost {
             .map(|sample| format!("{:?}#{}", sample.action, sample.ordinal))
             .unwrap_or_else(|| "none".to_owned());
         format!("armed={armed} pending={pending}")
+    }
+
+    fn qa_arm_summary(&self, now: Instant) -> String {
+        let inner = self.inner.lock().expect("selector perf lock");
+        let Some(armed) = inner.armed.as_ref() else {
+            return "none".to_owned();
+        };
+        let age_ms = now
+            .saturating_duration_since(armed.expires_at - ARM_VALID_FOR)
+            .as_millis();
+        format!(
+            "{:?}#{} age_ms={} expired={}",
+            armed.action,
+            armed.ordinal,
+            age_ms,
+            armed.expires_at <= now
+        )
     }
 
     fn clear_pending_sample(&self, sample_id: &str) {
