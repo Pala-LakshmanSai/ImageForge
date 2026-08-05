@@ -590,6 +590,17 @@ jobs:
           include-hidden-files: true
           if-no-files-found: ignore
 
+      # Preserve a functional cross-platform candidate even when the
+      # installed Task 014 selector gate remains red. The job stays failed so
+      # this cannot be mistaken for a complete release-quality verification.
+      - name: Upload Windows functional installer candidate
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: imageforge-windows-functional-installer-${{ github.run_id }}
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+
       - name: Write Windows release metadata
         shell: pwsh
         run: |
@@ -1169,6 +1180,17 @@ jobs:
             release-evidence/.selector-perf-runs/**
           include-hidden-files: true
           if-no-files-found: ignore
+
+      # Preserve a functional cross-platform candidate even when the
+      # installed Task 014 selector gate remains red. The job stays failed so
+      # this cannot be mistaken for a complete release-quality verification.
+      - name: Upload macOS functional DMG candidate
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: imageforge-macos-functional-dmg-${{ github.run_id }}
+          path: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ImageForge_*_aarch64.dmg
+          if-no-files-found: error
 
       - name: Write macOS release metadata
         shell: bash

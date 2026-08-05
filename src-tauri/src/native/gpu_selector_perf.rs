@@ -446,7 +446,14 @@ impl GpuSelectorPerfHost {
         window: &WebviewWindow,
         input: GpuSelectorPerfCommitV1,
     ) -> NativeResult<GpuSelectorPerfSampleV1> {
-        require_main_foreground(window)?;
+        // Native input already authenticated the focused, visible window and
+        // consumed the one-use arm before this renderer acknowledgement. The
+        // WebView2 focus query can transiently report false while the click
+        // opens the selector, so requiring focus again here would reject a
+        // valid sample. Window lifecycle handlers still clear armed/pending
+        // state on focus loss, resize, scale, and destroy; keep visibility and
+        // exact native size checks at the commit boundary.
+        require_main_visible(window)?;
         let native_window_size = native_window_size(window)?;
         let sample =
             self.commit_inner_with_native_size(input, Instant::now(), Some(native_window_size))?;
