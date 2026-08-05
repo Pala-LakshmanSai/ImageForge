@@ -334,13 +334,28 @@ impl GpuSelectorPerfHost {
             let Some(event) = event else {
                 return Ok(None);
             };
-            if window.emit(QA_EVENT, &event).is_err() {
-                self.inner.lock().expect("selector perf lock").pending = None;
-                return Err(NativeError::new(
-                    "gpu_selector_perf_event_failed",
-                    "The selector performance sample event could not be delivered.",
-                ));
-            }
+            // WebView2's AcceleratorKeyPressed and WH_MOUSE callbacks are
+            // thread-affine native hooks.  Do not synchronously call Tauri's
+            // WebView emitter from those callbacks: a second authenticated
+            // notification can otherwise race the blocked emit and consume
+            // the one-use arm while the renderer never receives its event.
+            // The sample identity and monotonic timestamp were already
+            // generated and bound above the dispatch boundary.
+            let event_for_emit = event.clone();
+            let window_for_emit = window.clone();
+            let host_for_emit = self.clone();
+            window
+                .run_on_main_thread(move || {
+                    if window_for_emit.emit(QA_EVENT, &event_for_emit).is_err() {
+                        host_for_emit.clear_pending_sample(&event_for_emit.sample_id);
+                        let error = gpu_selector_perf_event_failed();
+                        host_for_emit.report_qa_error(&window_for_emit, &error);
+                    }
+                })
+                .map_err(|_| {
+                    self.clear_pending_sample(&event.sample_id);
+                    gpu_selector_perf_event_failed()
+                })?;
             Ok(Some(event))
         })();
         match &result {
@@ -369,6 +384,19 @@ impl GpuSelectorPerfHost {
             .armed
             .as_ref()
             .and_then(|armed| armed.native_window_size)
+    }
+
+    fn clear_pending_sample(&self, sample_id: &str) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        if inner
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.sample_id == sample_id)
+        {
+            inner.pending = None;
+        }
     }
 
     /// Report a native selector failure only to the explicitly opted-in QA
@@ -766,6 +794,13 @@ fn gpu_selector_perf_focus_required() -> NativeError {
     NativeError::new(
         "gpu_selector_perf_focus_required",
         "The selector performance sample requires the focused main window.",
+    )
+}
+
+fn gpu_selector_perf_event_failed() -> NativeError {
+    NativeError::new(
+        "gpu_selector_perf_event_failed",
+        "The selector performance sample event could not be delivered.",
     )
 }
 
