@@ -30,7 +30,10 @@ const GPU_RECEIPT_ID = '66666666-6666-4666-8666-666666666666';
 const GPU_PROCESS_EPOCH_ID = '77777777-7777-4777-8777-777777777777';
 
 function liveGpuInventory(): NativeGpuInventorySnapshotV1 {
-  const observedAt = '2026-08-04T00:00:00.000Z';
+  // A live receipt authorizes a paid Start for 60s only, and the selector now
+  // projects that expiry. Anchor the fixture to the run clock so these tests
+  // exercise selection rather than an already-expired receipt.
+  const observedAt = new Date().toISOString();
   const offer: GpuSelectorOfferV1 = {
     schemaVersion: 1,
     observationId: GPU_OBSERVATION_ID,
@@ -481,6 +484,33 @@ describe('ImageForge shell', () => {
     expect(screen.getByRole('button', { name: 'Close GPU selector' })).toBeVisible();
   });
 
+  it('re-observes live inventory when native rejects Start with an expired receipt', async () => {
+    const production = productionAdapter();
+    production.setGpuInventory(liveGpuInventory());
+    vi.mocked(production.runtime.startGpuChoice).mockRejectedValueOnce({
+      code: 'gpu_start_inventory_stale',
+      message: 'Live GPU inventory expired. Refresh GPUs and choose again.',
+      retryable: true,
+    });
+    render(<App initialState={createConfiguredInitialState()} adapter={production.adapter} />);
+
+    await waitFor(() => expect(production.runtime.loadGpuSwitch).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getAllByRole('button', { name: 'Start GPU' })[0]);
+    fireEvent.click(await screen.findByRole('radio', { name: /RTX 4090/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start selected GPU at $0.69/hr' }));
+    const preparedBeforeStart = vi.mocked(production.runtime.prepareGpuInventory).mock.calls.length;
+    fireEvent.click(screen.getByRole('button', { name: 'Start RTX 4090' }));
+
+    await waitFor(() => expect(production.runtime.startGpuChoice).toHaveBeenCalledOnce());
+    expect(await screen.findByText('Live GPU inventory expired. Refresh GPUs and choose again.')).toBeVisible();
+    // The sheet stays open, so the expired receipt must be replaced without a
+    // second manual Refresh; otherwise every following click fails the same way.
+    await waitFor(() => expect(
+      vi.mocked(production.runtime.prepareGpuInventory).mock.calls.length,
+    ).toBeGreaterThan(preparedBeforeStart));
+    expect(screen.getByRole('dialog', { name: 'Choose a GPU' })).toBeVisible();
+  });
+
   it('shows GPU rows after delayed Start inventory preparation resolves', async () => {
     const production = productionAdapter();
     let resolvePreparation: ((snapshot: NativeGpuInventorySnapshotV1) => void) | null = null;
@@ -530,6 +560,23 @@ describe('ImageForge shell', () => {
     expect(screen.queryByText('Loading the native inventory journal…')).not.toBeInTheDocument();
   });
 
+  it('keeps the selector surface mounted while an in-place refresh is pending', async () => {
+    const production = productionAdapter();
+    production.setGpuInventory(liveGpuInventory());
+    render(<App initialState={createConfiguredInitialState()} adapter={production.adapter} />);
+
+    await waitFor(() => expect(production.runtime.loadGpuSwitch).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getAllByRole('button', { name: 'Start GPU' })[0]);
+    expect(await screen.findByRole('radio', { name: /RTX 4090/i })).toBeVisible();
+
+    production.runtime.prepareGpuInventory = vi.fn(() => new Promise<NativeGpuInventorySnapshotV1>(() => undefined));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh GPUs' }));
+
+    expect(screen.getByRole('dialog', { name: 'Choose a GPU' })).toBeVisible();
+    expect(screen.getByRole('radio', { name: /RTX 4090/i })).toBeVisible();
+    expect(screen.queryByText('Loading the native inventory journal…')).not.toBeInTheDocument();
+  });
+
   it('replaces a failed Start inventory load with a retryable terminal state', async () => {
     const production = productionAdapter();
     production.runtime.prepareGpuInventory = vi.fn(async () => {
@@ -544,6 +591,27 @@ describe('ImageForge shell', () => {
     expect(within(dialog).getByRole('button', { name: 'Retry GPU list' })).toBeVisible();
     expect(screen.queryByText('Loading the native inventory journal…')).not.toBeInTheDocument();
     expect(production.runtime.startGpuChoice).not.toHaveBeenCalled();
+  });
+
+  it('routes a secure-storage credential failure to Settings instead of offering a useless retry', async () => {
+    const production = productionAdapter();
+    production.runtime.prepareGpuInventory = vi.fn(async () => {
+      throw {
+        code: 'credential_read_failed',
+        message: 'The required credential could not be loaded from secure storage.',
+        retryable: false,
+      };
+    });
+    render(<App initialState={createConfiguredInitialState()} adapter={production.adapter} />);
+
+    await waitFor(() => expect(production.runtime.loadGpuSwitch).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getAllByRole('button', { name: 'Start GPU' })[0]);
+    const dialog = await screen.findByRole('dialog', { name: 'RunPod credential needs attention' });
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('could not be loaded from secure storage');
+    expect(within(dialog).queryByRole('button', { name: 'Retry GPU list' })).not.toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Open settings' }));
+    expect(await screen.findByRole('heading', { name: 'Settings' })).toBeVisible();
   });
 
   it('opens Switch from the current GPU chip and begins only through the native switch facade', async () => {

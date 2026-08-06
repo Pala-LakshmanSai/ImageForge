@@ -22,11 +22,18 @@
 The GPU chip opens a compact selector backed by one native inventory observation:
 two validated RunPod catalog GETs, one native process-epoch receipt, policy
 filtering, and strict terminal `gpu-inventory-v1` projection. A visible sheet
-refreshes immediately and every 30 seconds; final Start or Switch rejects a
-receipt at or beyond 60,000 monotonic milliseconds. Catalog and Pod prices are
-parsed losslessly into integer micro-USD. Inventory `securePrice` and Pod
-`adjustedCostPerHr` accept JSON number tokens; Pod `costPerHr` accepts the
-documented decimal string only. Binary floating point is never authority for
+refreshes immediately, re-observes once its receipt has 15,000 milliseconds of
+validity left, and withdraws every row the moment that window elapses, so an
+unattended sheet never presents an expired receipt as startable; a paid-action
+confirmation suspends the background re-observation while it is on screen, and
+a native `gpu_start_inventory_stale`, receipt, target, price, or revision
+rejection re-observes in place. Final Start or Switch rejects a receipt at or
+beyond 60,000 monotonic milliseconds. Catalog and Pod prices are
+parsed losslessly into integer micro-USD. Inventory `securePrice`, Pod
+`adjustedCostPerHr`, and Pod `costPerHr` accept exact JSON number tokens;
+`costPerHr` also accepts the provider's decimal-string form. An omitted
+`adjustedCostPerHr` means no adjustment and falls back to the exact base cost.
+Binary floating point is never authority for
 equality, ranking, persistence, confirmation, or fingerprints.
 
 The selection engine uses only checked-in Task 014 benchmark-v2 evidence whose

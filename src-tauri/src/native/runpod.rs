@@ -637,6 +637,14 @@ impl RunPodTransport {
         }
     }
 
+    /// Fail before reserving an inventory observation when secure storage is
+    /// unavailable or corrupt. Otherwise the two catalog workers would erase
+    /// the credential error and incorrectly publish a provider-unavailable
+    /// fallback snapshot.
+    pub(crate) fn assert_catalog_credential(&self) -> NativeResult<()> {
+        self.vault.load(CredentialKind::RunpodApiKey).map(|_| ())
+    }
+
     /// Fetch one pinned inventory endpoint without exposing a URL, headers,
     /// provider body, or credential to Tauri IPC.  It validates the transport
     /// envelope and secret-reflection guard while deliberately preserving the
@@ -2503,6 +2511,49 @@ fn project_pod_with_dynamic(
             );
         }
     }
+    // The REST list response carries the authoritative count inside `gpu`
+    // and can omit the create-request field `gpuCount` entirely.
+    if !output.contains_key("gpuCount") {
+        if let Some(count) = output
+            .get("gpu")
+            .and_then(Value::as_object)
+            .and_then(|gpu| gpu.get("count"))
+            .and_then(Value::as_u64)
+        {
+            output.insert("gpuCount".to_owned(), Value::from(count));
+        }
+    }
+    // Current list responses may expose only the provider lifecycle field
+    // `desiredStatus`. Keep the canonical lowercase status vocabulary used by
+    // the existing native state machine; unknown values remain unsynthesized
+    // and are rejected by the strict validator.
+    if !output.contains_key("status") {
+        let status = output
+            .get("desiredStatus")
+            .and_then(Value::as_str)
+            .and_then(|value| match value {
+                "CREATED" | "PROVISIONING" => Some("provisioning"),
+                "STARTING" => Some("starting"),
+                "RUNNING" => Some("running"),
+                "EXITED" => Some("exited"),
+                "ERROR" => Some("error"),
+                "TERMINATED" => Some("terminated"),
+                _ => None,
+            });
+        if let Some(status) = status {
+            output.insert("status".to_owned(), Value::String(status.to_owned()));
+        }
+    }
+    // RunPod's current REST Pod response names the container image `image`,
+    // while create requests and ImageForge's canonical private projection use
+    // `imageName`. Canonicalize only this documented provider alias before the
+    // strict profile validator runs; the exact pinned digest comparison below
+    // remains unchanged and still fails closed for any other image.
+    if !output.contains_key("imageName") {
+        if let Some(image) = object.get("image").and_then(Value::as_str) {
+            output.insert("imageName".to_owned(), Value::String(image.to_owned()));
+        }
+    }
     Ok(Value::Object(output))
 }
 
@@ -2841,17 +2892,14 @@ fn parse_switch_managed_pod_with_value(
 }
 
 fn parse_strict_observed_pod_price(object: &Map<String, Value>) -> NativeResult<u64> {
-    let adjusted = object
-        .get("adjustedCostPerHr")
-        .ok_or_else(switch_provider_response_error)?;
-    let adjusted = match adjusted {
-        Value::Null => "null".to_owned(),
-        Value::Number(number) => number.to_string(),
+    let adjusted = match object.get("adjustedCostPerHr") {
+        None | Some(Value::Null) => "null".to_owned(),
+        Some(Value::Number(number)) => number.to_string(),
         _ => return Err(switch_provider_response_error()),
     };
     let cost = object
         .get("costPerHr")
-        .filter(|value| value.is_string())
+        .filter(|value| value.is_string() || value.is_number())
         .ok_or_else(switch_provider_response_error)?
         .to_string();
     super::gpu_inventory::parse_created_price_tokens(&adjusted, &cost)
@@ -3561,6 +3609,72 @@ mod tests {
     }
 
     #[test]
+    fn current_runpod_image_field_is_canonicalized_for_managed_pod_identity() {
+        let profile = normal_start_profile();
+        let mut raw: Value = serde_json::from_str(&managed_pod_json(
+            IMAGEFORGE_NETWORK_VOLUME_ID,
+            "NVIDIA GeForce RTX 4090",
+        ))
+        .unwrap();
+        raw.as_object_mut().unwrap().remove("imageName");
+        raw.as_object_mut().unwrap().remove("gpuCount");
+        raw.as_object_mut().unwrap().remove("status");
+        raw["image"] = Value::String(IMAGEFORGE_WORKER_IMAGE.to_owned());
+        raw["desiredStatus"] = Value::String("RUNNING".to_owned());
+
+        let projected = project_pod(&raw).unwrap();
+        assert_eq!(
+            projected.get("imageName").and_then(Value::as_str),
+            Some(IMAGEFORGE_WORKER_IMAGE)
+        );
+        assert!(projected.get("image").is_none());
+        assert_eq!(projected.get("gpuCount").and_then(Value::as_u64), Some(1));
+        assert_eq!(
+            projected.get("status").and_then(Value::as_str),
+            Some("running")
+        );
+        let parsed = parse_normal_start_list_pods(
+            &serde_json::to_string(&vec![projected]).unwrap(),
+            &profile,
+        )
+        .unwrap();
+        assert_eq!(parsed.len(), 1);
+        let parsed = parse_switch_managed_pod_list(
+            &serde_json::to_string(&vec![raw.clone()]).unwrap(),
+            &profile,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].status, "running");
+
+        raw["costPerHr"] = serde_json::json!(0.54);
+        let parsed = parse_switch_managed_pod_list(
+            &serde_json::to_string(&vec![raw.clone()]).unwrap(),
+            &profile,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(parsed[0].hourly_price_micro_usd, Some(540_000));
+
+        // Current live Pod rows omit adjustedCostPerHr when no adjustment is
+        // active. The exact base cost remains authoritative in that shape.
+        raw.as_object_mut().unwrap().remove("adjustedCostPerHr");
+        let parsed = parse_switch_managed_pod_list(
+            &serde_json::to_string(&vec![raw.clone()]).unwrap(),
+            &profile,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(parsed[0].hourly_price_micro_usd, Some(540_000));
+
+        raw["image"] = Value::String("ghcr.io/attacker/worker@sha256:bad".to_owned());
+        let projected = project_pod(&raw).unwrap();
+        let parsed: NormalStartListPod = serde_json::from_value(projected).unwrap();
+        assert!(!parsed.is_strictly_safe(&profile));
+    }
+
+    #[test]
     fn strict_profile_list_projects_only_allowlisted_fields_and_rejects_partial_or_invalid_rows() {
         let profile = normal_start_profile();
         let valid: Value = serde_json::from_str(&managed_pod_json(
@@ -3629,10 +3743,7 @@ mod tests {
         .is_err());
 
         let mut missing_price = valid;
-        missing_price
-            .as_object_mut()
-            .unwrap()
-            .remove("adjustedCostPerHr");
+        missing_price.as_object_mut().unwrap().remove("costPerHr");
         assert!(parse_switch_managed_pod_list(
             &serde_json::to_string(&vec![missing_price]).unwrap(),
             &profile,

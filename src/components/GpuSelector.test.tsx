@@ -87,10 +87,12 @@ function snapshot(input: {
 function renderSelector(
   value: NativeGpuInventorySnapshotV1,
   mode: 'offline_start' | 'switch' = 'offline_start',
+  ageMs = 4_000,
 ) {
   const onCommit = vi.fn();
   const onClose = vi.fn();
   const onRefresh = vi.fn();
+  const onConfirmationOpenChange = vi.fn();
   const view = render(
     <div className="app-shell">
       <GpuSelector
@@ -99,7 +101,8 @@ function renderSelector(
         onCommit={onCommit}
         onClose={onClose}
         onRefresh={onRefresh}
-        nowUtcMs={Date.parse(OBSERVED_AT) + 4_000}
+        onConfirmationOpenChange={onConfirmationOpenChange}
+        nowUtcMs={Date.parse(OBSERVED_AT) + ageMs}
       />
     </div>,
   );
@@ -107,6 +110,7 @@ function renderSelector(
     onCommit,
     onClose,
     onRefresh,
+    onConfirmationOpenChange,
     rerenderSelector(next: NativeGpuInventorySnapshotV1) {
       view.rerender(
         <div className="app-shell">
@@ -116,7 +120,8 @@ function renderSelector(
             onCommit={onCommit}
             onClose={onClose}
             onRefresh={onRefresh}
-            nowUtcMs={Date.parse(OBSERVED_AT) + 4_000}
+            onConfirmationOpenChange={onConfirmationOpenChange}
+            nowUtcMs={Date.parse(OBSERVED_AT) + ageMs}
           />
         </div>,
       );
@@ -125,6 +130,31 @@ function renderSelector(
 }
 
 describe('GpuSelector', () => {
+  it('withdraws every row once the native receipt outlives its validity window', () => {
+    renderSelector(snapshot({ offers: [offer()] }), 'offline_start', 60_000);
+    const row = screen.getByRole('radio', { name: /RTX 4090/i });
+    expect(row).toBeDisabled();
+    expect(screen.getByRole('radio', { name: /Auto best value/i })).toBeDisabled();
+    expect(row).toHaveTextContent('Inventory expired');
+    expect(screen.getByText(/These live prices expired/)).toBeVisible();
+    fireEvent.click(row);
+    expect(screen.getByRole('button', { name: 'Choose a GPU' })).toBeDisabled();
+  });
+
+  it('keeps rows selectable while the receipt is still inside its validity window', () => {
+    renderSelector(snapshot({ offers: [offer()] }), 'offline_start', 59_999);
+    expect(screen.getByRole('radio', { name: /RTX 4090/i })).toBeEnabled();
+  });
+
+  it('reports confirmation visibility so the owner can suspend background refresh', () => {
+    const { onConfirmationOpenChange } = renderSelector(snapshot({ offers: [offer()] }));
+    fireEvent.click(screen.getByRole('radio', { name: /RTX 4090/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start selected GPU at $0.5/hr' }));
+    expect(onConfirmationOpenChange).toHaveBeenLastCalledWith(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(onConfirmationOpenChange).toHaveBeenLastCalledWith(false);
+  });
+
   it('requires selection and a non-destructive modal confirmation before emitting manual Start', async () => {
     const target = offer();
     const { onCommit } = renderSelector(snapshot({ offers: [target] }));

@@ -63,6 +63,20 @@ export interface AppProps {
 
 const CROSS_CLIENT_HEARTBEAT_MS = 4_000;
 const GPU_SELECTOR_LOAD_TIMEOUT_MS = 15_000;
+// The native receipt authorizes a paid Start for `validForMs` (60s). Re-observe
+// with this much of that window left so an open selector keeps a live receipt
+// instead of failing the confirmed click with `gpu_start_inventory_stale`.
+const GPU_SELECTOR_RECEIPT_REFRESH_LEAD_MS = 15_000;
+// Native rejections that only mean "this receipt no longer speaks for live
+// inventory". The sheet stays mounted, so re-observe instead of leaving rows
+// that are guaranteed to fail again.
+const GPU_START_INVENTORY_RECOVERY_CODES: ReadonlySet<string> = new Set([
+  'gpu_start_inventory_stale',
+  'gpu_start_inventory_receipt_invalid',
+  'gpu_start_target_changed',
+  'gpu_start_price_changed',
+  'gpu_start_revision_conflict',
+]);
 
 function userFacingErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message) return error.message;
@@ -85,7 +99,12 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
   const [gpuSelectorSnapshot, setGpuSelectorSnapshot] = useState<NativeGpuInventorySnapshotV1 | null>(
     () => runtime?.getGpuInventory() ?? null,
   );
-  const [gpuSelectorError, setGpuSelectorError] = useState<string | null>(null);
+  const [gpuSelectorError, setGpuSelectorError] = useState<{
+    readonly code: string;
+    readonly message: string;
+    readonly retryable: boolean;
+  } | null>(null);
+  const [gpuSelectorConfirming, setGpuSelectorConfirming] = useState(false);
   const gpuSelectorReturnFocusRef = useRef<HTMLElement | null>(null);
   const gpuSelectorRequestRef = useRef(0);
   const [gpuPriceAttention, setGpuPriceAttention] = useState<NativeGpuStartResultV1 | null>(null);
@@ -99,6 +118,7 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
     gpuSelectorRequestRef.current += 1;
     setGpuSelectorOpen(false);
     setGpuSelectorBusy(false);
+    setGpuSelectorConfirming(false);
     setGpuSelectorError(null);
   }, []);
   const alarm = useMemo(() => injectedAlarm ?? new WebAudioQueueAlarm(), [injectedAlarm]);
@@ -1284,9 +1304,13 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
     const requestId = gpuSelectorRequestRef.current + 1;
     gpuSelectorRequestRef.current = requestId;
     setGpuSelectorError(null);
-    // A previous receipt must never remain actionable while the explicit
-    // Start/Switch click obtains a fresh native observation.
-    setGpuSelectorSnapshot(null);
+    // Opening from a closed state has no mounted selector to preserve. During
+    // an in-place Refresh, keep the existing sheet mounted until native
+    // publishes its loading snapshot; clearing it here briefly replaced the
+    // selector with the journal placeholder and exposed the page behind it.
+    // The native loading snapshot still removes all receipt authority and
+    // disables every row before any refreshed result can be selected.
+    if (captureReturnFocus) setGpuSelectorSnapshot(null);
     if (captureReturnFocus) {
       gpuSelectorReturnFocusRef.current = document.activeElement instanceof HTMLElement
         ? document.activeElement
@@ -1318,15 +1342,40 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
       setGpuSelectorError(null);
     } catch (error) {
       if (gpuSelectorRequestRef.current !== requestId) return;
+      const native = asNativeError(error);
       const message = userFacingErrorMessage(error, 'Live GPU inventory could not be refreshed.');
       setGpuSelectorSnapshot(null);
-      setGpuSelectorError(message);
+      setGpuSelectorError({ code: native.code, message, retryable: native.retryable });
       dispatch({ type: 'RUNTIME_ERROR', scope: 'pod', message });
     } finally {
       if (timeoutId !== undefined) window.clearTimeout(timeoutId);
       if (gpuSelectorRequestRef.current === requestId) setGpuSelectorBusy(false);
     }
   }, [gpuSwitchLoadState, gpuSwitchSnapshot, runtime]);
+
+  // Keep the open sheet's receipt live. Without this a selector left on screen
+  // for longer than the native receipt window shows startable rows whose paid
+  // click can only fail; the user then has to guess that Refresh is required.
+  useEffect(() => {
+    if (runtime === undefined || !gpuSelectorOpen || gpuSelectorBusy || gpuSelectorConfirming) return;
+    const receipt = gpuSelectorSnapshot?.receipt ?? null;
+    if (receipt === null) return;
+    const receivedAtMs = Date.parse(receipt.receivedAt);
+    if (!Number.isFinite(receivedAtMs)) return;
+    const dueAtMs = receivedAtMs + receipt.validForMs - GPU_SELECTOR_RECEIPT_REFRESH_LEAD_MS;
+    const timer = window.setTimeout(
+      () => { void prepareGpuSelector(false); },
+      Math.max(0, dueAtMs - Date.now()),
+    );
+    return () => window.clearTimeout(timer);
+  }, [
+    gpuSelectorBusy,
+    gpuSelectorConfirming,
+    gpuSelectorOpen,
+    gpuSelectorSnapshot,
+    prepareGpuSelector,
+    runtime,
+  ]);
 
   const commitGpuSelectorChoice = useCallback((confirmation: GpuSelectorConfirmationV1) => {
     if (!runtime) return;
@@ -1354,6 +1403,7 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
     // across its provider GET. Let that read-only owner finish before opening
     // the native paid-action confirmation; new observations are suppressed by
     // gpuStartInFlightRef for the whole foreground action.
+    let recoverInventory = false;
     void Promise.allSettled([
       ...(pendingRefresh === null ? [] : [pendingRefresh]),
       ...(pendingObservation === null ? [] : [pendingObservation]),
@@ -1365,12 +1415,16 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
       (error: unknown) => {
         const message = userFacingErrorMessage(error, 'The selected GPU could not be started safely.');
         dispatch({ type: 'RUNTIME_ERROR', scope: 'pod', message });
+        recoverInventory = GPU_START_INVENTORY_RECOVERY_CODES.has(asNativeError(error).code);
       },
     ).finally(() => {
       gpuStartInFlightRef.current = false;
       setGpuSelectorBusy(false);
+      // Ordered after the busy reset so the recovery refresh owns the pending
+      // state it sets for itself.
+      if (recoverInventory) void prepareGpuSelector(false);
     });
-  }, [closeGpuSelector, runtime]);
+  }, [closeGpuSelector, prepareGpuSelector, runtime]);
 
   const confirmGpuPriceAttention = useCallback(() => {
     if (
@@ -1807,8 +1861,12 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
             <header className="gpu-selector__header">
               <div>
                 <p className="gpu-selector__eyebrow">Secure Cloud · EU-RO-1 · one GPU</p>
-                <h2 id="gpu-selector-error-title">GPU inventory unavailable</h2>
-                <p role="alert">{gpuSelectorError}</p>
+                <h2 id="gpu-selector-error-title">
+                  {gpuSelectorError.code.startsWith('credential_')
+                    ? 'RunPod credential needs attention'
+                    : 'GPU inventory unavailable'}
+                </h2>
+                <p role="alert">{gpuSelectorError.message}</p>
               </div>
               <Button tone="secondary" onClick={closeGpuSelector}>Close</Button>
             </header>
@@ -1817,9 +1875,16 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
               <Button
                 tone="primary"
                 pending={gpuSelectorBusy}
-                onClick={() => { void prepareGpuSelector(false); }}
+                onClick={() => {
+                  if (gpuSelectorError.code.startsWith('credential_')) {
+                    closeGpuSelector();
+                    dispatch({ type: 'NAVIGATE', view: 'settings' });
+                  } else {
+                    void prepareGpuSelector(false);
+                  }
+                }}
               >
-                Retry GPU list
+                {gpuSelectorError.code.startsWith('credential_') ? 'Open settings' : 'Retry GPU list'}
               </Button>
             </footer>
           </section>
@@ -1843,6 +1908,7 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
             onClose={closeGpuSelector}
             onRefresh={() => { void prepareGpuSelector(false); }}
             onCommit={commitGpuSelectorChoice}
+            onConfirmationOpenChange={setGpuSelectorConfirming}
           />
         )
       ) : null}

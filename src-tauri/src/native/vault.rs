@@ -89,7 +89,7 @@ impl CredentialVault for KeyringVault {
     }
 
     fn load(&self, kind: CredentialKind) -> NativeResult<String> {
-        Self::entry(kind)?
+        let secret = Self::entry(kind)?
             .get_password()
             .map_err(|error| match error {
                 KeyringError::NoEntry => NativeError::new(
@@ -100,7 +100,10 @@ impl CredentialVault for KeyringVault {
                     "credential_read_failed",
                     "The required credential could not be loaded from secure storage.",
                 ),
-            })
+            })?;
+        validate_secret(&secret)?;
+        validate_kind_specific(kind, &secret)?;
+        Ok(secret)
     }
 }
 

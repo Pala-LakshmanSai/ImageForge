@@ -961,6 +961,7 @@ impl GpuInventoryService {
         runpod: RunPodTransport,
         include_emergency_tier: bool,
     ) -> NativeResult<NativeGpuInventorySnapshotV1> {
+        runpod.assert_catalog_credential()?;
         let (snapshot, observation_id) = self.reserve_observation(include_emergency_tier)?;
         let Some(observation_id) = observation_id else {
             return Ok(snapshot);
@@ -2382,18 +2383,31 @@ fn parse_safe_pod(body: &str) -> NativeResult<NativeGpuSwitchPodV1> {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawCreatedPodPrice {
-    adjusted_cost_per_hr: Box<RawValue>,
+    adjusted_cost_per_hr: Option<Box<RawValue>>,
     cost_per_hr: Box<RawValue>,
 }
 
 fn parse_created_pod_price(body: &str) -> Option<u64> {
     let raw: RawCreatedPodPrice = serde_json::from_str(body).ok()?;
-    parse_created_price_tokens(raw.adjusted_cost_per_hr.get(), raw.cost_per_hr.get())
+    parse_created_price_tokens(
+        raw.adjusted_cost_per_hr
+            .as_deref()
+            .map(RawValue::get)
+            .unwrap_or("null"),
+        raw.cost_per_hr.get(),
+    )
 }
 
 pub(crate) fn parse_created_price_tokens(adjusted: &str, cost: &str) -> Option<u64> {
-    let cost: String = serde_json::from_str(cost).ok()?;
-    let cost = parse_number_price(&cost)?;
+    // RunPod currently emits `costPerHr` as a JSON number in Pod responses,
+    // while older responses used a JSON decimal string. Keep either original
+    // decimal token lossless; never route price authority through f64.
+    let cost_value: Value = serde_json::from_str(cost).ok()?;
+    let cost = match cost_value {
+        Value::String(value) => parse_number_price(&value)?,
+        Value::Number(_) => parse_number_price(cost)?,
+        _ => return None,
+    };
     if adjusted == "null" {
         Some(cost)
     } else {
@@ -3171,6 +3185,18 @@ mod tests {
         ] {
             assert_eq!(parse_number_price(invalid), None, "{invalid}");
         }
+    }
+
+    #[test]
+    fn created_pod_price_accepts_number_and_decimal_string_forms() {
+        assert_eq!(
+            parse_created_price_tokens("null", "\"0.74\""),
+            Some(740_000)
+        );
+        assert_eq!(parse_created_price_tokens("null", "0.74"), Some(740_000));
+        assert_eq!(parse_created_price_tokens("0.73", "0.74"), Some(730_000));
+        assert_eq!(parse_created_price_tokens("null", "7.4e-1"), None);
+        assert_eq!(parse_created_price_tokens("null", "true"), None);
     }
 
     #[test]

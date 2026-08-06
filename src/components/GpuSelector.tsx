@@ -1,6 +1,7 @@
 import {
   formatCanonicalMicroUsdV1,
   formatHourlyMicroUsdV1,
+  projectGpuInventoryFreshnessV1,
   type GpuSelectorAvailabilityV1,
   type GpuSelectorDisabledReasonV1,
   type NativeGpuInventorySnapshotV1,
@@ -52,6 +53,12 @@ export interface GpuSelectorProps {
   readonly returnFocusRef?: RefObject<HTMLElement | null>;
   readonly nowUtcMs?: number;
   readonly busy?: boolean;
+  /**
+   * Raised while the paid-action confirmation is mounted. The owner suspends
+   * its receipt-freshness refresh for that window so a background observation
+   * cannot dismiss a confirmation the user is reading.
+   */
+  readonly onConfirmationOpenChange?: (open: boolean) => void;
 }
 
 function availabilityCopy(value: GpuSelectorAvailabilityV1): string {
@@ -90,11 +97,22 @@ function primaryCopy(
   return mode === 'switch' ? `Review switch to ${selected.label}` : `Start selected GPU at ${price}`;
 }
 
-function statusCopy(snapshot: NativeGpuInventorySnapshotV1): string {
+function statusCopy(snapshot: NativeGpuInventorySnapshotV1, receiptExpired: boolean): string {
   if (snapshot.state === 'loading') return 'Loading live Secure Cloud inventory…';
+  if (receiptExpired && snapshot.state === 'ready') {
+    return 'These live prices expired. ImageForge is refreshing them; choose again once the new list lands.';
+  }
   if (snapshot.state === 'empty') return 'No approved GPU has capacity in EU-RO-1.';
-  if (snapshot.state === 'fallback') return 'Live inventory is unavailable. The policy order below is read only.';
-  if (snapshot.state === 'error') return 'Inventory validation failed. Refresh before starting or switching.';
+  if (snapshot.state === 'fallback') {
+    return snapshot.issue?.code === 'gpu_inventory_datacenters_unavailable'
+      ? 'RunPod region inventory could not be reached. The policy order below is read only; retry Refresh GPUs.'
+      : 'RunPod GPU inventory could not be reached. The policy order below is read only; retry Refresh GPUs.';
+  }
+  if (snapshot.state === 'error') {
+    return snapshot.issue?.code === 'gpu_inventory_region_unsupported'
+      ? 'RunPod did not confirm network-volume support in EU-RO-1. Starting is blocked.'
+      : 'RunPod returned inventory data ImageForge could not validate. Starting is blocked.';
+  }
   return `${snapshot.offers.length} approved live ${snapshot.offers.length === 1 ? 'offer' : 'offers'}`;
 }
 
@@ -171,10 +189,37 @@ export function GpuSelector({
   onRefresh,
   onCommit,
   returnFocusRef,
-  nowUtcMs = Date.now(),
+  nowUtcMs,
   busy = false,
+  onConfirmationOpenChange,
 }: GpuSelectorProps) {
-  const rows = useMemo(() => buildGpuSelectorRowsV1(snapshot, mode), [snapshot, mode]);
+  const [tickUtcMs, setTickUtcMs] = useState(() => Date.now());
+  // A mounted sheet has to keep its own time. The native receipt authorizes a
+  // paid Start for `validForMs` only, so an unattended selector must notice
+  // that deadline itself instead of presenting an expired receipt as startable
+  // until the click fails with `gpu_start_inventory_stale`.
+  useEffect(() => {
+    if (nowUtcMs !== undefined) return;
+    const timer = window.setInterval(() => setTickUtcMs(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [nowUtcMs]);
+  const now = nowUtcMs ?? tickUtcMs;
+  const receiptExpired = useMemo(() => {
+    const receipt = snapshot.receipt;
+    if (receipt === null) return false;
+    const receivedAtMs = Date.parse(receipt.receivedAt);
+    if (!Number.isFinite(receivedAtMs)) return true;
+    return now - receivedAtMs >= receipt.validForMs;
+  }, [snapshot, now]);
+  // Keep the projected snapshot referentially stable across ticks; only the
+  // expiry edge may rebuild rows.
+  const activeSnapshot = useMemo(
+    () => (receiptExpired
+      ? projectGpuInventoryFreshnessV1(snapshot, snapshot.processEpochId, 60_000)
+      : snapshot),
+    [receiptExpired, snapshot],
+  );
+  const rows = useMemo(() => buildGpuSelectorRowsV1(activeSnapshot, mode), [activeSnapshot, mode]);
   const rowsRef = useRef<readonly GpuSelectorRowV1[]>([]);
   const [ui, setUi] = useState<GpuSelectorUiStateV1>(INITIAL_GPU_SELECTOR_UI_STATE_V1);
   const rowRefs = useRef(new Map<GpuSelectorChoiceV1, HTMLButtonElement>());
@@ -184,10 +229,16 @@ export function GpuSelector({
       state,
       previousRows: rowsRef.current,
       nextRows: rows,
-      snapshot,
+      snapshot: activeSnapshot,
     }));
     rowsRef.current = rows;
-  }, [rows, snapshot]);
+  }, [rows, activeSnapshot]);
+
+  const confirmationOpen = ui.confirmation !== null;
+  useEffect(() => {
+    onConfirmationOpenChange?.(confirmationOpen);
+    return () => onConfirmationOpenChange?.(false);
+  }, [confirmationOpen, onConfirmationOpenChange]);
 
   useEffect(() => {
     if (ui.focusedChoice !== null) rowRefs.current.get(ui.focusedChoice)?.focus();
@@ -200,7 +251,7 @@ export function GpuSelector({
   const choose = (choice: GpuSelectorChoiceV1) => setUi((state) =>
     selectGpuChoiceV1(state, rows, choice));
   const requestConfirmation = () => setUi((state) =>
-    requestGpuSelectorConfirmationV1({ state, rows, snapshot, mode }));
+    requestGpuSelectorConfirmationV1({ state, rows, snapshot: activeSnapshot, mode }));
 
   function handleRowKeyDown(event: React.KeyboardEvent<HTMLButtonElement>) {
     if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
@@ -229,17 +280,17 @@ export function GpuSelector({
         role="dialog"
         aria-modal="false"
         aria-labelledby="gpu-selector-title"
-        data-gpu-selector-state={snapshot.state}
+        data-gpu-selector-state={activeSnapshot.state}
       >
         <header className="gpu-selector__header">
           <div>
             <p className="gpu-selector__eyebrow">Secure Cloud · EU-RO-1 · one GPU</p>
             <h2 id="gpu-selector-title">{mode === 'switch' ? 'Current GPU / Switch GPU' : 'Choose a GPU'}</h2>
-            <p>{statusCopy(snapshot)}</p>
+            <p>{statusCopy(activeSnapshot, receiptExpired)}</p>
           </div>
           <div className="gpu-selector__header-actions">
-            <button type="button" className="gpu-selector__icon-button" onClick={onRefresh} disabled={snapshot.state === 'loading'} aria-label="Refresh GPUs">
-              <RefreshCw size={17} aria-hidden="true" />
+            <button type="button" className="gpu-selector__icon-button" onClick={onRefresh} disabled={activeSnapshot.state === 'loading'} aria-label="Refresh GPUs">
+              <RefreshCw className={activeSnapshot.state === 'loading' ? 'gpu-selector__refresh-icon--loading' : undefined} size={17} aria-hidden="true" />
             </button>
             <button type="button" className="gpu-selector__icon-button" onClick={onClose} aria-label="Close GPU selector">
               <X size={18} aria-hidden="true" />
@@ -259,7 +310,7 @@ export function GpuSelector({
             const offer = row.offer;
             const price = row.kind === 'auto' ? 'Live order' : formatHourlyMicroUsdV1(
               row.kind === 'current'
-                ? snapshot.currentPod?.hourlyPriceMicroUsd ?? null
+                ? activeSnapshot.currentPod?.hourlyPriceMicroUsd ?? null
                 : offer?.hourlyPriceMicroUsd ?? null,
             );
             const disabled = row.disabledReason === null ? null : DISABLED_COPY[row.disabledReason];
@@ -300,7 +351,7 @@ export function GpuSelector({
                 </span>
                 <span className="gpu-selector-row__estimate">
                   <strong>{offer === null ? '—' : formatCanonicalMicroUsdV1(offer.estimatedSwitchRemainingCostMicroUsd)}</strong>
-                  <small>{disabled ?? observationAge(offer?.observedAt ?? snapshot.currentPodObservedAt, nowUtcMs)}</small>
+                  <small>{disabled ?? observationAge(offer?.observedAt ?? activeSnapshot.currentPodObservedAt, now)}</small>
                 </span>
               </button>
             );
@@ -308,7 +359,13 @@ export function GpuSelector({
         </div>
 
         <footer className="gpu-selector__footer">
-          <span>{selected ? `${selected.label} selected. Nothing changes until confirmation.` : 'Select one exact choice to continue.'}</span>
+          <span>
+            {selected
+              ? `${selected.label} selected. Nothing changes until confirmation.`
+              : receiptExpired && activeSnapshot.state === 'ready'
+                ? 'The live price receipt expired. Wait for the refreshed list, or use Refresh GPUs.'
+                : 'Select one exact choice to continue.'}
+          </span>
           <Button tone="primary" disabled={selected === undefined || busy} pending={busy} onClick={requestConfirmation}>
             {primaryCopy(mode, selected)}
           </Button>
@@ -318,12 +375,12 @@ export function GpuSelector({
       {ui.confirmation !== null ? (
         <ConfirmationDialog
           confirmation={ui.confirmation}
-          snapshot={snapshot}
+          snapshot={activeSnapshot}
           onCancel={() => setUi((state) => Object.freeze({ ...state, confirmation: null }))}
           onCommit={() => {
             const confirmation = ui.confirmation;
             if (confirmation === null) return;
-            if (!isGpuSelectorConfirmationCurrentV1(confirmation, rows, snapshot)) {
+            if (!isGpuSelectorConfirmationCurrentV1(confirmation, rows, activeSnapshot)) {
               setUi((state) => Object.freeze({ ...state, confirmation: null }));
               return;
             }

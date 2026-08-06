@@ -61,6 +61,10 @@
   border-color: rgba(159, 176, 255, 0.42);
   color: var(--text);
 }
+.gpu-selector__refresh-icon--loading {
+  animation: gpu-selector-refresh-spin 0.8s linear infinite;
+}
+@keyframes gpu-selector-refresh-spin { to { transform: rotate(360deg); } }
 
 .gpu-selector__announcer {
   width: 1px;
@@ -226,4 +230,5 @@
 @media (prefers-reduced-motion: reduce) {
   .gpu-selector-row { transition: none; }
   .gpu-selector-row:hover:not(:disabled) { transform: none; }
+  .gpu-selector__refresh-icon--loading { animation: none; }
 }
