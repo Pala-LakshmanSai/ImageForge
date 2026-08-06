@@ -27,7 +27,7 @@ const MAX_STUDIO_TIMESTAMP_BYTES: usize = 32;
 const MAX_STUDIO_TTL_SECONDS: u64 = 300;
 const MAX_JSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const IMAGEFORGE_WORKER_IMAGE_DIGEST: &str =
-    "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:f862e1ea8ece9f35101e7c47be55a5042c17e0eb3cf8414dd709ed73a59e33ed";
+    "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:5c60325027d5b11502a3a06b258144aec51b1b2bf69a0004a1c6b4181dbddf3b";
 const IMAGEFORGE_MODEL_ID: &str = "black-forest-labs/FLUX.2-klein-4B";
 const IMAGEFORGE_MODEL_REVISION: &str = "e7b7dc27f91deacad38e78976d1f2b499d76a294";
 const WORKER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);

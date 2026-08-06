@@ -45,7 +45,7 @@ const MAX_START_JOURNAL_BYTES: u64 = 64 * 1024;
 const IMAGEFORGE_TEMPLATE_ID: &str = "q8sfgixfy2";
 const IMAGEFORGE_NETWORK_VOLUME_ID: &str = "ukh207b26r";
 const IMAGEFORGE_WORKER_IMAGE: &str =
-    "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:f862e1ea8ece9f35101e7c47be55a5042c17e0eb3cf8414dd709ed73a59e33ed";
+    "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:5c60325027d5b11502a3a06b258144aec51b1b2bf69a0004a1c6b4181dbddf3b";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

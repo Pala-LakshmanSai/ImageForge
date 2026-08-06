@@ -992,6 +992,73 @@ describe("RunPodLifecycleController refresh and start", () => {
     );
   });
 
+  it("surfaces a persistent worker health contract failure instead of an endless booting projection", async () => {
+    const pod = makePod({ id: "contractfail1", status: "running" });
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()], pods: [pod] });
+    const health = new FakeWorkerHealthProbe();
+    health.setFailure(
+      deriveRunPodProxyUrl(pod.id, 8000),
+      new RunPodClientError({
+        code: "api_response_invalid",
+        message: "The ImageForge worker returned an unsupported health contract.",
+        operation: "worker_health",
+      }),
+    );
+    let now = 1_000;
+    const controller = makeController(provider, { health, now: () => now });
+
+    // A worker that answers with an unusable contract is still allowed to
+    // settle while the Pod is genuinely booting.
+    const booting = await controller.refresh();
+    assert.equal(booting.phase, "booting");
+    assert.equal(booting.error, null);
+
+    // Once the same contract failure outlives the bounded readiness interval
+    // it is a definite incompatibility, not a Pod that is still coming up.
+    now += 10 * 60_000;
+    const failed = await controller.refresh();
+    assert.equal(failed.phase, "error");
+    assert.equal(failed.error?.code, "worker_health_contract_failed");
+    assert.equal(failed.error?.retryable, false);
+    assert.match(failed.error?.message ?? "", /unsupported health contract/);
+    // The billed Pod stays visible and selected so Stop remains available.
+    assert.equal(failed.selectedPodId, pod.id);
+    assert.equal(failed.pods.length, 1);
+
+    // A worker that later answers correctly clears the latched failure.
+    health.setHealth(deriveRunPodProxyUrl(pod.id, 8000), {
+      schemaVersion: 1,
+      phase: "ready",
+      phaseProgress: 1,
+    });
+    const recovered = await controller.refresh();
+    assert.equal(recovered.phase, "ready");
+    assert.equal(recovered.error, null);
+  });
+
+  it("keeps a transport-only health failure in the booting projection", async () => {
+    const pod = makePod({ id: "transportfail1", status: "running" });
+    const provider = new FakeRunPodProvider({ inventory: [makeOffer()], pods: [pod] });
+    const health = new FakeWorkerHealthProbe();
+    health.setFailure(
+      deriveRunPodProxyUrl(pod.id, 8000),
+      new RunPodClientError({
+        code: "api_network_error",
+        message: "The ImageForge worker health endpoint is not reachable yet.",
+        operation: "worker_health",
+        retryable: true,
+      }),
+    );
+    let now = 1_000;
+    const controller = makeController(provider, { health, now: () => now });
+
+    assert.equal((await controller.refresh()).phase, "booting");
+    now += 10 * 60_000;
+    const later = await controller.refresh();
+    assert.equal(later.phase, "booting");
+    assert.equal(later.error, null);
+  });
+
   it("bounds Pod list and retained-Pod get calls that ignore abort", async (test) => {
     await test.test("list discovery", async () => {
       const provider = new FakeRunPodProvider({

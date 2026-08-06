@@ -234,6 +234,19 @@ function hasAuthoritativePodPrice(pod: ManagedPod): boolean {
     Number.isSafeInteger(pod.hourlyPriceMicroUsd) && pod.hourlyPriceMicroUsd >= 0;
 }
 
+/**
+ * A worker that answers `/v1/health` with an unusable contract has already
+ * proven it is running; it is not a Pod that is still coming up. Allow one
+ * bounded readiness interval for a transient body, then stop projecting the
+ * synthetic booting phase and surface the typed failure instead.
+ */
+const WORKER_HEALTH_CONTRACT_GRACE_MS = 5 * 60_000;
+
+interface HealthContractFailure {
+  readonly since: number;
+  readonly message: string;
+}
+
 function workerPhaseToLifecycle(health: WorkerHealth): LifecyclePhase {
   switch (health.phase) {
     case "process":
@@ -305,6 +318,10 @@ export class RunPodLifecycleController {
   // but distinguish it from a Pod that was observed live and later terminated
   // from another client.
   readonly #knownCreatedPodObserved = new Set<string>();
+  // First observation of a worker whose `/v1/health` body is unusable, keyed
+  // by Pod ID. A running worker that keeps answering with the wrong contract
+  // must not be reported as an indefinitely booting Pod.
+  readonly #healthContractFailures = new Map<string, HealthContractFailure>();
   #snapshot: RunPodSnapshot;
   #startPromise: Promise<StartGpuResult> | null = null;
   #unresolvedStartRequestId: string | null = null;
@@ -1424,6 +1441,7 @@ export class RunPodLifecycleController {
     const views = await Promise.all(
       pods.map(async (pod): Promise<PodView> => {
         if (pod.status !== "running" || this.#workerHealthProbe === null) {
+          this.#healthContractFailures.delete(pod.id);
           return this.#podView(pod, null, null);
         }
         try {
@@ -1432,6 +1450,7 @@ export class RunPodLifecycleController {
             signal,
             "worker_health",
           );
+          this.#healthContractFailures.delete(pod.id);
           if (this.#knownCreatedPods.has(pod.id)) {
             // A healthy worker reached through the exact create response is
             // authoritative observation even when RunPod's list endpoint is
@@ -1447,11 +1466,26 @@ export class RunPodLifecycleController {
             retryable: true,
           });
           if (healthErrorValue.code === "operation_aborted") throw healthErrorValue;
-          const healthError = "Worker health is not reachable yet.";
+          // A transport failure means the worker has not answered yet. An
+          // invalid response means it answered with a body this desktop
+          // cannot use, which no amount of further polling will resolve.
+          const contractFailed = healthErrorValue.code === "api_response_invalid";
+          if (!contractFailed) {
+            this.#healthContractFailures.delete(pod.id);
+          } else if (!this.#healthContractFailures.has(pod.id)) {
+            this.#healthContractFailures.set(
+              pod.id,
+              Object.freeze({ since: this.#clock.now(), message: healthErrorValue.message }),
+            );
+          }
+          const latched = this.#latchedHealthContractFailure(pod.id);
+          const healthError = latched?.message ?? "Worker health is not reachable yet.";
           warnings.push(
             Object.freeze({
               code: "worker_health_unreachable",
-              message: `Worker health is not reachable yet for Pod ${pod.id}.`,
+              message: latched === null
+                ? `Worker health is not reachable yet for Pod ${pod.id}.`
+                : `${latched.message} (Pod ${pod.id})`,
               podIds: Object.freeze([pod.id]),
             }),
           );
@@ -1459,6 +1493,10 @@ export class RunPodLifecycleController {
         }
       }),
     );
+    const observed = new Set(pods.map((pod) => pod.id));
+    for (const podId of this.#healthContractFailures.keys()) {
+      if (!observed.has(podId)) this.#healthContractFailures.delete(podId);
+    }
     return Object.freeze({
       views: Object.freeze(views),
       warnings: Object.freeze(warnings),
@@ -1569,6 +1607,23 @@ export class RunPodLifecycleController {
     });
   }
 
+  /**
+   * The typed failure for a worker that has kept answering `/v1/health` with
+   * an unusable contract for longer than one bounded readiness interval.
+   * Returns null while the failure is still inside that interval, so a
+   * genuinely transient body cannot end a normal boot.
+   */
+  #latchedHealthContractFailure(podId: string): SafeErrorSummary | null {
+    const observed = this.#healthContractFailures.get(podId);
+    if (observed === undefined) return null;
+    if (this.#clock.now() - observed.since < WORKER_HEALTH_CONTRACT_GRACE_MS) return null;
+    return Object.freeze({
+      code: "worker_health_contract_failed",
+      message: observed.message,
+      retryable: false,
+    });
+  }
+
   #podView(
     pod: ManagedPod,
     workerHealth: WorkerHealth | null,
@@ -1585,9 +1640,10 @@ export class RunPodLifecycleController {
     } else if (pod.status === "running" && workerHealth !== null) {
       lifecyclePhase = workerPhaseToLifecycle(workerHealth);
     } else if (pod.status === "running" && healthError !== null) {
-      lifecyclePhase =
-        this.#snapshot.selectedPodId === pod.id &&
-        (this.#snapshot.phase === "ready" || this.#snapshot.phase === "reconnecting")
+      lifecyclePhase = this.#latchedHealthContractFailure(pod.id) !== null
+        ? "error"
+        : this.#snapshot.selectedPodId === pod.id &&
+          (this.#snapshot.phase === "ready" || this.#snapshot.phase === "reconnecting")
           ? "reconnecting"
           : "booting";
     } else if (pod.status === "running") {
@@ -1643,7 +1699,12 @@ export class RunPodLifecycleController {
               message: "The ImageForge worker could not become ready.",
               retryable: false,
             })
-          : null,
+          // A worker whose health contract this desktop cannot accept is a
+          // definite incompatibility. Surface it rather than holding the Pod
+          // in a booting projection that can never advance.
+          : selected === null
+            ? null
+            : this.#latchedHealthContractFailure(selected.id),
     };
   }
 

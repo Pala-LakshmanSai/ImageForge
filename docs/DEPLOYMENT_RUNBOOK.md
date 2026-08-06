@@ -34,11 +34,12 @@ read-only package-pull secret in RunPod and record that it was used; for a
 public package, verify the package visibility explicitly. Never put a personal
 GitHub token in the repository, desktop profile, or this runbook.
 
-Current immutable worker release evidence (published 2026-08-02):
+Current immutable worker release evidence (published 2026-08-06):
 
 - Repository: `Pala-LakshmanSai/imageforge-worker`
-- Source commit: `dbb6b712317b824b113132f1128ee91b11a46c27`
-- Image: `ghcr.io/pala-lakshmansai/imageforge-worker@sha256:f862e1ea8ece9f35101e7c47be55a5042c17e0eb3cf8414dd709ed73a59e33ed`
+- Source commit: `6e29f21af11c3704e0aa3ffa6b320d6d1b8c9675`
+- Image: `ghcr.io/pala-lakshmansai/imageforge-worker@sha256:5c60325027d5b11502a3a06b258144aec51b1b2bf69a0004a1c6b4181dbddf3b`
+- Worker version: `0.1.3`
 - Architecture: `linux/amd64`
 
 The GHCR package is public, so the template uses **No credentials** for image
