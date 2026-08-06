@@ -1,47 +1,341 @@
 {
   "schemaVersion": 1,
   "cases": [
-    { "id": "inventory_zero", "surface": "inventory", "rawJson": "{\"secure\":0}", "expectedValid": true, "expectedMicroUsd": 0, "expectedSource": "adjusted" },
-    { "id": "inventory_fraction", "surface": "inventory", "rawJson": "{\"secure\":0.69}", "expectedValid": true, "expectedMicroUsd": 690000, "expectedSource": "adjusted" },
-    { "id": "inventory_six_decimals", "surface": "inventory", "rawJson": "{\"secure\":12.000001}", "expectedValid": true, "expectedMicroUsd": 12000001, "expectedSource": "adjusted" },
-    { "id": "inventory_safe_max", "surface": "inventory", "rawJson": "{\"secure\":9007199254.740991}", "expectedValid": true, "expectedMicroUsd": 9007199254740991, "expectedSource": "adjusted" },
-    { "id": "inventory_null", "surface": "inventory", "rawJson": "{\"secure\":null}", "expectedValid": true, "expectedMicroUsd": null, "expectedSource": "unavailable" },
-    { "id": "inventory_missing_rejected", "surface": "inventory", "rawJson": "{}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "inventory_string_rejected", "surface": "inventory", "rawJson": "{\"secure\":\"0.69\"}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "inventory_boolean_rejected", "surface": "inventory", "rawJson": "{\"secure\":true}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "inventory_exponent_rejected", "surface": "inventory", "rawJson": "{\"secure\":6.9e-1}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "inventory_negative_rejected", "surface": "inventory", "rawJson": "{\"secure\":-0.1}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "inventory_seven_decimals_rejected", "surface": "inventory", "rawJson": "{\"secure\":0.0000001}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "inventory_overflow_rejected", "surface": "inventory", "rawJson": "{\"secure\":9007199254.740992}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "inventory_plus_rejected", "surface": "inventory", "rawJson": "{\"secure\":+0.69}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "inventory_leading_zero_rejected", "surface": "inventory", "rawJson": "{\"secure\":00.69}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "inventory_trailing_dot_rejected", "surface": "inventory", "rawJson": "{\"secure\":0.}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "inventory_nan_rejected", "surface": "inventory", "rawJson": "{\"secure\":NaN}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "inventory_infinity_rejected", "surface": "inventory", "rawJson": "{\"secure\":Infinity}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "pod_adjusted_zero", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":0,\"costPerHr\":\"0.74\"}", "expectedValid": true, "expectedMicroUsd": 0, "expectedSource": "adjusted" },
-    { "id": "pod_adjusted_wins", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":0.69,\"costPerHr\":\"0.74\"}", "expectedValid": true, "expectedMicroUsd": 690000, "expectedSource": "adjusted" },
-    { "id": "pod_adjusted_six_decimals", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":12.000001,\"costPerHr\":\"0.74\"}", "expectedValid": true, "expectedMicroUsd": 12000001, "expectedSource": "adjusted" },
-    { "id": "pod_null_adjusted_zero_cost", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"0\"}", "expectedValid": true, "expectedMicroUsd": 0, "expectedSource": "cost" },
-    { "id": "pod_null_adjusted_cost", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"0.000001\"}", "expectedValid": true, "expectedMicroUsd": 1, "expectedSource": "cost" },
-    { "id": "pod_safe_max_cost", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"9007199254.740991\"}", "expectedValid": true, "expectedMicroUsd": 9007199254740991, "expectedSource": "cost" },
-    { "id": "pod_adjusted_string_rejected", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":\"0.69\",\"costPerHr\":\"0.74\"}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "pod_adjusted_exponent_rejected", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":6.9e-1,\"costPerHr\":\"0.74\"}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "pod_adjusted_negative_rejected", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":-0.69,\"costPerHr\":\"0.74\"}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "pod_adjusted_seven_decimals_rejected", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":0.0000001,\"costPerHr\":\"0.74\"}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "pod_adjusted_overflow_rejected", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":9007199254.740992,\"costPerHr\":\"0.74\"}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "pod_numeric_cost_rejected", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":0.74}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "pod_invalid_cost_blocks_adjusted", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":0.69,\"costPerHr\":\" 0.74\"}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "pod_trailing_whitespace_rejected", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"0.74 \"}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "pod_plus_cost_rejected", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"+0.74\"}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "pod_negative_cost_rejected", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"-0.74\"}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "pod_leading_zero_rejected", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"00.74\"}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "pod_exponent_cost_rejected", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"7.4e-1\"}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "pod_trailing_dot_rejected", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"0.\"}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "pod_seven_decimal_cost_rejected", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"0.0000001\"}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "pod_overflow_rejected", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"9007199254.740992\"}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "pod_empty_cost_rejected", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"\"}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "pod_null_cost_rejected", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":null}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "pod_missing_adjusted_rejected", "surface": "pod", "rawJson": "{\"costPerHr\":\"0.74\"}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" },
-    { "id": "pod_missing_cost_rejected", "surface": "pod", "rawJson": "{\"adjustedCostPerHr\":0.69}", "expectedValid": false, "expectedMicroUsd": null, "expectedSource": "invalid" }
+    {
+      "id": "inventory_zero",
+      "surface": "inventory",
+      "rawJson": "{\"secure\":0}",
+      "expectedValid": true,
+      "expectedMicroUsd": 0,
+      "expectedSource": "adjusted"
+    },
+    {
+      "id": "inventory_fraction",
+      "surface": "inventory",
+      "rawJson": "{\"secure\":0.69}",
+      "expectedValid": true,
+      "expectedMicroUsd": 690000,
+      "expectedSource": "adjusted"
+    },
+    {
+      "id": "inventory_six_decimals",
+      "surface": "inventory",
+      "rawJson": "{\"secure\":12.000001}",
+      "expectedValid": true,
+      "expectedMicroUsd": 12000001,
+      "expectedSource": "adjusted"
+    },
+    {
+      "id": "inventory_safe_max",
+      "surface": "inventory",
+      "rawJson": "{\"secure\":9007199254.740991}",
+      "expectedValid": true,
+      "expectedMicroUsd": 9007199254740991,
+      "expectedSource": "adjusted"
+    },
+    {
+      "id": "inventory_null",
+      "surface": "inventory",
+      "rawJson": "{\"secure\":null}",
+      "expectedValid": true,
+      "expectedMicroUsd": null,
+      "expectedSource": "unavailable"
+    },
+    {
+      "id": "inventory_missing_rejected",
+      "surface": "inventory",
+      "rawJson": "{}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "inventory_string_rejected",
+      "surface": "inventory",
+      "rawJson": "{\"secure\":\"0.69\"}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "inventory_boolean_rejected",
+      "surface": "inventory",
+      "rawJson": "{\"secure\":true}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "inventory_exponent_rejected",
+      "surface": "inventory",
+      "rawJson": "{\"secure\":6.9e-1}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "inventory_negative_rejected",
+      "surface": "inventory",
+      "rawJson": "{\"secure\":-0.1}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "inventory_seven_decimals_rejected",
+      "surface": "inventory",
+      "rawJson": "{\"secure\":0.0000001}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "inventory_overflow_rejected",
+      "surface": "inventory",
+      "rawJson": "{\"secure\":9007199254.740992}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "inventory_plus_rejected",
+      "surface": "inventory",
+      "rawJson": "{\"secure\":+0.69}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "inventory_leading_zero_rejected",
+      "surface": "inventory",
+      "rawJson": "{\"secure\":00.69}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "inventory_trailing_dot_rejected",
+      "surface": "inventory",
+      "rawJson": "{\"secure\":0.}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "inventory_nan_rejected",
+      "surface": "inventory",
+      "rawJson": "{\"secure\":NaN}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "inventory_infinity_rejected",
+      "surface": "inventory",
+      "rawJson": "{\"secure\":Infinity}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "pod_adjusted_zero",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":0,\"costPerHr\":\"0.74\"}",
+      "expectedValid": true,
+      "expectedMicroUsd": 0,
+      "expectedSource": "adjusted"
+    },
+    {
+      "id": "pod_adjusted_wins",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":0.69,\"costPerHr\":\"0.74\"}",
+      "expectedValid": true,
+      "expectedMicroUsd": 690000,
+      "expectedSource": "adjusted"
+    },
+    {
+      "id": "pod_adjusted_six_decimals",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":12.000001,\"costPerHr\":\"0.74\"}",
+      "expectedValid": true,
+      "expectedMicroUsd": 12000001,
+      "expectedSource": "adjusted"
+    },
+    {
+      "id": "pod_null_adjusted_zero_cost",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"0\"}",
+      "expectedValid": true,
+      "expectedMicroUsd": 0,
+      "expectedSource": "cost"
+    },
+    {
+      "id": "pod_null_adjusted_cost",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"0.000001\"}",
+      "expectedValid": true,
+      "expectedMicroUsd": 1,
+      "expectedSource": "cost"
+    },
+    {
+      "id": "pod_safe_max_cost",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"9007199254.740991\"}",
+      "expectedValid": true,
+      "expectedMicroUsd": 9007199254740991,
+      "expectedSource": "cost"
+    },
+    {
+      "id": "pod_adjusted_string_rejected",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":\"0.69\",\"costPerHr\":\"0.74\"}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "pod_adjusted_exponent_rejected",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":6.9e-1,\"costPerHr\":\"0.74\"}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "pod_adjusted_negative_rejected",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":-0.69,\"costPerHr\":\"0.74\"}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "pod_adjusted_seven_decimals_rejected",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":0.0000001,\"costPerHr\":\"0.74\"}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "pod_adjusted_overflow_rejected",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":9007199254.740992,\"costPerHr\":\"0.74\"}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "pod_numeric_cost_accepted",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":0.74}",
+      "expectedValid": true,
+      "expectedMicroUsd": 740000,
+      "expectedSource": "cost"
+    },
+    {
+      "id": "pod_invalid_cost_blocks_adjusted",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":0.69,\"costPerHr\":\" 0.74\"}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "pod_trailing_whitespace_rejected",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"0.74 \"}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "pod_plus_cost_rejected",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"+0.74\"}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "pod_negative_cost_rejected",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"-0.74\"}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "pod_leading_zero_rejected",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"00.74\"}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "pod_exponent_cost_rejected",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"7.4e-1\"}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "pod_trailing_dot_rejected",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"0.\"}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "pod_seven_decimal_cost_rejected",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"0.0000001\"}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "pod_overflow_rejected",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"9007199254.740992\"}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "pod_empty_cost_rejected",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":\"\"}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "pod_null_cost_rejected",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":null,\"costPerHr\":null}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    },
+    {
+      "id": "pod_missing_adjusted_uses_cost",
+      "surface": "pod",
+      "rawJson": "{\"costPerHr\":\"0.74\"}",
+      "expectedValid": true,
+      "expectedMicroUsd": 740000,
+      "expectedSource": "cost"
+    },
+    {
+      "id": "pod_missing_cost_rejected",
+      "surface": "pod",
+      "rawJson": "{\"adjustedCostPerHr\":0.69}",
+      "expectedValid": false,
+      "expectedMicroUsd": null,
+      "expectedSource": "invalid"
+    }
   ]
 }

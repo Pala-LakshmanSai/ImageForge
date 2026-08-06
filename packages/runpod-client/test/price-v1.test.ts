@@ -75,6 +75,41 @@ describe("shared GPU and image identities", () => {
     }
   });
 
+
+  it("accepts the current RunPod Pod price shape: number costPerHr and omitted adjustedCostPerHr", () => {
+    // RunPod's live Pod response drops `adjustedCostPerHr` entirely and sends
+    // `costPerHr` as a JSON number. Before this, every observed Pod lost its
+    // price even though the exact token was present and lossless.
+    const omitted = parsePodPriceV1(parseLosslessJson('{"costPerHr":0.74}'));
+    assert.equal(omitted.valid, true);
+    assert.equal(omitted.hourlyPriceMicroUsd, 740_000);
+    assert.equal(omitted.source, "cost");
+
+    const explicitNull = parsePodPriceV1(
+      parseLosslessJson('{"adjustedCostPerHr":null,"costPerHr":0.74}'),
+    );
+    assert.equal(explicitNull.valid, true);
+    assert.equal(explicitNull.hourlyPriceMicroUsd, 740_000);
+
+    const legacyString = parsePodPriceV1(
+      parseLosslessJson('{"adjustedCostPerHr":null,"costPerHr":"0.74"}'),
+    );
+    assert.equal(legacyString.valid, true);
+    assert.equal(legacyString.hourlyPriceMicroUsd, 740_000);
+
+    const adjusted = parsePodPriceV1(
+      parseLosslessJson('{"adjustedCostPerHr":0.73,"costPerHr":0.74}'),
+    );
+    assert.equal(adjusted.valid, true);
+    assert.equal(adjusted.hourlyPriceMicroUsd, 730_000);
+    assert.equal(adjusted.source, "adjusted");
+
+    // A missing cost token still has no price authority.
+    assert.equal(parsePodPriceV1(parseLosslessJson('{"adjustedCostPerHr":0.73}')).valid, false);
+    assert.equal(parsePodPriceV1(parseLosslessJson('{"costPerHr":true}')).valid, false);
+    assert.equal(parsePodPriceV1(parseLosslessJson('{"costPerHr":7.4e-1}')).valid, false);
+  });
+
   it("accepts only an immutable lowercase registry digest", () => {
     const valid = "ghcr.io/imageforge/worker@sha256:" + "a".repeat(64);
     assert.equal(isLowercaseRegistryImageDigestV1(valid), true);

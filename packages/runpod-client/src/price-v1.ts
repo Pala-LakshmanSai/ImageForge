@@ -52,15 +52,20 @@ export function parseInventorySecurePriceV1(price: unknown): ParsedInventoryPric
 }
 
 /**
- * Pod price is valid only when both documented fields exist with their exact
- * representations. Adjusted wins unless it is the literal JSON null.
+ * Pod price is valid only when the documented cost field exists with an exact
+ * representation. Adjusted wins unless it is the literal JSON null.
+ *
+ * RunPod's current Pod response omits `adjustedCostPerHr` entirely rather than
+ * sending an explicit null, and emits `costPerHr` as a JSON number where it
+ * once sent a decimal string. Both forms are accepted here through their exact
+ * source token, matching what the native parser already admits; binary
+ * floating point never becomes price authority.
  */
 export function parsePodPriceV1(pod: unknown): ParsedPodPriceV1 {
   if (
     typeof pod !== "object" ||
     pod === null ||
     Array.isArray(pod) ||
-    !Object.hasOwn(pod, "adjustedCostPerHr") ||
     !Object.hasOwn(pod, "costPerHr")
   ) {
     return Object.freeze({
@@ -72,7 +77,11 @@ export function parsePodPriceV1(pod: unknown): ParsedPodPriceV1 {
     });
   }
   const record = pod as Readonly<Record<string, unknown>>;
-  const costLexeme = typeof record.costPerHr === "string" ? record.costPerHr : null;
+  const costLexeme = typeof record.costPerHr === "string"
+    ? record.costPerHr
+    : typeof record.costPerHr === "number"
+      ? getLosslessJsonNumberToken(record, "costPerHr")
+      : null;
   const cost = costLexeme === null ? null : parsePriceDecimalV1(costLexeme);
   if (cost === null) {
     return Object.freeze({
@@ -83,7 +92,9 @@ export function parsePodPriceV1(pod: unknown): ParsedPodPriceV1 {
       costLexeme,
     });
   }
-  if (record.adjustedCostPerHr === null) {
+  // An omitted `adjustedCostPerHr` means no adjustment, exactly like the
+  // explicit null form, so the exact base cost stays authoritative.
+  if (!Object.hasOwn(record, "adjustedCostPerHr") || record.adjustedCostPerHr === null) {
     return Object.freeze({
       valid: true,
       hourlyPriceMicroUsd: cost.microUsd,

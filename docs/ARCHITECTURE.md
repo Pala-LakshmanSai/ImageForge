@@ -33,8 +33,24 @@ parsed losslessly into integer micro-USD. Inventory `securePrice`, Pod
 `adjustedCostPerHr`, and Pod `costPerHr` accept exact JSON number tokens;
 `costPerHr` also accepts the provider's decimal-string form. An omitted
 `adjustedCostPerHr` means no adjustment and falls back to the exact base cost.
+Both the native and renderer price parsers admit exactly these forms.
 Binary floating point is never authority for
 equality, ranking, persistence, confirmation, or fingerprints.
+
+Pod observation reads only ImageForge's own Pods. Ownership is decided by the
+reserved `imageforge` Pod name, and an unrelated Pod sharing the RunPod account
+is skipped rather than failing the observation, so one foreign workload cannot
+disable Pod state for the whole app.
+
+An ImageForge-named Pod that fails managed validation fails closed while it is
+provisioning, starting, or running: that is the case where an unrecognized
+worker image can mean live billing or unknown code, so it keeps blocking Start
+and can never become a second billed Pod. A Pod already in a terminal state
+(`exited`, `terminated`) is excluded from the observation instead. Terminal
+Pods accumulate in the account under whatever worker image was pinned when
+they ran, they cannot bill or be resumed into the current Pod, and treating one
+as fatal previously disabled all Pod state — and therefore Start — permanently,
+with no in-app recovery.
 
 The selection engine uses only checked-in Task 014 benchmark-v2 evidence whose
 model/image/settings/fixture/hash match and whose age is under 90 days. Exact

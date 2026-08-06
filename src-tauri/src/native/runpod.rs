@@ -1807,6 +1807,19 @@ impl RunPodTransport {
         let pods = raw.as_array().ok_or_else(response_invalid)?;
         let mut projected = Vec::with_capacity(pods.len());
         for pod in pods {
+            // Same ownership rule as the observation list: a Pod this app did
+            // not create is not ImageForge's to project, verify, or hand to the
+            // renderer. RunPod auto-names unrelated Pods (`quiet_amber_moth`),
+            // and such a Pod can carry any shape, so projecting it here failed
+            // the whole list and made every Pod read fail while unrelated Pods
+            // sat in the account.
+            if !pod
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(imageforge_pod_name)
+            {
+                continue;
+            }
             let dynamic = pod
                 .get("id")
                 .and_then(Value::as_str)
@@ -1814,6 +1827,7 @@ impl RunPodTransport {
                 .transpose()?
                 .unwrap_or_default();
             let value = project_pod_with_dynamic(pod, &dynamic)?;
+            let mut verified = false;
             if let Some(pod_id) = value.get("id").and_then(Value::as_str) {
                 if validate_managed_pod_value(
                     &value,
@@ -1824,7 +1838,25 @@ impl RunPodTransport {
                 .is_ok()
                 {
                     self.register_verified_pod(pod_id, &value)?;
+                    verified = true;
                 }
+            }
+            // Same terminal-Pod rule the observation list applies, enforced
+            // here because this projection also feeds the Start preflight's
+            // "does a managed Pod already exist" check. That check rejects the
+            // whole list if any row is not strictly safe, so one historical
+            // exited Pod left from an older pinned worker image blocked every
+            // Start even once observation itself had been repaired.
+            //
+            // A terminal Pod is not an existing managed Pod: it is not
+            // billing, it cannot be resumed into the current Pod, and it can
+            // never become the duplicate this preflight exists to prevent.
+            let terminal_state = value
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| matches!(status, "exited" | "terminated"));
+            if !verified && terminal_state {
+                continue;
             }
             projected.push(value);
         }
@@ -2341,6 +2373,13 @@ fn validate_bound_list_profile(url: &Url, profile: &RunPodProfileBinding) -> Nat
     Ok(())
 }
 
+/// The reserved ImageForge Pod name. It is the only ownership signal available
+/// before a Pod has been strictly validated, so both the list filter and the
+/// managed-Pod validator below decide ownership through this one predicate.
+fn imageforge_pod_name(name: &str) -> bool {
+    name == "imageforge" || name.starts_with("imageforge-")
+}
+
 fn validate_managed_pod_value(
     pod: &Value,
     expected_pod_id: &str,
@@ -2382,7 +2421,7 @@ fn validate_managed_pod_value(
         && object
             .get("name")
             .and_then(Value::as_str)
-            .is_some_and(|name| name == "imageforge" || name.starts_with("imageforge-"))
+            .is_some_and(imageforge_pod_name)
         && object.get("templateId").and_then(Value::as_str) == Some(profile.template_id.as_str())
         && object
             .get("imageName")
@@ -2805,6 +2844,26 @@ fn parse_switch_managed_pod_list(
         serde_json::from_str(body).map_err(|_| switch_provider_response_error())?;
     let mut pods = Vec::with_capacity(values.len());
     for raw in values {
+        // One RunPod account may also hold Pods this app did not create. A
+        // foreign Pod is not ImageForge's to verify, bill, or stop, and it can
+        // legitimately carry any shape at all. Before this filter a single
+        // unrelated Pod failed the strict parse below and aborted the whole
+        // observation, which left the app permanently unable to observe its
+        // own Pods, showed "Existing ImageForge Pods could not be observed",
+        // and blocked Start.
+        //
+        // Ownership is decided only by the reserved ImageForge Pod name, the
+        // same predicate `validate_managed_pod_value` uses. Anything carrying
+        // that name still fails closed below, so an ImageForge Pod that cannot
+        // be verified continues to block Start and can never be silently
+        // dropped into a duplicate billed Pod.
+        if !raw
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(imageforge_pod_name)
+        {
+            continue;
+        }
         // Provider responses may contain mutable or private fields. Project
         // them through the one explicit top-level/nested allowlist before any
         // identity parsing, so unknown fields never become authority or a
@@ -2814,9 +2873,30 @@ fn parse_switch_managed_pod_list(
             .map_err(|_| switch_provider_response_error())?;
         let encoded =
             serde_json::to_string(&value).map_err(|_| switch_provider_response_error())?;
-        pods.push(parse_switch_managed_pod_with_value(
-            value, &encoded, profile, dynamic,
-        )?);
+        // A Pod that reached a terminal state is not billing, cannot be
+        // resumed into ImageForge's current Pod, and carries no duplicate-Pod
+        // hazard. Historical Pods therefore accumulate in the account under
+        // whatever pinned worker image was current when they ran, and a single
+        // one left from an older image used to fail this parse and abort every
+        // observation for good: the app could not read Pod state, could not
+        // show the Pod, and could not Start, with no in-app way out.
+        //
+        // Only terminal Pods are excluded here. A Pod that is still
+        // provisioning, starting, or running must keep failing closed, because
+        // that is the case where an unrecognized image really could mean live
+        // billing or unknown code under ImageForge's own name.
+        let terminal_state = value
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| matches!(status, "exited" | "terminated"));
+        match parse_switch_managed_pod_with_value(value, &encoded, profile, dynamic) {
+            Ok(pod) => pods.push(pod),
+            Err(error) if terminal_state => {
+                let _ = error;
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
     }
     pods.sort_by(|left, right| left.pod_id.cmp(&right.pod_id));
     if pods.windows(2).any(|pair| pair[0].pod_id == pair[1].pod_id) {
@@ -3606,6 +3686,197 @@ mod tests {
                 .code,
             "gpu_start_provider_response_invalid"
         );
+    }
+
+    #[test]
+    fn foreign_pods_are_skipped_while_imageforge_named_pods_still_fail_closed() {
+        let profile = normal_start_profile();
+        let valid: Value = serde_json::from_str(&managed_pod_json(
+            IMAGEFORGE_NETWORK_VOLUME_ID,
+            "NVIDIA GeForce RTX 4090",
+        ))
+        .unwrap();
+
+        // An unrelated Pod in the same account may carry any shape at all.
+        // Before the ownership filter this aborted the whole observation and
+        // left ImageForge permanently unable to see its own Pods.
+        let foreign = serde_json::json!({
+            "id": "foreign01",
+            "name": "my-other-project",
+            "desiredStatus": "RUNNING",
+        });
+        let parsed = parse_switch_managed_pod_list(
+            &serde_json::to_string(&vec![foreign.clone(), valid.clone()]).unwrap(),
+            &profile,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].pod_id, "abc123xy");
+
+        // A foreign Pod alone leaves an empty, successful observation rather
+        // than a hard failure.
+        assert!(parse_switch_managed_pod_list(
+            &serde_json::to_string(&vec![foreign]).unwrap(),
+            &profile,
+            &HashMap::new(),
+        )
+        .unwrap()
+        .is_empty());
+
+        // A Pod carrying the reserved ImageForge name must still fail closed,
+        // so an unverifiable managed Pod can never be dropped into a duplicate
+        // billed Pod.
+        let mut impostor = valid;
+        impostor["imageName"] = Value::String(
+            "ghcr.io/attacker/imageforge-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_owned(),
+        );
+        assert!(parse_switch_managed_pod_list(
+            &serde_json::to_string(&vec![impostor]).unwrap(),
+            &profile,
+            &HashMap::new(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn terminal_pod_from_an_older_worker_image_cannot_disable_observation() {
+        let profile = normal_start_profile();
+        let live: Value = serde_json::from_str(&managed_pod_json(
+            IMAGEFORGE_NETWORK_VOLUME_ID,
+            "NVIDIA GeForce RTX 4090",
+        ))
+        .unwrap();
+        let older_image =
+            "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+        // The real failure: one exited Pod left from a previous pinned worker
+        // image aborted every observation, so the app could never read Pod
+        // state or Start again.
+        for status in ["exited", "terminated"] {
+            let mut historical = live.clone();
+            historical["id"] = Value::String("oldpod01".to_owned());
+            historical["name"] = Value::String("imageforge-archived".to_owned());
+            historical["imageName"] = Value::String(older_image.to_owned());
+            historical["status"] = Value::String(status.to_owned());
+
+            let parsed = parse_switch_managed_pod_list(
+                &serde_json::to_string(&vec![historical.clone(), live.clone()]).unwrap(),
+                &profile,
+                &HashMap::new(),
+            )
+            .unwrap();
+            assert_eq!(parsed.len(), 1, "{status}: live Pod must survive");
+            assert_eq!(parsed[0].pod_id, "abc123xy");
+
+            // Alone, it leaves a clean empty observation instead of an error.
+            assert!(parse_switch_managed_pod_list(
+                &serde_json::to_string(&vec![historical]).unwrap(),
+                &profile,
+                &HashMap::new(),
+            )
+            .unwrap()
+            .is_empty());
+        }
+
+        // An active Pod under an unrecognized image is the case that can mean
+        // live billing or unknown code, so it must still fail closed.
+        for status in ["provisioning", "starting", "running"] {
+            let mut active = live.clone();
+            active["id"] = Value::String("livepod1".to_owned());
+            active["name"] = Value::String("imageforge-active".to_owned());
+            active["imageName"] = Value::String(older_image.to_owned());
+            active["status"] = Value::String(status.to_owned());
+            assert!(
+                parse_switch_managed_pod_list(
+                    &serde_json::to_string(&vec![active]).unwrap(),
+                    &profile,
+                    &HashMap::new(),
+                )
+                .is_err(),
+                "{status}: active mismatched Pod must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn list_pod_projection_drops_foreign_pods_before_they_reach_the_renderer() {
+        let temporary = tempfile::tempdir().unwrap();
+        let transport = RunPodTransport::new_for_test(
+            Arc::new(MemoryVault::default()),
+            temporary.path().join("marker"),
+        )
+        .unwrap();
+        transport
+            .bind_profile(IMAGEFORGE_TEMPLATE_ID, IMAGEFORGE_NETWORK_VOLUME_ID)
+            .unwrap();
+        let profile = normal_start_profile();
+        let managed: Value = serde_json::from_str(&managed_pod_json(
+            IMAGEFORGE_NETWORK_VOLUME_ID,
+            "NVIDIA GeForce RTX 4090",
+        ))
+        .unwrap();
+        // RunPod auto-names Pods this app never created. One of them used to
+        // fail projection and take the whole Pod read down with it.
+        let foreign = serde_json::json!({
+            "id": "n45xsjzsedvzsx",
+            "name": "controversial_sapphire_raccoon",
+            "desiredStatus": "EXITED",
+            "costPerHr": 0,
+        });
+        let raw = Value::Array(vec![foreign, managed]);
+        let encoded = transport
+            .project_and_register_pod_list(&raw, &profile)
+            .unwrap();
+        let projected: Vec<Value> = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(projected.len(), 1);
+        assert_eq!(
+            projected[0].get("id").and_then(Value::as_str),
+            Some("abc123xy")
+        );
+        // The Start preflight rejects a list containing any unsafe row, so the
+        // filtered projection is what keeps Start reachable.
+        assert_eq!(
+            parse_normal_start_list_pods(&encoded, &profile).unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn start_preflight_projection_drops_terminal_pods_from_an_older_worker_image() {
+        let temporary = tempfile::tempdir().unwrap();
+        let transport = RunPodTransport::new_for_test(
+            Arc::new(MemoryVault::default()),
+            temporary.path().join("marker"),
+        )
+        .unwrap();
+        transport
+            .bind_profile(IMAGEFORGE_TEMPLATE_ID, IMAGEFORGE_NETWORK_VOLUME_ID)
+            .unwrap();
+        let profile = normal_start_profile();
+        let mut historical: Value = serde_json::from_str(&managed_pod_json(
+            IMAGEFORGE_NETWORK_VOLUME_ID,
+            "NVIDIA GeForce RTX 4090",
+        ))
+        .unwrap();
+        historical["id"] = Value::String("oldpod01".to_owned());
+        historical["name"] = Value::String("imageforge-archived".to_owned());
+        historical["status"] = Value::String("exited".to_owned());
+        historical["imageName"] = Value::String(
+            "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_owned(),
+        );
+
+        let encoded = transport
+            .project_and_register_pod_list(&Value::Array(vec![historical]), &profile)
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Vec<Value>>(&encoded).unwrap().len(), 0);
+        // `native_preflight_no_managed_pod` parses this body; one exited Pod
+        // from an older image must not read as an existing managed Pod.
+        assert!(parse_normal_start_list_pods(&encoded, &profile)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
