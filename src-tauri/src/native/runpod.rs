@@ -2392,22 +2392,34 @@ fn validate_managed_pod_value(
     let network_volume = object
         .get("networkVolume")
         .and_then(Value::as_object)
-        .ok_or_else(rejected)?;
+        .ok_or_else(|| {
+            super::error::trace_rejected_checks("managed_pod", &["networkVolume:absent"]);
+            rejected()
+        })?;
     ensure_only_allowed_projection_keys(network_volume, &["id", "dataCenterId"])?;
     let machine = object
         .get("machine")
         .and_then(Value::as_object)
-        .ok_or_else(rejected)?;
+        .ok_or_else(|| {
+            super::error::trace_rejected_checks("managed_pod", &["machine:absent"]);
+            rejected()
+        })?;
     ensure_only_allowed_projection_keys(machine, &["secureCloud", "dataCenterId", "gpuTypeId"])?;
     let gpu = object
         .get("gpu")
         .and_then(Value::as_object)
-        .ok_or_else(rejected)?;
+        .ok_or_else(|| {
+            super::error::trace_rejected_checks("managed_pod", &["gpu:absent"]);
+            rejected()
+        })?;
     ensure_only_allowed_projection_keys(gpu, &["id", "displayName", "count"])?;
     let ports = object
         .get("ports")
         .and_then(Value::as_array)
-        .ok_or_else(rejected)?;
+        .ok_or_else(|| {
+            super::error::trace_rejected_checks("managed_pod", &["ports:absent"]);
+            rejected()
+        })?;
     let gpu_id = gpu.get("id").and_then(Value::as_str).ok_or_else(rejected)?;
     let gpu_display = gpu
         .get("displayName")
@@ -2441,6 +2453,32 @@ fn validate_managed_pod_value(
         && ports.len() == 1
         && ports[0].as_str() == Some("8000/http");
     if !valid {
+        // Names only, never values. This is the single check whose failure is
+        // otherwise invisible: it collapses fifteen conditions into one code.
+        super::error::trace_rejected_checks(
+            "managed_pod",
+            &[
+                ("id", object.get("id").and_then(Value::as_str) == Some(expected_pod_id)),
+                ("name", object.get("name").and_then(Value::as_str).is_some_and(imageforge_pod_name)),
+                ("templateId", object.get("templateId").and_then(Value::as_str) == Some(profile.template_id.as_str())),
+                ("imageName", object.get("imageName").and_then(Value::as_str).is_some_and(|image| image == IMAGEFORGE_WORKER_IMAGE)),
+                ("volumeMountPath", object.get("volumeMountPath").and_then(Value::as_str) == Some("/workspace")),
+                ("interruptible", object.get("interruptible").and_then(Value::as_bool) == Some(false)),
+                ("gpuCount", object.get("gpuCount").and_then(Value::as_u64) == Some(1)),
+                ("networkVolume.id", network_volume.get("id").and_then(Value::as_str) == Some(profile.network_volume_id.as_str())),
+                ("networkVolume.dataCenterId", network_volume.get("dataCenterId").and_then(Value::as_str) == Some("EU-RO-1")),
+                ("machine.secureCloud", machine.get("secureCloud").and_then(Value::as_bool) == Some(true)),
+                ("machine.dataCenterId", machine.get("dataCenterId").and_then(Value::as_str) == Some("EU-RO-1")),
+                ("machine.gpuTypeId", machine.get("gpuTypeId").and_then(Value::as_str) == Some(gpu_id)),
+                ("gpu.count", gpu.get("count").and_then(Value::as_u64) == Some(1)),
+                ("gpu_approved", gpu_approved),
+                ("ports", ports.len() == 1 && ports[0].as_str() == Some("8000/http")),
+            ]
+            .iter()
+            .filter(|(_, ok)| !ok)
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>(),
+        );
         return Err(NativeError::new(
             "pod_identity_mismatch",
             "RunPod did not return the exact managed ImageForge Pod identity.",

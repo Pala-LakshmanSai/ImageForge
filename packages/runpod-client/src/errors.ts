@@ -99,6 +99,34 @@ export function isRunPodClientError(error: unknown): error is RunPodClientError 
   return error instanceof RunPodClientError;
 }
 
+/**
+ * Opt-in developer diagnostics, enabled by setting
+ * `globalThis.__IMAGEFORGE_DIAGNOSTICS__ = true`.
+ *
+ * A `catch` that wraps several operations reports only its fallback message, so
+ * a failure anywhere inside reads as a failure of the first thing named. That
+ * is what makes these errors hard to place. The wrapped cause still may not be
+ * retained on the error, so this writes it to the console only, and only when a
+ * developer has explicitly asked for it.
+ */
+function reportWrappedCause(
+  fallback: Omit<RunPodClientErrorOptions, "cause">,
+  error: unknown,
+): void {
+  if ((globalThis as { __IMAGEFORGE_DIAGNOSTICS__?: unknown }).__IMAGEFORGE_DIAGNOSTICS__ !== true) {
+    return;
+  }
+  console.error(
+    `imageforge.error code=${fallback.code} operation=${fallback.operation} wrapped cause:`,
+    error,
+  );
+}
+
+function causeName(error: unknown): string {
+  if (error instanceof Error) return error.name || "Error";
+  return typeof error;
+}
+
 export function asRunPodClientError(
   error: unknown,
   fallback: Omit<RunPodClientErrorOptions, "cause">,
@@ -107,5 +135,13 @@ export function asRunPodClientError(
     return error;
   }
 
-  return new RunPodClientError({ ...fallback, cause: error });
+  reportWrappedCause(fallback, error);
+  // Only the cause's constructor name is retained. It distinguishes an
+  // unexpected local failure from a provider/transport one without echoing a
+  // message that could carry request headers or response snippets.
+  return new RunPodClientError({
+    ...fallback,
+    details: { ...(fallback.details ?? {}), causeName: causeName(error) },
+    cause: error,
+  });
 }

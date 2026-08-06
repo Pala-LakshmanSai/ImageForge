@@ -37,6 +37,18 @@ Both the native and renderer price parsers admit exactly these forms.
 Binary floating point is never authority for
 equality, ranking, persistence, confirmation, or fingerprints.
 
+The renderer-facing error surface is deliberately coarse: distinct native
+failures collapse into one code so a provider response cannot be reconstructed
+from what crosses IPC, and a caught error names where it was caught rather than
+where it was raised. Two opt-in developer channels recover the missing detail
+without widening that surface. `IMAGEFORGE_DIAGNOSTICS=1` makes native error
+construction print its code and the ImageForge frames that raised it; it is off
+by default, adds one cached boolean check when off, and never touches provider
+bodies, URLs, Pod fields, or credentials. Setting
+`globalThis.__IMAGEFORGE_DIAGNOSTICS__ = true` prints the cause a renderer
+`catch` wrapped. The wrapped cause is still never retained on the error itself;
+only its constructor name is kept, as `details.causeName`.
+
 Pod observation reads only ImageForge's own Pods. Ownership is decided by the
 reserved `imageforge` Pod name, and an unrelated Pod sharing the RunPod account
 is skipped rather than failing the observation, so one foreign workload cannot

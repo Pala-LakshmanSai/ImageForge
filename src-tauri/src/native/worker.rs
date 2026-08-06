@@ -1546,7 +1546,17 @@ impl WorkerApi {
             reflected_worker_token.as_deref(),
             runpod_key.as_deref(),
         )?;
-        validate_worker_envelope(status, &body)?;
+        // Operation and HTTP status only. A rejected worker response otherwise
+        // reports neither which call failed nor what the worker answered, so a
+        // boot that never leaves "booting" gives no way to tell a still-loading
+        // worker from an unreachable or contract-broken one.
+        if let Err(error) = validate_worker_envelope(status, &body) {
+            super::error::trace_rejected_checks(
+                "worker_envelope",
+                &[&format!("{operation:?}"), &format!("http_{}", status.as_u16())],
+            );
+            return Err(error);
+        }
         if let Some(expected) = operation.studio_success_status() {
             if status.is_success() && status != expected {
                 return Err(worker_response_invalid());

@@ -19,6 +19,24 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 use uuid::{Uuid, Version};
 
+/// Start states in which a previous Start may still create, or may already
+/// have created, a Pod this app cannot yet account for. Only these block a new
+/// Start.
+///
+/// `provisioning` is deliberately absent. It is a Pod lifecycle state, not an
+/// operation state: the create already returned, the Pod id is known, and the
+/// operation record is `Settled`. Treating it as in-flight meant that a Pod
+/// terminated outside ImageForge left the journal permanently non-terminal and
+/// every later Start failed with `gpu_start_operation_in_progress`, with no
+/// in-app way to clear it. `ready` was already excluded for the same reason.
+///
+/// This does not weaken duplicate-Pod safety: `native_preflight_no_managed_pod`
+/// runs immediately before every create and rejects when a managed Pod still
+/// exists, which is the authority for "a Pod is already running".
+fn is_in_flight_start_state(state: &str) -> bool {
+    matches!(state, "create_intent" | "create_uncertain" | "price_attention")
+}
+
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const RECEIPT_VALID_FOR_MS: u64 = 60_000;
 const GPU_INVENTORY_EVENT: &str = "gpu-inventory-v1";
@@ -1662,10 +1680,7 @@ impl GpuInventoryService {
         if exact {
             return Ok(Some(record.result.clone()));
         }
-        if matches!(
-            record.result.state.as_str(),
-            "create_intent" | "create_uncertain" | "provisioning" | "price_attention"
-        ) {
+        if is_in_flight_start_state(&record.result.state) {
             return Err(operation_in_progress());
         }
         Ok(None)
@@ -1677,12 +1692,11 @@ impl GpuInventoryService {
             if inner.lifecycle_revision != record.authority.expected_lifecycle_revision {
                 return Err(revision_conflict());
             }
-            if inner.latest_start.as_ref().is_some_and(|existing| {
-                matches!(
-                    existing.result.state.as_str(),
-                    "create_intent" | "create_uncertain" | "provisioning" | "price_attention"
-                )
-            }) {
+            if inner
+                .latest_start
+                .as_ref()
+                .is_some_and(|existing| is_in_flight_start_state(&existing.result.state))
+            {
                 return Err(operation_in_progress());
             }
         }
@@ -3516,6 +3530,23 @@ mod tests {
             persisted.post_state,
             NormalStartPostStateV1::Settled
         ));
+    }
+
+
+    #[test]
+    fn a_provisioning_start_does_not_permanently_block_the_next_start() {
+        // A Pod terminated outside ImageForge leaves the last Start recorded as
+        // `provisioning`. That is a settled operation, so it must not read as
+        // in flight; otherwise every later Start fails with
+        // gpu_start_operation_in_progress and nothing in the app can clear it.
+        assert!(!is_in_flight_start_state("provisioning"));
+        assert!(!is_in_flight_start_state("ready"));
+
+        // States where a create may still be in flight, or may already have
+        // produced a Pod this app cannot account for, must keep blocking.
+        assert!(is_in_flight_start_state("create_intent"));
+        assert!(is_in_flight_start_state("create_uncertain"));
+        assert!(is_in_flight_start_state("price_attention"));
     }
 
     #[test]

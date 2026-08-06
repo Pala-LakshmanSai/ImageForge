@@ -5,6 +5,7 @@ import {
   FakeWorkerHealthProbe,
   RunPodClientError,
   RunPodLifecycleController,
+  asRunPodClientError,
   deriveRunPodProxyUrl,
   type RunPodClientConfig,
   type GpuAutoSelectionSourceV1,
@@ -1964,5 +1965,41 @@ describe("RunPodLifecycleController explicit Stop GPU", () => {
     assert.equal(provider.calls.terminate.length, 0);
     provider.getPod = originalGet;
     assert.equal((await controller.refresh()).selectedPodId, pod.id);
+  });
+
+  it("names the wrapped cause without retaining a message that could carry provider text", () => {
+    // A catch that spans several operations reports only its fallback message,
+    // so the cause's type is the one safe signal that distinguishes an
+    // unexpected local failure from a provider/transport one.
+    const wrapped = asRunPodClientError(new TypeError("pods[0].ports is not an array"), {
+      code: "pod_discovery_failed",
+      message: "Existing ImageForge Pods could not be observed.",
+      operation: "list_pods",
+      retryable: true,
+    });
+    assert.equal(wrapped.code, "pod_discovery_failed");
+    assert.equal(wrapped.details.causeName, "TypeError");
+    // The cause's own message must never reach the error surface.
+    assert.equal(wrapped.message, "Existing ImageForge Pods could not be observed.");
+    assert.ok(!JSON.stringify(wrapped.toJSON()).includes("not an array"));
+
+    const nonError = asRunPodClientError("bare string", {
+      code: "pod_discovery_failed",
+      message: "Existing ImageForge Pods could not be observed.",
+      operation: "list_pods",
+    });
+    assert.equal(nonError.details.causeName, "string");
+
+    // An existing RunPodClientError passes through untouched.
+    const original = new RunPodClientError({
+      code: "operation_aborted",
+      message: "aborted",
+      operation: "list_pods",
+    });
+    assert.equal(asRunPodClientError(original, {
+      code: "pod_discovery_failed",
+      message: "fallback",
+      operation: "list_pods",
+    }), original);
   });
 });
