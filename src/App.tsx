@@ -108,6 +108,12 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
   const clearRecoveryPointerRef = useRef(false);
   const refreshInFlightRef = useRef<Promise<boolean> | null>(null);
   const observationInFlightRef = useRef<Promise<void> | null>(null);
+  // A foreground Start must not race the receipt-free Pod heartbeat for the
+  // cross-process profile lease. Set this synchronously from the confirmed
+  // click, drain any observation already holding the lease, and suppress new
+  // advisory reads until the native Start command (including its OS modal)
+  // settles.
+  const gpuStartInFlightRef = useRef(false);
   const batchStartInFlightRef = useRef(false);
   const [batchStartPending, setBatchStartPending] = useState(false);
   const queueSnapshotRef = useRef<NativeQueueSnapshotV1>({
@@ -249,6 +255,7 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
     if (!runtime || !stateRef.current.setup.completed || !stateRef.current.setup.credentials.runpodApiKey.configured) {
       return Promise.resolve(false);
     }
+    if (gpuStartInFlightRef.current) return Promise.resolve(false);
     if (refreshInFlightRef.current !== null) return refreshInFlightRef.current;
     const operation = runtime.refresh(stateRef.current)
       .then(() => true, () => false)
@@ -263,6 +270,7 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
     if (!runtime || !stateRef.current.setup.completed || !stateRef.current.setup.credentials.runpodApiKey.configured) {
       return Promise.resolve();
     }
+    if (gpuStartInFlightRef.current) return Promise.resolve();
     if (observationInFlightRef.current !== null) return observationInFlightRef.current;
     // A strict startup/manual/pre-submit refresh is already at least as
     // authoritative as the advisory heartbeat, so do not queue duplicate work.
@@ -1337,8 +1345,19 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
       ).finally(() => setGpuSelectorBusy(false));
       return;
     }
+    if (gpuStartInFlightRef.current) return;
+    const pendingRefresh = refreshInFlightRef.current;
+    const pendingObservation = observationInFlightRef.current;
+    gpuStartInFlightRef.current = true;
     setGpuSelectorBusy(true);
-    void runtime.startGpuChoice(stateRef.current, confirmation).then(
+    // Native Pod observation intentionally holds the shared profile lease
+    // across its provider GET. Let that read-only owner finish before opening
+    // the native paid-action confirmation; new observations are suppressed by
+    // gpuStartInFlightRef for the whole foreground action.
+    void Promise.allSettled([
+      ...(pendingRefresh === null ? [] : [pendingRefresh]),
+      ...(pendingObservation === null ? [] : [pendingObservation]),
+    ]).then(() => runtime.startGpuChoice(stateRef.current, confirmation)).then(
       (result) => {
         closeGpuSelector();
         setGpuPriceAttention(result.state === 'price_attention' ? result : null);
@@ -1347,7 +1366,10 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
         const message = userFacingErrorMessage(error, 'The selected GPU could not be started safely.');
         dispatch({ type: 'RUNTIME_ERROR', scope: 'pod', message });
       },
-    ).finally(() => setGpuSelectorBusy(false));
+    ).finally(() => {
+      gpuStartInFlightRef.current = false;
+      setGpuSelectorBusy(false);
+    });
   }, [closeGpuSelector, runtime]);
 
   const confirmGpuPriceAttention = useCallback(() => {

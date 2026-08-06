@@ -426,6 +426,37 @@ describe('ImageForge shell', () => {
     expect(production.adapter.runPodLifecycle).not.toHaveBeenCalled();
   });
 
+  it('quiesces an in-flight advisory Pod observation before one selected native Start', async () => {
+    const production = productionAdapter();
+    production.setGpuInventory(liveGpuInventory());
+    let resolveObservation: (() => void) | null = null;
+    vi.mocked(production.runtime.observe).mockImplementation(() => new Promise<void>((resolve) => {
+      resolveObservation = resolve;
+    }));
+    render(<App initialState={createConfiguredInitialState()} adapter={production.adapter} />);
+
+    await waitFor(() => expect(production.runtime.refresh).toHaveBeenCalledOnce());
+    window.dispatchEvent(new Event('focus'));
+    await waitFor(() => expect(production.runtime.observe).toHaveBeenCalledOnce());
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Start GPU' })[0]);
+    fireEvent.click(await screen.findByRole('radio', { name: /RTX 4090/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start selected GPU at $0.69/hr' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start RTX 4090' }));
+
+    expect(production.runtime.startGpuChoice).not.toHaveBeenCalled();
+    window.dispatchEvent(new Event('focus'));
+    await act(async () => { await Promise.resolve(); });
+    expect(production.runtime.observe).toHaveBeenCalledOnce();
+
+    await act(async () => { resolveObservation?.(); });
+    await waitFor(() => expect(production.runtime.startGpuChoice).toHaveBeenCalledOnce());
+    expect(production.runtime.startGpuChoice).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ kind: 'manual_start' }),
+    );
+  });
+
   it('preserves a structured native Start rejection and keeps the selector available for recovery', async () => {
     const production = productionAdapter();
     production.setGpuInventory(liveGpuInventory());
