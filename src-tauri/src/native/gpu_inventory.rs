@@ -1370,7 +1370,8 @@ impl GpuInventoryService {
         F: FnOnce() -> NativeResult<()>,
     {
         validate_manual_input(&input)?;
-        if let Some(replay) = self.replay_or_block_manual(&input)? {
+        let create_reconciled = !runpod.create_marker_metadata()?.pending;
+        if let Some(replay) = self.replay_or_block_manual(&input, create_reconciled)? {
             return Ok(replay);
         }
         let initial = self.validate_manual_selection(&input)?;
@@ -1431,7 +1432,8 @@ impl GpuInventoryService {
         F: FnOnce() -> NativeResult<()>,
     {
         validate_auto_input(&input)?;
-        if let Some(replay) = self.replay_or_block_auto(&input)? {
+        let create_reconciled = !runpod.create_marker_metadata()?.pending;
+        if let Some(replay) = self.replay_or_block_auto(&input, create_reconciled)? {
             return Ok(replay);
         }
         let initial = self.validate_auto_selection(&input)?;
@@ -1525,7 +1527,11 @@ impl GpuInventoryService {
             },
             post_state: NormalStartPostStateV1::PostSendPending,
         };
-        self.persist_intent(&intent)?;
+        // The create marker is the durable record that a create may exist. It
+        // was retired against the provider's own Pod list, so the earlier
+        // uncertainty is resolved and must not keep blocking this Start.
+        let create_reconciled = !runpod.create_marker_metadata()?.pending;
+        self.persist_intent(&intent, create_reconciled)?;
         // Commit `post_sent` before passing control to the transport.  If the
         // process dies at any point after this durable transition, Resume can
         // show the exact operation without issuing a second POST.
@@ -1629,6 +1635,7 @@ impl GpuInventoryService {
     fn replay_or_block_manual(
         &self,
         input: &NativeManualGpuStartV1,
+        create_reconciled: bool,
     ) -> NativeResult<Option<NativeManualGpuStartResultV1>> {
         self.replay_or_block(
             NormalStartAuthorityKind::NormalManualStart,
@@ -1638,12 +1645,14 @@ impl GpuInventoryService {
             input.expected_lifecycle_revision,
             Some(&input.target_gpu_id),
             Some(input.confirmed_hourly_price_micro_usd),
+            create_reconciled,
         )
     }
 
     fn replay_or_block_auto(
         &self,
         input: &NativeAutoGpuStartV1,
+        create_reconciled: bool,
     ) -> NativeResult<Option<NativeManualGpuStartResultV1>> {
         self.replay_or_block(
             NormalStartAuthorityKind::NormalAutoStart,
@@ -1653,6 +1662,7 @@ impl GpuInventoryService {
             input.expected_lifecycle_revision,
             None,
             None,
+            create_reconciled,
         )
     }
 
@@ -1665,6 +1675,7 @@ impl GpuInventoryService {
         expected_lifecycle_revision: u64,
         requested_target_gpu_id: Option<&str>,
         requested_price_micro_usd: Option<u64>,
+        create_reconciled: bool,
     ) -> NativeResult<Option<NativeManualGpuStartResultV1>> {
         let inner = self.inner.lock().map_err(|_| state_error())?;
         let Some(record) = inner.latest_start.as_ref() else {
@@ -1680,23 +1691,28 @@ impl GpuInventoryService {
         if exact {
             return Ok(Some(record.result.clone()));
         }
-        if is_in_flight_start_state(&record.result.state) {
+        if is_in_flight_start_state(&record.result.state)
+            && !(create_reconciled && record.result.state == "create_uncertain")
+        {
             return Err(operation_in_progress());
         }
         Ok(None)
     }
 
-    fn persist_intent(&self, record: &PersistedNormalStartV1) -> NativeResult<()> {
+    fn persist_intent(
+        &self,
+        record: &PersistedNormalStartV1,
+        create_reconciled: bool,
+    ) -> NativeResult<()> {
         {
             let inner = self.inner.lock().map_err(|_| state_error())?;
             if inner.lifecycle_revision != record.authority.expected_lifecycle_revision {
                 return Err(revision_conflict());
             }
-            if inner
-                .latest_start
-                .as_ref()
-                .is_some_and(|existing| is_in_flight_start_state(&existing.result.state))
-            {
+            if inner.latest_start.as_ref().is_some_and(|existing| {
+                is_in_flight_start_state(&existing.result.state)
+                    && !(create_reconciled && existing.result.state == "create_uncertain")
+            }) {
                 return Err(operation_in_progress());
             }
         }
@@ -3547,6 +3563,52 @@ mod tests {
         assert!(is_in_flight_start_state("create_intent"));
         assert!(is_in_flight_start_state("create_uncertain"));
         assert!(is_in_flight_start_state("price_attention"));
+    }
+
+
+    #[test]
+    fn a_reconciled_create_uncertain_start_no_longer_blocks_the_next_start() {
+        // `create_uncertain` means a create may have produced a Pod this app
+        // cannot account for, and it has no transition of its own. The create
+        // marker is the durable evidence for that doubt, so once the marker has
+        // been retired against the provider's own Pod list the doubt is
+        // settled. Without this, an interrupted Start left the app permanently
+        // unable to start a GPU by any route, including its own recovery
+        // control.
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("gpu-start");
+        NormalStartJournal::new(root.clone())
+            .unwrap()
+            .persist(&sent_start_record())
+            .unwrap();
+        let service = GpuInventoryService::new_for_test(root).unwrap();
+        assert_eq!(
+            service.start_load().unwrap().unwrap().state,
+            "create_uncertain"
+        );
+
+        // A different Start attempt, so this is never the idempotent replay.
+        let attempt = |reconciled: bool| {
+            service.replay_or_block(
+                NormalStartAuthorityKind::NormalManualStart,
+                "00000000-0000-4000-8000-0000000000aa",
+                "00000000-0000-4000-8000-0000000000bb",
+                "00000000-0000-4000-8000-0000000000cc",
+                2,
+                Some("NVIDIA L4"),
+                Some(490_000),
+                reconciled,
+            )
+        };
+
+        // Marker still pending: the doubt stands and the Start is refused.
+        assert_eq!(
+            attempt(false).unwrap_err().code,
+            "gpu_start_operation_in_progress"
+        );
+
+        // Marker retired against the provider list: the Start proceeds.
+        assert!(attempt(true).unwrap().is_none());
     }
 
     #[test]
