@@ -1860,7 +1860,51 @@ impl RunPodTransport {
             }
             projected.push(value);
         }
+        self.retire_create_marker_against_list(pods)?;
         serde_json::to_string(&projected).map_err(|_| response_invalid())
+    }
+
+    /// Retire a create marker whose recorded Pod this complete provider list
+    /// proves cannot be billing.
+    ///
+    /// The marker blocks a new Start so a Pod that RunPod created but this app
+    /// cannot see never bills unnoticed. Clearing it required naming the exact
+    /// recorded Pod *and* that Pod being verified, so a Pod stopped or
+    /// terminated outside ImageForge could never be reconciled: it is absent,
+    /// or present but stripped of its machine and GPU assignment and therefore
+    /// unverifiable. The marker then stayed pending forever, every later Start
+    /// failed as `create_uncertain`, and even the explicit recovery control
+    /// could not clear it.
+    ///
+    /// This list is the provider's own complete Pod set for the bound profile,
+    /// and an ImageForge-named Pod that is provisioning, starting, or running
+    /// but unverifiable fails the observation before reaching here. So a
+    /// recorded Pod that is missing from this list, or present in a terminal
+    /// state, is not running and cannot bill.
+    fn retire_create_marker_against_list(&self, pods: &[Value]) -> NativeResult<()> {
+        let marker = self.create_marker.metadata()?;
+        let (Some(attempt_id), Some(pod_id)) = (marker.attempt_id, marker.pod_id) else {
+            return Ok(());
+        };
+        let recorded = pods.iter().find(|pod| {
+            pod.get("id").and_then(Value::as_str) == Some(pod_id.as_str())
+        });
+        let retired = match recorded {
+            None => true,
+            Some(pod) => {
+                let status = pod
+                    .get("status")
+                    .or_else(|| pod.get("desiredStatus"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                matches!(status.as_str(), "exited" | "terminated")
+            }
+        };
+        if retired {
+            self.create_marker.clear(&attempt_id)?;
+        }
+        Ok(())
     }
 
     fn project_and_register_created_pod(
@@ -4770,6 +4814,74 @@ mod tests {
             *delete_calls.lock().unwrap(),
             vec![NativeRunPodMutationKind::Delete]
         );
+    }
+
+
+    #[test]
+    fn create_marker_retires_when_its_pod_is_absent_or_terminal() {
+        for scenario in ["absent", "exited", "terminated"] {
+            let temporary = tempfile::tempdir().unwrap();
+            let transport = RunPodTransport::new_for_test(
+                Arc::new(MemoryVault::default()),
+                temporary.path().join("marker"),
+            )
+            .unwrap();
+            transport
+                .bind_profile(IMAGEFORGE_TEMPLATE_ID, IMAGEFORGE_NETWORK_VOLUME_ID)
+                .unwrap();
+            let body = create_body(&["NVIDIA GeForce RTX 4090"]);
+            transport.create_marker.begin(&body).unwrap();
+            transport.create_marker.set_pod_id("abc123xy").unwrap();
+            assert!(transport.create_marker.metadata().unwrap().pending);
+
+            let pods = if scenario == "absent" {
+                vec![]
+            } else {
+                let mut pod: Value =
+                    serde_json::from_str(&managed_pod_json(
+                        IMAGEFORGE_NETWORK_VOLUME_ID,
+                        "NVIDIA GeForce RTX 4090",
+                    ))
+                    .unwrap();
+                pod["status"] = Value::String(scenario.to_owned());
+                vec![pod]
+            };
+            transport.retire_create_marker_against_list(&pods).unwrap();
+            assert!(
+                !transport.create_marker.metadata().unwrap().pending,
+                "{scenario}: marker must retire"
+            );
+        }
+    }
+
+    #[test]
+    fn create_marker_survives_while_its_pod_is_still_active() {
+        for status in ["provisioning", "starting", "running"] {
+            let temporary = tempfile::tempdir().unwrap();
+            let transport = RunPodTransport::new_for_test(
+                Arc::new(MemoryVault::default()),
+                temporary.path().join("marker"),
+            )
+            .unwrap();
+            transport
+                .bind_profile(IMAGEFORGE_TEMPLATE_ID, IMAGEFORGE_NETWORK_VOLUME_ID)
+                .unwrap();
+            let body = create_body(&["NVIDIA GeForce RTX 4090"]);
+            transport.create_marker.begin(&body).unwrap();
+            transport.create_marker.set_pod_id("abc123xy").unwrap();
+
+            let mut pod: Value = serde_json::from_str(&managed_pod_json(
+                IMAGEFORGE_NETWORK_VOLUME_ID,
+                "NVIDIA GeForce RTX 4090",
+            ))
+            .unwrap();
+            pod["status"] = Value::String(status.to_owned());
+            transport.retire_create_marker_against_list(&[pod]).unwrap();
+            assert!(
+                transport.create_marker.metadata().unwrap().pending,
+                "{status}: an active Pod must keep the marker pending"
+            );
+        }
     }
 
     #[test]

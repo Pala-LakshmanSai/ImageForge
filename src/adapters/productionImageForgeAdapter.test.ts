@@ -1671,4 +1671,50 @@ describe('production ImageForge adapter', () => {
     expect(events.at(-1)).toEqual({ type: 'create-recovery', marker: null });
     expect(native.authorizeStart).not.toHaveBeenCalled();
   });
+
+  it('surfaces the pending create attempt when a Start is refused by it', async () => {
+    // A Start blocked by an unreconciled create attempt previously published
+    // nothing, so the recovery panel never rendered and the button looked dead.
+    const native = port({
+      createMarkerMetadata: vi.fn(async () => ({
+        pending: true,
+        attemptId: 'attempt-9',
+        podName: 'imageforge-attempt-9',
+        gpuId: 'NVIDIA L4',
+        podId: 'pod-stopped-1',
+      })),
+    });
+    const adapter = createProductionImageForgeAdapter(native);
+    const events: ProductionRuntimeEvent[] = [];
+    adapter.runtime!.subscribe((event) => events.push(event));
+    const startSelected = vi.spyOn(GpuLifecycleCoordinator.prototype, 'startSelected')
+      .mockRejectedValue(Object.assign(new Error('in progress'), {
+        code: 'gpu_start_operation_in_progress',
+      }));
+    try {
+      await expect(adapter.runtime!.startGpuChoice(createConfiguredInitialState(), {
+        kind: 'manual_start',
+        projection: {
+          schemaVersion: 1,
+          observationId: '11111111-1111-4111-8111-111111111111',
+          receiptId: '22222222-2222-4222-8222-222222222222',
+          targetGpuId: 'NVIDIA L4',
+          confirmedHourlyPriceMicroUsd: 490_000,
+        },
+        offer: { gpuId: 'NVIDIA L4' },
+      } as never)).rejects.toThrow();
+      const recovery = events.filter((event) => event.type === 'create-recovery');
+      expect(recovery.at(-1)).toEqual({
+        type: 'create-recovery',
+        marker: {
+          attemptId: 'attempt-9',
+          podName: 'imageforge-attempt-9',
+          gpuId: 'NVIDIA L4',
+          podId: 'pod-stopped-1',
+        },
+      });
+    } finally {
+      startSelected.mockRestore();
+    }
+  });
 });

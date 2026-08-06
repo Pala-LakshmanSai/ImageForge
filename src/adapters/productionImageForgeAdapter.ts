@@ -678,6 +678,12 @@ class ProductionRuntime implements ProductionRuntimeFacade {
           },
         );
     } catch (error) {
+      // A Start refused because a prior create attempt is still unreconciled
+      // must surface that attempt, not fail silently. The marker is otherwise
+      // published only by `refresh`, so a Start blocked by it left
+      // `createRecovery` null: the app showed no recovery panel, no reason, and
+      // the button simply did nothing.
+      await this.#emitCurrentCreateMarker();
       this.#emitError('pod', error, 'ImageForge could not start the selected GPU safely.');
       throw error;
     }
@@ -1408,6 +1414,9 @@ class ProductionRuntime implements ProductionRuntimeFacade {
       this.#emit({ type: 'create-recovery', marker: null });
       return;
     }
+    // A marker whose recorded Pod is gone or terminal is retired natively,
+    // against the provider list itself, because only native can prove that
+    // absence. Anything still pending here needs the explicit human control.
     this.#emit({ type: 'create-recovery', marker });
   }
 
