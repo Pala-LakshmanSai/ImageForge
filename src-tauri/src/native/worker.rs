@@ -3823,6 +3823,10 @@ fn validate_status_shape(body: &Value) -> NativeResult<()> {
     let permissions = body
         .get("permissions")
         .ok_or_else(worker_response_invalid)?;
+    // The worker's `StatusPermissions` also carries the GPU-switch pair. It is
+    // validated here and dropped in projection: the renderer decides switch
+    // eligibility through the native GPU-switch path, so widening the IPC
+    // surface would add a second authority for the same question.
     require_exact_keys(
         permissions,
         &[
@@ -3830,6 +3834,8 @@ fn validate_status_shape(body: &Value) -> NativeResult<()> {
             "can_manage_active",
             "is_owner",
             "create_block_reason",
+            "can_switch",
+            "switch_block_code",
         ],
     )?;
     let permissions = permissions
@@ -3839,6 +3845,27 @@ fn validate_status_shape(body: &Value) -> NativeResult<()> {
         if !permissions.get(key).is_some_and(Value::is_boolean) {
             return Err(worker_response_invalid());
         }
+    }
+    if !permissions.get("can_switch").is_some_and(Value::is_boolean) {
+        return Err(worker_response_invalid());
+    }
+    // Deliberately structural rather than an enumerated literal set. The block
+    // codes are a worker-owned vocabulary that this projection discards, so
+    // pinning the list here would turn every future worker code into the same
+    // total `/v1/status` rejection this check was added to fix.
+    let switch_block_code = permissions
+        .get("switch_block_code")
+        .ok_or_else(worker_response_invalid)?;
+    if !switch_block_code.is_null()
+        && !switch_block_code.as_str().is_some_and(|code| {
+            !code.is_empty()
+                && code.len() <= 64
+                && code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        })
+    {
+        return Err(worker_response_invalid());
     }
     let block_reason = permissions
         .get("create_block_reason")
@@ -4796,6 +4823,67 @@ mod tests {
     }
 
     #[test]
+    fn status_permissions_carry_the_switch_fields_the_worker_actually_sends() {
+        // `StatusPermissions` in the 0.1.3 worker also carries `can_switch`
+        // and `switch_block_code`. Rejecting them stalls every `/v1/status`
+        // poll, which blocks Generate entirely. The renderer contract stays
+        // the four documented keys, so the extra pair is validated here and
+        // dropped in projection rather than widening the IPC surface.
+        let status = json!({
+            "schema_version": 1,
+            "ready": true,
+            "active_batch": null,
+            "permissions": {
+                "can_create": true,
+                "can_manage_active": false,
+                "is_owner": false,
+                "create_block_reason": null,
+                "can_switch": true,
+                "switch_block_code": null
+            }
+        });
+        let projected = project_worker_success(WorkerOperation::Status, &status).unwrap();
+        assert_eq!(
+            projected,
+            json!({
+                "schema_version": 1,
+                "ready": true,
+                "active_batch": null,
+                "permissions": {
+                    "can_create": true,
+                    "can_manage_active": false,
+                    "is_owner": false,
+                    "create_block_reason": null
+                }
+            })
+        );
+
+        let mut blocked = status.clone();
+        blocked["permissions"]["can_switch"] = json!(false);
+        blocked["permissions"]["switch_block_code"] = json!("gpu_switch_pending");
+        assert!(project_worker_success(WorkerOperation::Status, &blocked).is_ok());
+
+        // A closed shape stays closed: an unknown key is still a rejection.
+        let mut unknown = status.clone();
+        unknown["permissions"]["future_flag"] = json!(true);
+        assert_eq!(
+            project_worker_success(WorkerOperation::Status, &unknown)
+                .unwrap_err()
+                .code,
+            "worker_response_invalid"
+        );
+
+        let mut wrong_type = status.clone();
+        wrong_type["permissions"]["can_switch"] = json!("yes");
+        assert_eq!(
+            project_worker_success(WorkerOperation::Status, &wrong_type)
+                .unwrap_err()
+                .code,
+            "worker_response_invalid"
+        );
+    }
+
+    #[test]
     fn status_and_submission_corruption_envelopes_match_the_python_queue_contract() {
         // This is the exact Python `StatusResponse`/WorkerError wire shape
         // used when a v2 submission envelope cannot be trusted. Keep the
@@ -4809,20 +4897,37 @@ mod tests {
                 "can_create": false,
                 "can_manage_active": false,
                 "is_owner": false,
+                "create_block_reason": "submission_store_corrupt",
+                "can_switch": false,
+                "switch_block_code": null
+            }
+        });
+        // The projection is the renderer contract, which stays the four
+        // documented permission keys even though the worker sends six.
+        let projected = json!({
+            "schema_version": 1,
+            "ready": true,
+            "active_batch": null,
+            "permissions": {
+                "can_create": false,
+                "can_manage_active": false,
+                "is_owner": false,
                 "create_block_reason": "submission_store_corrupt"
             }
         });
         validate_worker_envelope(StatusCode::OK, &status).unwrap();
         assert_eq!(
             project_worker_success(WorkerOperation::Status, &status).unwrap(),
-            status
+            projected
         );
 
         let mut finalizing_stop = status.clone();
         finalizing_stop["permissions"]["create_block_reason"] = json!("gpu_stop_pending");
+        let mut finalizing_stop_projected = projected.clone();
+        finalizing_stop_projected["permissions"]["create_block_reason"] = json!("gpu_stop_pending");
         assert_eq!(
             project_worker_success(WorkerOperation::Status, &finalizing_stop).unwrap(),
-            finalizing_stop
+            finalizing_stop_projected
         );
 
         let mut unexpected_reason = status.clone();
