@@ -368,10 +368,13 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
         title: 'GPU still in use',
         message: event.message,
       });
+      // Same reasoning as the refusal above: a failed Stop must survive the
+      // next worker sync, otherwise the GPU stays running with nothing said.
       else if (event.type === 'stop-failed') dispatch({
-        type: 'STUDIO_STOP_FAILED',
+        type: 'SHOW_TOAST',
+        tone: 'error',
+        title: 'GPU was not stopped',
         message: event.message,
-        retryable: event.retryable,
       });
       else if (event.type === 'stop-complete') dispatch({ type: 'STUDIO_STOPPED', alreadyStopped: event.alreadyStopped });
       else if (event.type === 'local-error') {
