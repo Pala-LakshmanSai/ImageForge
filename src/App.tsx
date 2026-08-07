@@ -48,6 +48,7 @@ import type { GpuSelectorConfirmationV1, GpuSelectorModeV1 } from './domain/gpuS
 import type { NativeGpuStartResultV1 } from './native/gpuStartBridge';
 import type { NativeGpuSwitchSnapshotV1 } from './native/gpuSwitchBridge';
 import { asNativeError } from './native/tauriBridge';
+import { userFacingErrorMessage } from './native/userFacingError';
 import { CreateScreen } from './screens/CreateScreen';
 import { LibraryScreen } from './screens/LibraryScreen';
 import { ProgressScreen } from './screens/ProgressScreen';
@@ -77,12 +78,6 @@ const GPU_START_INVENTORY_RECOVERY_CODES: ReadonlySet<string> = new Set([
   'gpu_start_price_changed',
   'gpu_start_revision_conflict',
 ]);
-
-function userFacingErrorMessage(error: unknown, fallback: string): string {
-  if (error instanceof Error && error.message) return error.message;
-  const native = asNativeError(error);
-  return native.code === 'native_operation_failed' ? fallback : native.message;
-}
 
 export default function App({ initialState, adapter: injectedAdapter, alarmPort: injectedAlarm }: AppProps) {
   const [state, dispatch] = useReducer(appReducer, initialState, (provided) => provided ?? createInitialState());

@@ -55,25 +55,64 @@ pub struct KeyringVault;
 
 impl KeyringVault {
     fn entry(kind: CredentialKind) -> NativeResult<Entry> {
-        Entry::new(SERVICE, kind.account()).map_err(|_| {
-            NativeError::new(
-                "credential_vault_unavailable",
-                "The operating-system credential vault is unavailable.",
-            )
-        })
+        Entry::new(SERVICE, kind.account()).map_err(|_| vault_unavailable())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VaultOperation {
+    Write,
+    ReadStatus,
+    Load,
+}
+
+impl VaultOperation {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Write => "credential_write_failed",
+            Self::ReadStatus | Self::Load => "credential_read_failed",
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::Write => "The credential could not be saved to the operating-system vault.",
+            Self::ReadStatus => {
+                "Credential status could not be read from the operating-system vault."
+            }
+            Self::Load => "The required credential could not be loaded from secure storage.",
+        }
+    }
+}
+
+/// The vault reports "could not open the store at all" and "could not complete
+/// this one item" through the same call. They need different repairs, so they
+/// need different codes: an unreachable vault is usually a login session
+/// without the user's keychain (a launcher that overrides `HOME`, a locked or
+/// missing default keychain), which no amount of retyping the credential fixes.
+/// The platform error itself is never forwarded — see `NativeError`.
+fn vault_error(operation: VaultOperation, error: KeyringError) -> NativeError {
+    match error {
+        KeyringError::PlatformFailure(_) | KeyringError::NoStorageAccess(_) => vault_unavailable(),
+        _ => NativeError::new(operation.code(), operation.message()),
+    }
+}
+
+fn vault_unavailable() -> NativeError {
+    NativeError::new(
+        "credential_vault_unavailable",
+        "ImageForge could not open the operating-system credential vault for this login session. \
+         Reopen ImageForge the normal way from Applications, then try again.",
+    )
 }
 
 impl CredentialVault for KeyringVault {
     fn replace(&self, kind: CredentialKind, value: &str) -> NativeResult<CredentialMetadata> {
         validate_secret(value)?;
         validate_kind_specific(kind, value)?;
-        Self::entry(kind)?.set_password(value).map_err(|_| {
-            NativeError::new(
-                "credential_write_failed",
-                "The credential could not be saved to the operating-system vault.",
-            )
-        })?;
+        Self::entry(kind)?
+            .set_password(value)
+            .map_err(|error| vault_error(VaultOperation::Write, error))?;
         Ok(metadata_for(kind, Some(value)))
     }
 
@@ -81,10 +120,7 @@ impl CredentialVault for KeyringVault {
         match Self::entry(kind)?.get_password() {
             Ok(secret) => Ok(metadata_for(kind, Some(&secret))),
             Err(KeyringError::NoEntry) => Ok(metadata_for(kind, None)),
-            Err(_) => Err(NativeError::new(
-                "credential_read_failed",
-                "Credential status could not be read from the operating-system vault.",
-            )),
+            Err(error) => Err(vault_error(VaultOperation::ReadStatus, error)),
         }
     }
 
@@ -96,10 +132,7 @@ impl CredentialVault for KeyringVault {
                     "credential_unavailable",
                     "The required credential is not configured.",
                 ),
-                _ => NativeError::new(
-                    "credential_read_failed",
-                    "The required credential could not be loaded from secure storage.",
-                ),
+                other => vault_error(VaultOperation::Load, other),
             })?;
         validate_secret(&secret)?;
         validate_kind_specific(kind, &secret)?;
@@ -238,6 +271,35 @@ mod tests {
             assert_eq!(error.code, "credential_invalid");
             assert!(!error.message.contains(value));
         }
+    }
+
+    #[test]
+    fn an_unreachable_vault_is_reported_apart_from_a_rejected_credential() {
+        // errSecNoDefaultKeychain and a locked store arrive as these two
+        // variants. They mean the vault could not be opened at all, which is a
+        // different repair from a credential the vault refused.
+        for unreachable in [
+            KeyringError::PlatformFailure(Box::new(std::io::Error::other("-25307"))),
+            KeyringError::NoStorageAccess(Box::new(std::io::Error::other("locked"))),
+        ] {
+            let error = vault_error(VaultOperation::Write, unreachable);
+            assert_eq!(error.code, "credential_vault_unavailable");
+            assert!(!error.message.contains("25307"));
+            assert!(!error.message.contains("locked"));
+        }
+
+        assert_eq!(
+            vault_error(VaultOperation::Write, KeyringError::TooLong("service".into(), 8)).code,
+            "credential_write_failed",
+        );
+        assert_eq!(
+            vault_error(VaultOperation::ReadStatus, KeyringError::TooLong("service".into(), 8)).code,
+            "credential_read_failed",
+        );
+        assert_eq!(
+            vault_error(VaultOperation::Load, KeyringError::TooLong("service".into(), 8)).code,
+            "credential_read_failed",
+        );
     }
 
     #[test]

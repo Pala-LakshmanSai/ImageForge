@@ -2,6 +2,7 @@ import { ArrowLeft, ArrowRight, Check, Folder, KeyRound, Server, ShieldCheck, Us
 import { useLayoutEffect, useRef, useState, type Dispatch } from 'react';
 import type { ImageForgeAdapter } from '../adapters/imageForgeAdapter';
 import type { AppAction, AppState, CredentialKind } from '../domain/types';
+import { userFacingErrorMessage } from '../native/userFacingError';
 import { BrandMark } from './BrandMark';
 import { DialogPortal } from './DialogPortal';
 import { Button, Eyebrow, IconButton } from './primitives';
@@ -102,7 +103,7 @@ export function SetupAssistant({
         dispatch({ type: 'SHOW_TOAST', tone: 'success', title: `${label} replaced`, message: `The new ${label.toLowerCase()} stays in the operating-system vault.` });
         onClose?.();
       } catch (caught) {
-        setError(caught instanceof Error ? caught.message : 'Could not save that credential.');
+        setError(userFacingErrorMessage(caught, 'Could not save that credential.'));
       } finally {
         setBusy(false);
       }
@@ -147,7 +148,7 @@ export function SetupAssistant({
       if (value) await saveCredential('workerToken', value);
       setStep(3);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Could not validate that setup value.');
+      setError(userFacingErrorMessage(caught, 'Could not validate that setup value.'));
     } finally {
       setBusy(false);
     }
@@ -181,6 +182,8 @@ export function SetupAssistant({
         message: result.message,
       });
       onClose?.();
+    } catch (caught) {
+      setError(userFacingErrorMessage(caught, 'The connection test could not be completed.'));
     } finally {
       setBusy(false);
     }
