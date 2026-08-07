@@ -45,6 +45,9 @@ export interface NativeGpuNormalStopV1 {
   readonly expectedServerInstanceId: string;
   readonly expectedCoordinationRevision: number;
   readonly expectedLifecycleRevision: number;
+  /** Terminate without the worker stop-request approval handshake. The two
+   * editors coordinate outside the app, so Stop never waits on a peer. */
+  readonly direct: boolean;
 }
 
 export interface NativeGpuNormalStopResultV1 {
@@ -68,9 +71,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+function exactKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+  optional: readonly string[] = [],
+): boolean {
+  // `optional` keeps the shape closed while allowing a field the native side
+  // defaults. Rust defaults `direct` to false, so a recovery record written
+  // before the field existed must still parse identically on both sides.
   const actual = Object.keys(value).sort();
-  const keys = [...expected].sort();
+  const keys = [...expected, ...optional.filter((key) => key in value)].sort();
   return actual.length === keys.length && actual.every((key, index) => key === keys[index]);
 }
 
@@ -215,7 +225,7 @@ export function parseNativeGpuNormalStopV1(value: unknown): NativeGpuNormalStopV
     'expectedServerInstanceId',
     'expectedCoordinationRevision',
     'expectedLifecycleRevision',
-  ])) return null;
+  ], ['direct'])) return null;
   if (
     !isPodId(value.podId)
     || !isUuid(value.stopRequestId)
@@ -223,6 +233,7 @@ export function parseNativeGpuNormalStopV1(value: unknown): NativeGpuNormalStopV
     || !isUuid(value.expectedServerInstanceId)
     || !isRevision(value.expectedCoordinationRevision)
     || !isRevision(value.expectedLifecycleRevision)
+    || (value.direct !== undefined && typeof value.direct !== 'boolean')
   ) return null;
   return Object.freeze({
     podId: value.podId,
@@ -231,6 +242,7 @@ export function parseNativeGpuNormalStopV1(value: unknown): NativeGpuNormalStopV
     expectedServerInstanceId: value.expectedServerInstanceId,
     expectedCoordinationRevision: value.expectedCoordinationRevision as number,
     expectedLifecycleRevision: value.expectedLifecycleRevision as number,
+    direct: value.direct === true,
   });
 }
 

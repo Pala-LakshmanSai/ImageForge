@@ -1925,20 +1925,20 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
                 <p className="eyebrow">Explicit termination</p>
                 <h2 id="modal-title">Request a coordinated GPU stop?</h2>
                 <p>
-                  ImageForge first checks the durable batch lease and asks every other foreground editor. RunPod termination is sent only after the exact GPU is revalidated and all required editors approve.
+                  ImageForge checks the durable batch lease, revalidates the exact GPU, then terminates it. No other editor is asked.
                 </p>
                 <div className="modal__notice">
                   <strong>Confirmed target:</strong> {state.dialog.podId} · {state.pod.gpu ?? 'GPU unknown'} · {state.pod.hourlyRate === null ? 'rate unavailable' : `$${state.pod.hourlyRate.toFixed(2)}/hr`}
                 </div>
                 <div className="modal__notice">
-                  Any active batch blocks this request unconditionally. A pending approval never blocks generation; starting work keeps the GPU online.
+                  A batch that is still generating blocks this unconditionally. Cancel the batch first, then stop the GPU.
                 </div>
                 <div className="modal__notice">
                   ImageForge has no idle timer and never stops compute on completion, app exit, or connection loss. Network volume data and downloaded images remain.
                 </div>
                 <div className="modal__actions">
                   <Button data-autofocus onClick={() => dispatch({ type: 'DISMISS_DIALOG' })}>Keep GPU running</Button>
-                  <Button tone="danger" onClick={() => uiDispatch({ type: 'CONFIRM_STOP_POD' })}>Request coordinated stop</Button>
+                  <Button tone="danger" onClick={() => uiDispatch({ type: 'CONFIRM_STOP_POD' })}>Stop GPU</Button>
                 </div>
               </>
             ) : state.dialog.type === 'resolve-create' ? (

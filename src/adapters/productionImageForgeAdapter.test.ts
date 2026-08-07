@@ -671,15 +671,36 @@ describe('production ImageForge adapter', () => {
     expect(native.authorizeStart).not.toHaveBeenCalled();
   });
 
-  it('surfaces the active-batch stop veto without attempting RunPod termination', async () => {
+  it('refuses to terminate while a batch is generating and never asks a peer', async () => {
+    // Stop no longer creates a worker stop request, so the refusal comes from
+    // reading worker status directly. Cancel the batch first, then stop.
     const native = port({
-      studioCreateStopRequest: vi.fn(async () => ({
-        status: 423,
+      status: vi.fn(async () => ({
+        status: 200,
         body: {
-          error: {
-            code: 'stop_blocked_by_active_batch',
-            message: 'An active batch must finish or release its lease before the GPU can stop.',
-            details: { owner: 'Sujal', completed: 73, total: 450 },
+          schema_version: 1,
+          ready: true,
+          active_batch: {
+            batch_id: '77777777-7777-4777-8777-777777777777',
+            owner: { user_id: 'user-sujal', display_name: 'Sujal' },
+            state: 'running',
+            progress: {
+              total: 450,
+              completed: 73,
+              downloaded: 73,
+              failed: 0,
+              cancelled: 0,
+              processed: 73,
+              current_index: 74,
+            },
+            pause_requested: false,
+            cancel_requested: false,
+          },
+          permissions: {
+            can_create: false,
+            can_manage_active: false,
+            is_owner: false,
+            create_block_reason: null,
           },
         },
       })),
@@ -695,9 +716,26 @@ describe('production ImageForge adapter', () => {
       owner: 'Sujal',
       completed: 73,
       total: 450,
-      message: 'An active batch must finish or release its lease before the GPU can stop.',
+      message: 'Sujal is generating 73 of 450 images. Stop the batch before terminating the GPU.',
     });
-    expect(native.gpuPod.observe).not.toHaveBeenCalled();
+    expect(native.studioCreateStopRequest).not.toHaveBeenCalled();
+    expect(native.gpuPod.normalStop).not.toHaveBeenCalled();
+  });
+
+  it('terminates directly with no stop request and no approval wait', async () => {
+    const native = port();
+    const adapter = createProductionImageForgeAdapter(native);
+    // Production binds the Pod controller during startup refresh; Stop needs
+    // that exact-Pod projection before it can authorize a termination.
+    await adapter.runtime!.refresh(stateWithReadyPod());
+
+    await adapter.runtime!.requestGpuStop(stateWithReadyPod());
+
+    expect(native.studioCreateStopRequest).not.toHaveBeenCalled();
+    expect(native.studioRespondToStopRequest).not.toHaveBeenCalled();
+    expect(native.gpuPod.normalStop).toHaveBeenCalledWith(
+      expect.objectContaining({ podId: 'pod-exact-1', direct: true }),
+    );
   });
 
   it('loads and replays an interrupted native Stop with its exact persisted input after profile bind', async () => {
@@ -708,6 +746,7 @@ describe('production ImageForge adapter', () => {
       expectedServerInstanceId: '60000000-0000-4000-8000-000000000000',
       expectedCoordinationRevision: 7,
       expectedLifecycleRevision: 3,
+      direct: false,
     } as const;
     const retained = {
       ...gpuPodObservation(true),
@@ -748,52 +787,6 @@ describe('production ImageForge adapter', () => {
     // Profile binding clears once before recovery; the unresolved Stop must
     // not clear the recovered old-Pod worker binding afterward.
     expect(native.clearWorkerSession).toHaveBeenCalledTimes(1);
-  });
-
-  it('projects an approval-pending stop without blocking generation or calling RunPod', async () => {
-    const create = vi.fn(async (requestId: string, sessionId: string, podId: string, gpuDisplayName: string) => ({
-      status: 201,
-      body: {
-        ...studioState(sessionId),
-        coordination_revision: 2,
-        sessions: [
-          studioState(sessionId).current_session,
-          {
-            session_id: '66666666-6666-4666-8666-666666666666',
-            display_name: 'Sujal',
-            availability: 'foreground',
-            expires_at: '2026-08-01T10:00:12.000Z',
-          },
-        ],
-        stop_request: {
-          request_id: requestId,
-          pod_id: podId,
-          gpu_display_name: gpuDisplayName,
-          requester: { session_id: sessionId, display_name: 'Lakshman' },
-          state: 'pending',
-          reason: null,
-          requested_at: '2026-08-01T10:00:00.000Z',
-          response_deadline: '2026-08-01T10:00:30.000Z',
-          finalization_expires_at: null,
-          waiting_for: [{ session_id: '66666666-6666-4666-8666-666666666666', display_name: 'Sujal' }],
-          approved_by: [],
-          denied_by: [],
-          finalization_id: null,
-        },
-      },
-    }));
-    const native = port({ studioCreateStopRequest: create });
-    const adapter = createProductionImageForgeAdapter(native);
-    const events: ProductionRuntimeEvent[] = [];
-    adapter.runtime!.subscribe((event) => events.push(event));
-
-    await adapter.runtime!.requestGpuStop(stateWithReadyPod());
-
-    expect(events.at(-1)).toMatchObject({
-      type: 'studio',
-      studio: { stop: { phase: 'pending', isRequester: true, canRespond: false } },
-    });
-    expect(native.gpuPod.observe).not.toHaveBeenCalled();
   });
 
   it('projects idle-but-not-creatable worker truth as a temporary stop guard, not busy or error', async () => {
@@ -853,101 +846,6 @@ describe('production ImageForge adapter', () => {
       retryable: false,
     }]);
     expect(events.some((event) => event.type === 'stop-guard-active')).toBe(false);
-  });
-
-  it('starts the guarded exact-Pod lifecycle when an approved response has no server finalization ID yet', async () => {
-    const create = vi.fn(async (requestId: string, sessionId: string, podId: string, gpuDisplayName: string) => ({
-      status: 201,
-      body: {
-        ...studioState(sessionId),
-        coordination_revision: 2,
-        stop_request: {
-          request_id: requestId,
-          pod_id: podId,
-          gpu_display_name: gpuDisplayName,
-          requester: { session_id: sessionId, display_name: 'Lakshman' },
-          state: 'approved',
-          reason: null,
-          requested_at: '2026-08-01T10:00:00.000Z',
-          response_deadline: '2026-08-01T10:00:30.000Z',
-          finalization_expires_at: null,
-          waiting_for: [],
-          approved_by: [],
-          denied_by: [],
-          finalization_id: null,
-        },
-      },
-    }));
-    const native = port({ studioCreateStopRequest: create });
-    const stop = vi.spyOn(GpuLifecycleCoordinator.prototype, 'stop').mockResolvedValue({
-      phase: 'offline',
-      alreadyStopped: false,
-    } as Awaited<ReturnType<GpuLifecycleCoordinator['stop']>>);
-    try {
-      const adapter = createProductionImageForgeAdapter(native);
-      const events: ProductionRuntimeEvent[] = [];
-      adapter.runtime!.subscribe((event) => events.push(event));
-
-      await adapter.runtime!.requestGpuStop(stateWithReadyPod());
-
-      expect(stop).toHaveBeenCalledWith(expect.objectContaining({
-        podId: 'pod-exact-1',
-        stopRequestId: expect.stringMatching(/^[0-9a-f-]{36}$/i),
-        sessionId: expect.stringMatching(/^[0-9a-f-]{36}$/i),
-        expectedServerInstanceId: '22222222-2222-4222-8222-222222222222',
-        expectedCoordinationRevision: 2,
-      }));
-      expect(events).toContainEqual({ type: 'stop-complete', alreadyStopped: false });
-    } finally {
-      stop.mockRestore();
-    }
-  });
-
-  it('leaves finalization private to native and never auto-retries a failed Stop on heartbeat', async () => {
-    const gpuPod = gpuPodPort(true);
-    vi.mocked(gpuPod.normalStop).mockRejectedValue(Object.assign(
-      new Error('The worker finalization response was invalid.'),
-      { code: 'gpu_stop_worker_response_invalid', retryable: false, mayHaveSucceeded: false },
-    ));
-    const native = port({
-      workerHealthFetch: vi.fn(async () => jsonResponse(workerHealth())) as unknown as typeof fetch,
-      gpuPod,
-      studioCreateStopRequest: vi.fn(async (requestId, sessionId, podId, gpuDisplayName) => ({
-        status: 201,
-        body: {
-          ...studioState(sessionId),
-          coordination_revision: 2,
-          finalization_ttl_seconds: 60,
-          stop_request: {
-            request_id: requestId,
-            pod_id: podId,
-            gpu_display_name: gpuDisplayName,
-            requester: { session_id: sessionId, display_name: 'Lakshman' },
-            state: 'approved',
-            reason: null,
-            requested_at: '2026-08-01T10:00:00.000Z',
-            response_deadline: '2026-08-01T10:00:30.000Z',
-            finalization_expires_at: null,
-            waiting_for: [],
-            approved_by: [],
-            denied_by: [],
-            finalization_id: null,
-          },
-        },
-      })),
-    });
-    const adapter = createProductionImageForgeAdapter(native);
-    const events: ProductionRuntimeEvent[] = [];
-    adapter.runtime!.subscribe((event) => events.push(event));
-    const state = stateWithReadyPod();
-
-    await adapter.runtime!.refresh(state);
-    await adapter.runtime!.requestGpuStop(state);
-    await adapter.runtime!.heartbeat(state, 'foreground');
-
-    expect(native.gpuPod.normalStop).toHaveBeenCalledOnce();
-    expect(native.studioCancelStopRequest).not.toHaveBeenCalled();
-    expect(events.at(-1)).toMatchObject({ type: 'stop-failed', retryable: false });
   });
 
   it('flushes the newest heartbeat availability after an in-flight heartbeat', async () => {

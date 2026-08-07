@@ -77,7 +77,7 @@ export function StudioCoordination({ stop, dispatch }: StudioCoordinationProps) 
   const terminal = ['blocked', 'denied', 'expired', 'cancelled', 'failed'].includes(stop.phase);
   const dismissible = terminal || stop.phase === 'stopped';
   const title = stop.phase === 'checking'
-    ? 'Checking the shared studio before stopping'
+    ? 'Checking for an active batch before stopping'
     : stop.phase === 'blocked'
       ? `${blocked?.owner ?? 'Another editor'} has an active batch`
       : stop.phase === 'pending'

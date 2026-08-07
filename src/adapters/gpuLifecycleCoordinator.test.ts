@@ -27,6 +27,7 @@ function stopAuthority(podId: string) {
     sessionId: '50000000-0000-4000-8000-000000000000',
     expectedServerInstanceId: '60000000-0000-4000-8000-000000000000',
     expectedCoordinationRevision: 7,
+    direct: false,
   } as const;
 }
 

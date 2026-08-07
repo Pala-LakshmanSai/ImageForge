@@ -969,6 +969,7 @@ mod tests {
             expected_server_instance_id: "20000000-0000-4000-8000-000000000000".to_owned(),
             expected_coordination_revision: 7,
             expected_lifecycle_revision: 10,
+            direct: false,
         }
     }
 

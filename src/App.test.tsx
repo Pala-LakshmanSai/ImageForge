@@ -1749,7 +1749,7 @@ describe('ImageForge shell', () => {
     expect(trigger).toHaveFocus();
   });
 
-  it('routes production Stop through shared coordination before any stopping phase', async () => {
+  it('routes production Stop straight to termination with no approval step', async () => {
     const user = userEvent.setup();
     const production = productionAdapter();
     let state = createConfiguredInitialState();
@@ -1757,12 +1757,16 @@ describe('ImageForge shell', () => {
     render(<App initialState={state} adapter={production.adapter} />);
 
     await user.click(screen.getByRole('button', { name: 'Stop GPU' }));
-    await user.click(screen.getByRole('button', { name: 'Request coordinated stop' }));
+    // The confirm control now carries the same plain label as the trigger,
+    // because there is no coordinated request to describe. The confirm is the
+    // one rendered last, inside the modal.
+    const stopButtons = await screen.findAllByRole('button', { name: 'Stop GPU' });
+    await user.click(stopButtons[stopButtons.length - 1]);
 
     expect(production.runtime.requestGpuStop).toHaveBeenCalledWith(
       expect.objectContaining({ pod: expect.objectContaining({ podId: 'pod-exact-1', phase: 'ready' }) }),
     );
-    expect(screen.getByText('Checking the shared studio before stopping')).toBeVisible();
+    expect(screen.getByText('Checking for an active batch before stopping')).toBeVisible();
     expect(screen.queryByText('Terminating the confirmed ImageForge Pod')).not.toBeInTheDocument();
   });
 

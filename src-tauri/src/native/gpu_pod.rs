@@ -62,6 +62,16 @@ pub struct NativeGpuNormalStopV1 {
     pub expected_server_instance_id: String,
     pub expected_coordination_revision: u64,
     pub expected_lifecycle_revision: u64,
+    /// Terminate without the worker's stop-request approval handshake.
+    ///
+    /// The two editors coordinate outside the app, so a Stop must never wait
+    /// on the other editor's session. A direct stop skips the Finalize and
+    /// re-verify sockets only; the preflight journal, the mutation gate, the
+    /// one-use provider DELETE authority, and every ambiguity path are
+    /// unchanged, because those guard against double-termination and
+    /// unconfirmed provider responses rather than against a missing human.
+    #[serde(default)]
+    pub direct: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -415,10 +425,16 @@ impl GpuPodService {
             return Err(error);
         }
 
-        match worker
-            .execute_native_normal_stop_finalization(&plan)
-            .await?
-        {
+        let finalize_outcome = if input.direct {
+            // No stop request exists to finalize: a direct stop never created
+            // one. Everything after this point is identical.
+            NativeWorkerNormalStopFinalizeOutcomeV1::Finalized
+        } else {
+            worker
+                .execute_native_normal_stop_finalization(&plan)
+                .await?
+        };
+        match finalize_outcome {
             NativeWorkerNormalStopFinalizeOutcomeV1::Finalized => {}
             NativeWorkerNormalStopFinalizeOutcomeV1::Rejected => {
                 journal.cancel_preflight(&record)?;
@@ -442,10 +458,20 @@ impl GpuPodService {
         // before the journal can mint the one-use provider DELETE authority.
         // A failure at either boundary is after Finalize, so it is retained as
         // a no-DELETE uncertainty rather than being silently cancelled.
+        let verify_finalization = async {
+            if input.direct {
+                // There is no worker finalization marker to re-read. The local
+                // mutation gate below still runs, so a conflicting Switch or a
+                // changed Pod is still caught before DELETE authority is minted.
+                Ok(())
+            } else {
+                worker.verify_native_normal_stop_finalization(&plan).await
+            }
+        };
         let delete_intent = match verify_normal_stop_delete_boundary(
             &mutation_check,
             context,
-            worker.verify_native_normal_stop_finalization(&plan),
+            verify_finalization,
             || journal.mark_delete_intent(&record),
         )
         .await
@@ -1562,6 +1588,7 @@ mod tests {
             expected_server_instance_id: "11111111-1111-4111-8111-111111111111".to_owned(),
             expected_coordination_revision: 7,
             expected_lifecycle_revision,
+            direct: false,
         }
     }
 

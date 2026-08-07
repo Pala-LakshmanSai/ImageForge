@@ -53,6 +53,8 @@ export interface NativeNormalGpuStopAuthority {
   readonly sessionId: string;
   readonly expectedServerInstanceId: string;
   readonly expectedCoordinationRevision: number;
+  /** Terminate without the worker stop-request approval handshake. */
+  readonly direct: boolean;
 }
 
 function configFor(profile: StudioProfile, allowSlowEmergency: boolean): RunPodClientConfigInput {

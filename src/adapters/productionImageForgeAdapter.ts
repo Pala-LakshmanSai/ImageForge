@@ -44,6 +44,7 @@ import {
   type WorkerBatchPort,
   type WorkerHttpResult,
 } from './workerBatchCoordinator';
+import { parseWorkerStatus } from './workerContracts';
 import {
   projectBusyBatch,
   projectOwnedManifest,
@@ -891,23 +892,37 @@ class ProductionRuntime implements ProductionRuntimeFacade {
     this.#captureState(state);
     const expectedPodId = state.pod.podId;
     if (expectedPodId === null) throw new Error('No verified ImageForge Pod is selected.');
-    const gpuDisplayName = state.pod.gpu ?? 'ImageForge GPU';
     try {
-      // A heartbeat establishes this ephemeral session and obtains the latest
-      // worker epoch before the explicit stop request is created.
+      // The editors coordinate outside the app, so Stop never asks a peer and
+      // never creates a worker stop request. One guard survives: a batch that
+      // is actually generating. That is not permission from a person, it is
+      // refusing to destroy work in flight, and the read must fail closed
+      // because an unknown batch state cannot be treated as "no batch".
+      const statusResponse = await this.#port.status();
+      if (statusResponse.status !== 200) {
+        throw new Error('Worker status could not be read, so ImageForge cannot confirm the GPU is idle.');
+      }
+      const status = parseWorkerStatus(statusResponse.body);
+      if (status.activeBatch !== null) {
+        const { owner, progress } = status.activeBatch;
+        this.#emit({
+          type: 'stop-blocked',
+          owner: owner.displayName,
+          completed: progress.completed,
+          total: progress.total,
+          message: `${owner.displayName} is generating ${progress.completed} of ${progress.total} images. Stop the batch before terminating the GPU.`,
+        });
+        return;
+      }
+      // A heartbeat still establishes this session and the current worker
+      // epoch, so the native mutation gate can reject a stale click.
       await this.heartbeat(state, 'foreground');
-      const requestId = crypto.randomUUID();
-      const sequence = this.#nextStudioSequence();
-      const studio = requireStudioState(
-        await this.#port.studioCreateStopRequest(
-          requestId,
-          this.#sessionId,
-          expectedPodId,
-          gpuDisplayName,
-        ),
-        [201],
-      );
-      if (this.#acceptStudio(studio, sequence)) await this.#maybeFinalizeApprovedStop();
+      const studio = this.#studio;
+      await this.#finalizeDirectStop({
+        podId: expectedPodId,
+        serverInstanceId: studio?.serverInstanceId ?? crypto.randomUUID(),
+        coordinationRevision: studio?.coordinationRevision ?? 0,
+      });
     } catch (error) {
       if (error instanceof StudioContractError && error.code === 'stop_blocked_by_active_batch') {
         const owner = safeDetailString(error.details?.owner) ?? 'Another editor';
@@ -1223,6 +1238,36 @@ class ProductionRuntime implements ProductionRuntimeFacade {
     return operation;
   }
 
+  /** Terminate the exact Pod with no worker approval handshake. Native still
+   * runs the preflight journal, the mutation gate, and the one-use provider
+   * DELETE authority, so a repeated click cannot double-terminate and an
+   * unconfirmed RunPod response is never reported as a stop. */
+  async #finalizeDirectStop(
+    target: { podId: string; serverInstanceId: string; coordinationRevision: number },
+  ): Promise<void> {
+    try {
+      const result = await this.#gpu.stop({
+        podId: target.podId,
+        stopRequestId: crypto.randomUUID(),
+        sessionId: this.#sessionId,
+        expectedServerInstanceId: target.serverInstanceId,
+        expectedCoordinationRevision: target.coordinationRevision,
+        direct: true,
+      });
+      this.#emit({ type: 'stop-complete', alreadyStopped: result.alreadyStopped });
+    } catch (error) {
+      const ambiguous = typeof error === 'object'
+        && error !== null
+        && (error as { mayHaveSucceeded?: unknown }).mayHaveSucceeded === true;
+      this.#emitStopFailure(
+        error,
+        ambiguous
+          ? 'RunPod did not confirm whether termination completed. ImageForge will not claim the GPU stopped; refresh shared status.'
+          : 'The exact GPU was not terminated.',
+      );
+    }
+  }
+
   async #finalizeApprovedStop(
     pending: {
       serverInstanceId: string;
@@ -1238,6 +1283,7 @@ class ProductionRuntime implements ProductionRuntimeFacade {
         sessionId: this.#sessionId,
         expectedServerInstanceId: pending.serverInstanceId,
         expectedCoordinationRevision: pending.approvedCoordinationRevision,
+        direct: false,
       });
       this.#pendingFinalization = null;
       this.#emit({ type: 'stop-complete', alreadyStopped: result.alreadyStopped });

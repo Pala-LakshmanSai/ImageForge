@@ -141,7 +141,11 @@ describe('native GPU Pod control bridge', () => {
     invoke.mockResolvedValueOnce(result.value);
     await expect(nativeGpuNormalStop(input.value as NativeGpuNormalStopV1))
       .resolves.toEqual(parseNativeGpuNormalStopResultV1(result.value));
-    expect(invoke).toHaveBeenLastCalledWith('gpu_normal_stop', { input: input.value });
+    // The bridge forwards the parsed input, which normalizes the optional
+    // `direct` flag to an explicit boolean so native never has to infer it.
+    expect(invoke).toHaveBeenLastCalledWith('gpu_normal_stop', {
+      input: parseNativeGpuNormalStopV1(input.value),
+    });
   });
 
   it('rejects invalid input before invoke and unknown native output fields', async () => {
