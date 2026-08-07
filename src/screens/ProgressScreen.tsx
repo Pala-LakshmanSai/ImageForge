@@ -319,9 +319,16 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
   const hasGenerationWork = batch.prompts.some((prompt) =>
     ['pending', 'generating', 'retrying'].includes(prompt.status),
   );
-  const isControllable = canManage && (
+  // Pause stops generation after the current frame, so it is only meaningful
+  // while frames remain to generate.
+  const canPause = canManage && (
     batch.phase === 'paused' || (batch.phase === 'running' && hasGenerationWork)
   );
+  // Cancel must outlive generation. Once every image is generated the batch
+  // keeps running through the artifact-saving tail, which on a large batch is
+  // long; gating Cancel on remaining generation work removed the only way out
+  // of a running batch exactly when the user needed it.
+  const canCancel = canManage && ['running', 'paused'].includes(batch.phase);
   const isLocked = batch.phase === 'locked';
   const isReconnecting = state.pod.phase === 'reconnecting';
   const isError = batch.phase === 'error' || state.pod.phase === 'error';
@@ -367,7 +374,7 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
           <p>{batch.owner} · {counts.total} images · {exactPodAttached ? state.pod.gpu ?? 'GPU identity unavailable' : 'GPU identity unavailable'}</p>
         </div>
         <div className="page-heading__actions progress-actions">
-          {isControllable ? (
+          {canPause ? (
             <Button icon={batch.phase === 'running' ? Pause : Play} onClick={() => dispatch({ type: 'TOGGLE_BATCH_PAUSE' })}>
               {batch.phase === 'running' ? 'Pause after frame' : 'Resume'}
             </Button>
@@ -398,7 +405,7 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
           >
             Show in folder
           </Button>
-          {isControllable ? <Button tone="danger" icon={X} onClick={() => dispatch({ type: 'REQUEST_CANCEL_BATCH' })}>Cancel</Button> : null}
+          {canCancel ? <Button tone="danger" icon={X} onClick={() => dispatch({ type: 'REQUEST_CANCEL_BATCH' })}>Cancel</Button> : null}
           {canResolveInterrupted && state.pod.phase === 'ready' ? <Button tone="danger" icon={X} onClick={() => dispatch({ type: 'REQUEST_CANCEL_BATCH' })}>Cancel interrupted batch</Button> : null}
           {settled ? <Button tone="primary" icon={Sparkles} onClick={() => dispatch({ type: 'NEW_BATCH' })}>New brief</Button> : null}
         </div>

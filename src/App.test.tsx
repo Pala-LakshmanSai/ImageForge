@@ -1608,8 +1608,12 @@ describe('ImageForge shell', () => {
     emitBatch(['downloaded', 'downloaded', 'ready']);
     expect(screen.getByRole('heading', { name: 'Saving image 3 of 3' })).toBeVisible();
     expect(screen.getByRole('heading', { name: 'Frame 001' })).toBeVisible();
+    // Pause stops generation after the current frame, which is meaningless
+    // once every image is generated and only saving remains.
     expect(screen.queryByRole('button', { name: 'Pause after frame' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
+    // Cancel must survive the saving tail. The batch is still running, and on a
+    // long batch this tail is the stretch where the user has no other way out.
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeVisible();
     expect(screen.queryByRole('button', { name: 'New brief' })).not.toBeInTheDocument();
   });
 
