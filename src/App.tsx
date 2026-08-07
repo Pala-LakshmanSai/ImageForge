@@ -1525,6 +1525,26 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
     }).finally(() => setGpuSwitchActionBusy(null));
   }, [gpuSwitchSnapshot, runtime]);
 
+  /** A batch control that fails must say so. These calls cross the worker
+   * boundary, and when the Pod behind it is gone the RunPod proxy answers
+   * instead, so the request fails for a reason the user can act on. Discarding
+   * that left Cancel indistinguishable from a Cancel that worked. */
+  const controlBatchVisibly = useCallback(
+    async (control: 'pause' | 'resume' | 'cancel' | 'retry_failed', state: AppState): Promise<void> => {
+      if (!runtime) return;
+      try {
+        await runtime.controlBatch(control, state);
+      } catch (error) {
+        dispatch({
+          type: 'RUNTIME_ERROR',
+          scope: 'batch',
+          message: userFacingErrorMessage(error, 'The batch control could not be completed.'),
+        });
+      }
+    },
+    [runtime],
+  );
+
   const uiDispatch = useCallback((action: AppAction) => {
     if (action.type === 'STAGE_DRAFT') {
       void stageDraft();
@@ -1606,20 +1626,20 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
     }
     if (action.type === 'TOGGLE_BATCH_PAUSE') {
       const control = current.batch?.phase === 'running' ? 'pause' : 'resume';
-      void runtime.controlBatch(control, current).catch(() => undefined);
+      void controlBatchVisibly(control, current);
       return;
     }
     if (action.type === 'RETRY_FAILED') {
-      void runtime.controlBatch('retry_failed', current).catch(() => undefined);
+      void controlBatchVisibly('retry_failed', current);
       return;
     }
     if (action.type === 'RESUME_INTERRUPTED_BATCH') {
-      void runtime.controlBatch('resume', current).catch(() => undefined);
+      void controlBatchVisibly('resume', current);
       return;
     }
     if (action.type === 'CONFIRM_CANCEL_BATCH') {
       dispatch({ type: 'DISMISS_DIALOG' });
-      void runtime.controlBatch('cancel', current).catch(() => undefined);
+      void controlBatchVisibly('cancel', current);
       return;
     }
     if (action.type === 'CONFIRM_STOP_POD') {

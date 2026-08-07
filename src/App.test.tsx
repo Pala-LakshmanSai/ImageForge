@@ -1749,6 +1749,27 @@ describe('ImageForge shell', () => {
     expect(trigger).toHaveFocus();
   });
 
+  it('surfaces a failed batch cancel instead of silently doing nothing', async () => {
+    const user = userEvent.setup();
+    const production = productionAdapter();
+    // The worker that hosted this batch is gone, so the RunPod proxy answers
+    // instead and native rejects the body. The user must be told; a Cancel
+    // that quietly fails leaves no way to tell it from a Cancel that worked.
+    production.runtime.controlBatch = vi.fn(async () => {
+      throw {
+        code: 'worker_schema_mismatch',
+        message: 'The worker API version is incompatible with this ImageForge app.',
+        retryable: false,
+      };
+    });
+    render(<App initialState={createDemoState()} adapter={production.adapter} />);
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    await user.click(await screen.findByRole('button', { name: 'Cancel remaining' }));
+
+    expect(await screen.findByText(/incompatible with this ImageForge app/i)).toBeVisible();
+  });
+
   it('routes production Stop straight to termination with no approval step', async () => {
     const user = userEvent.setup();
     const production = productionAdapter();
