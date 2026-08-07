@@ -57,10 +57,19 @@ version changes, move all of these together:
 3. `packages/runpod-client/src/health.ts` — `WORKER_VERSION` (the desktop's
    expected value)
 4. `packages/runpod-client/test/health.test.ts` — the `healthPayload` fixture
-5. This runbook's "Worker version" line above
+5. `src/adapters/productionImageForgeAdapter.test.ts` — its `workerHealth`
+   fixture
+6. This runbook's "Worker version" line above
 
 `src/adapters/workerHealthContract.test.ts` binds 2 and 3 together by reading
 the worker's own constants, so `npm test` fails if they drift.
+
+`scripts/native-two-client-smoke-server.mjs` derives the version from the
+worker's constants rather than duplicating it. It previously held a literal
+that was missed by this list, so the fake worker it serves was rejected by the
+app under test and the installed-app coordination smoke failed on both
+platforms while every unit suite stayed green. Prefer deriving over adding a
+seventh line to this list.
 
 The GHCR package is public, so the template uses **No credentials** for image
 pulls. Update the ImageForge RunPod template to this exact digest before

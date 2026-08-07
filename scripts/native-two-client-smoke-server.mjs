@@ -2,10 +2,11 @@
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
+import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, open, readFile, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HOST = '127.0.0.1';
 const MAX_REQUEST_BYTES = 64 * 1024;
@@ -17,7 +18,22 @@ const INITIAL_BATCH_ID = '11111111-1111-4111-8111-111111111111';
 const GENERATED_BATCH_ID = '77777777-7777-4777-8777-777777777777';
 const FIRST_SERVER_ID = '22222222-2222-4222-8222-222222222222';
 const SECOND_SERVER_ID = '33333333-3333-4333-8333-333333333333';
-const WORKER_VERSION = '0.1.3';
+// Derived, never duplicated. The desktop rejects any /v1/health body whose
+// version is not the exact released string, so a hardcoded literal here silently
+// stops matching the moment the worker is released and makes this fixture serve
+// a body the app under test must refuse. Read the worker's own constant instead.
+const WORKER_VERSION = (() => {
+  const constants = fileURLToPath(
+    new URL('../worker/src/imageforge_worker/constants.py', import.meta.url),
+  );
+  const match = /^WORKER_VERSION:\s*Final\s*=\s*"([^"]+)"/m.exec(
+    readFileSync(constants, 'utf8'),
+  );
+  if (match === null) {
+    throw new Error(`WORKER_VERSION not found in ${constants}`);
+  }
+  return match[1];
+})();
 
 const PRINCIPALS = Object.freeze({
   A: Object.freeze({ userId: 'lakshman', displayName: 'Lakshman' }),
