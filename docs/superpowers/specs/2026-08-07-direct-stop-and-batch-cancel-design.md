@@ -33,9 +33,31 @@ The user had no way to stop the batch and no way to start another.
   the saving tail, and stops only the batch.
 - The worker image is not rebuilt, repinned, or redeployed.
 
+## Phasing
+
+**Phase 1 (this spec, implemented first):** direct Stop GPU and
+always-available Cancel. Bounded to the progress screen, the production
+adapter, and one new native command.
+
+**Phase 2 (specified below, implemented separately):** remove GPU **Switch**
+consent, so a switch proceeds without peer approval.
+
+Phase 2 is sequenced second on purpose. Switch approval is not a dialog layered
+over the flow; it is woven through a 7,245-line native state machine
+(`waiting_for` / `approved_by` / `denied_by`, finalization phases, tombstones,
+adopt and complete transitions). Phase 1 is what unblocks daily use, and it is
+verifiable on its own. Combining them would put a large state-machine edit in
+the same change as the fix for a stuck button, against a build the user has
+explicitly asked to preserve.
+
+Phase 2 keeps the same rule as Phase 1: no human approval, but the active-batch
+guard stays, because a switch destroys the old Pod and would take a running
+batch with it.
+
 ## Non-goals
 
-- NG-1: GPU **Switch** consent is a separate subsystem and is left intact.
+- NG-1: Neither phase removes the GPU Switch *feature*. Only its peer-approval
+  step is removed. Switching GPUs still works.
 - NG-2: No change to generation, download, receipts, or queue behavior.
 - NG-3: No removal of the worker's `/v1/studio/*` routes. The desktop stops
   using them for stop; the worker keeps serving them.
