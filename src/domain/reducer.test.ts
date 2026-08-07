@@ -92,6 +92,25 @@ describe('appReducer', () => {
     expect(state.pod).toMatchObject({ phase: 'offline', podId: null, stopTargetPodId: null });
   });
 
+  it('interrupts a running batch when the authoritative lifecycle reports the Pod gone', () => {
+    // A batch cannot outlive the Pod that hosts it. Without this the batch
+    // stays "running" against a worker that no longer answers, so Cancel can
+    // never succeed and no new batch can start.
+    let state = readyDraft(3);
+    state = appReducer(state, { type: 'START_BATCH', startedAt: '2026-08-01T10:00:00.000Z' });
+    expect(state.batch?.phase).toBe('validating');
+
+    state = appReducer(state, {
+      type: 'SYNC_RUNTIME_POD',
+      pod: { ...state.pod, phase: 'offline', podId: null, gpu: null, vram: null, hourlyRate: null },
+    });
+
+    expect(state.batch?.phase).toBe('interrupted');
+    // Images already saved are never touched; only unfinished work is reset so
+    // the batch can be resumed on a new GPU or cancelled outright.
+    expect(state.batch?.prompts.every((prompt) => prompt.status !== 'generating')).toBe(true);
+  });
+
   it('guards batch launch until prompts, destination, lock, and ready GPU agree', () => {
     let state = createInitialState();
     expect(canStartBatch(state)).toBe(false);
