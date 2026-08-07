@@ -98,7 +98,7 @@ export function StudioCoordination({ stop, dispatch }: StudioCoordinationProps) 
                     ? 'GPU stop confirmed'
                     : 'GPU stop needs attention';
   const detail = stop.phase === 'checking'
-    ? 'ImageForge is checking the durable batch lease and every foreground editor. No RunPod termination has been sent.'
+    ? 'ImageForge is checking the durable batch lease. No RunPod termination has been sent.'
     : stop.phase === 'blocked'
       ? `${blocked?.completed ?? 0} of ${blocked?.total ?? 0} images are complete. An active batch is an unconditional stop veto, including for its owner.`
       : stop.phase === 'pending'
@@ -133,7 +133,7 @@ export function StudioCoordination({ stop, dispatch }: StudioCoordinationProps) 
         {terminal ? <AlertTriangle size={20} /> : stop.phase === 'approved' || stop.phase === 'finalizing' ? <ShieldCheck size={20} /> : stop.phase === 'pending' ? <Clock3 size={20} /> : <CheckCircle2 size={20} />}
       </span>
       <div className="studio-coordination__copy">
-        <p className="eyebrow">Coordinated GPU stop{countdown && stop.phase !== 'pending' ? ` · ${countdown}` : ''}</p>
+        <p className="eyebrow">GPU stop{countdown && stop.phase !== 'pending' ? ` · ${countdown}` : ''}</p>
         <strong>{title}</strong>
         <span>{detail}</span>
         {stop.podId ? <code>{stop.gpuDisplayName ?? 'GPU'} · {stop.podId}</code> : null}

@@ -358,11 +358,14 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
       }
       else if (event.type === 'create-recovery') dispatch({ type: 'SYNC_CREATE_RECOVERY', marker: event.marker });
       else if (event.type === 'studio') dispatch({ type: 'SYNC_STUDIO_STATE', studio: event.studio });
+      // A refusal must outlive the next heartbeat. Shared studio state is
+      // replaced wholesale by every worker sync, and Stop no longer creates a
+      // worker stop request to anchor it there, so the reason has to live
+      // somewhere the sync does not touch.
       else if (event.type === 'stop-blocked') dispatch({
-        type: 'STUDIO_STOP_BLOCKED',
-        owner: event.owner,
-        completed: event.completed,
-        total: event.total,
+        type: 'SHOW_TOAST',
+        tone: 'warning',
+        title: 'GPU still in use',
         message: event.message,
       });
       else if (event.type === 'stop-failed') dispatch({
@@ -1943,7 +1946,7 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
             {state.dialog.type === 'stop-pod' ? (
               <>
                 <p className="eyebrow">Explicit termination</p>
-                <h2 id="modal-title">Request a coordinated GPU stop?</h2>
+                <h2 id="modal-title">Stop this GPU?</h2>
                 <p>
                   ImageForge checks the durable batch lease, revalidates the exact GPU, then terminates it. No other editor is asked.
                 </p>
