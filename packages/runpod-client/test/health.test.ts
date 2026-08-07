@@ -174,7 +174,11 @@ function healthPayload(phase: string, progress: number): Record<string, unknown>
   return {
     schema_version: 1,
     service: "imageforge-worker",
-    version: "0.1.3",
+    // Must track WORKER_VERSION in src/health.ts. This fixture agreeing with a
+    // stale constant is what hid the 0.1.3/0.1.4 contract break; the binding
+    // guard against the worker's own constants lives in
+    // src/adapters/workerHealthContract.test.ts.
+    version: "0.1.7",
     process: { status: "ok", uptime_ms: 100 },
     model: {
       id: "black-forest-labs/FLUX.2-klein-4B",

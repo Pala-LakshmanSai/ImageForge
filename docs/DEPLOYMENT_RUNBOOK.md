@@ -34,13 +34,33 @@ read-only package-pull secret in RunPod and record that it was used; for a
 public package, verify the package visibility explicitly. Never put a personal
 GitHub token in the repository, desktop profile, or this runbook.
 
-Current immutable worker release evidence (published 2026-08-06):
+Current immutable worker release evidence (published 2026-08-07):
 
 - Repository: `Pala-LakshmanSai/imageforge-worker`
-- Source commit: `6e29f21af11c3704e0aa3ffa6b320d6d1b8c9675`
-- Image: `ghcr.io/pala-lakshmansai/imageforge-worker@sha256:5f3b524d462c12555a8649f5b4bb8530e66a14f871d17f444e86a685c406c410`
-- Worker version: `0.1.3`
+- Source commit: `26f7566033f1994e15ec1e16ef6312d009ed98fe`
+- Image: `ghcr.io/pala-lakshmansai/imageforge-worker@sha256:38ed950746e98a65ae13eee35583408dc367e268d91697b49538e5a623efa5a4`
+- Worker version: `0.1.7`
 - Architecture: `linux/amd64`
+
+### Bumping the worker version
+
+The desktop rejects any `/v1/health` body whose `version` is not the exact
+string it expects, as `api_response_invalid`. The lifecycle latches that into a
+terminal `error` phase after a five-minute grace window, so a healthy Pod
+presents as "GPU operation needs attention" and no amount of polling recovers
+it. Repinning the image digest alone is **not** sufficient. When the worker
+version changes, move all of these together:
+
+1. `worker/pyproject.toml` — `version`
+2. `worker/src/imageforge_worker/constants.py` — `WORKER_VERSION` (the value
+   actually served by `/v1/health`; `__init__.py` derives from it)
+3. `packages/runpod-client/src/health.ts` — `WORKER_VERSION` (the desktop's
+   expected value)
+4. `packages/runpod-client/test/health.test.ts` — the `healthPayload` fixture
+5. This runbook's "Worker version" line above
+
+`src/adapters/workerHealthContract.test.ts` binds 2 and 3 together by reading
+the worker's own constants, so `npm test` fails if they drift.
 
 The GHCR package is public, so the template uses **No credentials** for image
 pulls. Update the ImageForge RunPod template to this exact digest before

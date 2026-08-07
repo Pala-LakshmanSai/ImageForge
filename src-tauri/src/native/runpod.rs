@@ -26,7 +26,7 @@ const EMERGENCY_GPU_ID: &str = "NVIDIA RTX 2000 Ada Generation";
 const IMAGEFORGE_TEMPLATE_ID: &str = "q8sfgixfy2";
 const IMAGEFORGE_NETWORK_VOLUME_ID: &str = "ukh207b26r";
 const IMAGEFORGE_WORKER_IMAGE: &str =
-    "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:5f3b524d462c12555a8649f5b4bb8530e66a14f871d17f444e86a685c406c410";
+    "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:38ed950746e98a65ae13eee35583408dc367e268d91697b49538e5a623efa5a4";
 const IMAGEFORGE_VOLUME_MOUNT_PATH: &str = "/workspace";
 const IMAGEFORGE_WORKER_PORT: u16 = 8000;
 

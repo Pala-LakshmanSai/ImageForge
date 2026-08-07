@@ -5,8 +5,12 @@ import { asBoolean, asNonEmptyString, asNumber, asRecord, asString } from "./val
 
 const RUNPOD_PROXY_HOST = /^[A-Za-z0-9][A-Za-z0-9-]{0,57}-8000\.proxy\.runpod\.net$/;
 const WORKER_SERVICE = "imageforge-worker";
-// Keep the desktop contract aligned with the portable worker release.
-const WORKER_VERSION = "0.1.3";
+// Keep the desktop contract aligned with the portable worker release. This must
+// move in lockstep with WORKER_VERSION in worker/src/imageforge_worker/constants.py:
+// a mismatch is rejected as `api_response_invalid`, which the lifecycle latches
+// into a terminal `error` phase, so a stale value here bricks a healthy Pod.
+// src/adapters/workerHealthContract.test.ts pins the two together.
+const WORKER_VERSION = "0.1.7";
 const MODEL_ID = "black-forest-labs/FLUX.2-klein-4B";
 const MODEL_REVISION = "e7b7dc27f91deacad38e78976d1f2b499d76a294";
 const MODEL_PRECISION = "bfloat16";
