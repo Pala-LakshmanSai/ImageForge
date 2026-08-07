@@ -175,13 +175,43 @@ describe('production runtime projection', () => {
     expect(verified.batch.estimatedCost).toBeCloseTo(0.5 / 60);
   });
 
+  it('settles a terminal batch once local saving has stalled', () => {
+    // "Not written yet" and "gone for good" look identical in one snapshot, so
+    // the difference has to be time. While saving is alive, receipts keep
+    // appearing. When nothing has landed for the stall window against a
+    // terminal manifest, waiting cannot help: the worker has acknowledged the
+    // download and is free to have deleted its own copy.
+    //
+    // Holding forever is what trapped a completed batch as permanently
+    // running: Cancel was refused as already completed, Stop was refused for
+    // an active batch, and no new batch could start.
+    const manifest = workerManifest('downloaded');
+    const context = {
+      name: 'History Brief', destination: '/safe/folder', estimatedSecondsPerImage: 8.4, hourlyRate: 0.5,
+    };
+
+    const stillSaving = projectOwnedManifest(
+      manifest, [], context, Date.parse('2026-08-01T10:01:30.000Z'),
+    );
+    expect(stillSaving.batch.phase).toBe('running');
+
+    const stalled = projectOwnedManifest(
+      manifest, [], context, Date.parse('2026-08-01T10:05:00.000Z'),
+    );
+    expect(stalled.batch.phase).toBe('complete');
+    // The artifact is missing, not silently invented: it never becomes an asset.
+    expect(stalled.assets).toEqual([]);
+  });
+
   it('delays partial failure until every successful artifact has a matching local receipt', () => {
     const manifest = partialFailureManifest();
     const context = {
       name: 'Mixed result brief', destination: '/safe/folder', estimatedSecondsPerImage: 8.4, hourlyRate: 0.5,
     };
 
-    const saving = projectOwnedManifest(manifest, [], context);
+    // Saving is only truthful while it can still finish, so this asserts the
+    // window shortly after the worker's last update rather than the wall clock.
+    const saving = projectOwnedManifest(manifest, [], context, Date.parse('2026-08-01T10:01:30.000Z'));
     expect(saving.batch.phase).toBe('running');
     expect(saving.batch.statusMessage).toBe('Saving completed images · 0 of 1 verified locally');
     expect(saving.batch.prompts.map((prompt) => prompt.status)).toEqual(['ready', 'failed']);

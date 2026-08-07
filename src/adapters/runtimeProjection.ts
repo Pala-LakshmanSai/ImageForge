@@ -19,6 +19,11 @@ import type {
 
 const ACTIVE_POD_STATUSES = new Set(['provisioning', 'starting', 'running', 'unknown', 'error']);
 
+/** How long a terminal batch may show no local saving progress before it is
+ * settled. Healthy saving lands a receipt per image in about a second, so this
+ * only fires when saving genuinely cannot finish. */
+const SAVING_STALL_MS = 120_000;
+
 function podProgress(phase: PodPhase): number {
   switch (phase) {
     case 'offline': return 0;
@@ -169,16 +174,31 @@ export function projectOwnedManifest(
     };
   });
   const locallyVerified = prompts.filter((prompt) => prompt.status === 'downloaded').length;
+  // Saving is alive as long as receipts keep landing. Measured from the newest
+  // local receipt, falling back to the worker's last manifest update when none
+  // has landed yet.
+  const lastLocalProgressAt = receipts.reduce(
+    (latest, receipt) => Math.max(latest, receipt.verifiedAtUnixMs),
+    Date.parse(manifest.updatedAt),
+  );
+  const savingStalled = nowUnixMs - lastLocalProgressAt > SAVING_STALL_MS;
   const savingSuccessfulArtifacts = ['completed', 'failed', 'cancelled'].includes(manifest.state) && manifest.images.some((image) => {
     if (!['ready', 'downloaded'].includes(image.status)) return false;
-    const local = receiptByIndex.get(image.index);
     // The native receipt is durable before its worker acknowledgement. Keep a
     // terminal worker manifest in the truthful saving phase until both halves
     // of that handshake are visible: the verified local file and the worker's
     // authoritative `downloaded` state.
-    return image.status !== 'downloaded'
-      || local?.sha256 !== image.sha256
-      || local?.sizeBytes !== image.sizeBytes;
+    //
+    // An image the worker still reports as `ready` has not been acknowledged,
+    // so its remote copy is still guaranteed and the download can still
+    // complete. Once acknowledged, the worker may delete its copy, so a local
+    // file that never arrives can only be waited on for so long: past the
+    // stall window there is nothing left to wait for, and holding the batch
+    // running would block Cancel, Stop, and every future batch.
+    if (image.status !== 'downloaded') return true;
+    const local = receiptByIndex.get(image.index);
+    const unsaved = local?.sha256 !== image.sha256 || local?.sizeBytes !== image.sizeBytes;
+    return unsaved && !savingStalled;
   });
   const phase = batchPhase(manifest.state, manifest.progress.failed, savingSuccessfulArtifacts);
   const started = Date.parse(manifest.createdAt);
