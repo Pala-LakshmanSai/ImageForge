@@ -7,7 +7,7 @@ import type {
 import { createRunPodClientConfig, deriveRunPodProxyUrl } from "../src/index.js";
 
 export const benchmarkContract: BenchmarkContract = Object.freeze({
-  model: "black-forest-labs/FLUX.2-klein-4B",
+  model: "Comfy-Org/Mage-Flow",
   modelRevision: "0123456789abcdef",
   softwareImage: "ghcr.io/imageforge/worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   precision: "BF16",

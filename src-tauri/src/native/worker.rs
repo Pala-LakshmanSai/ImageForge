@@ -28,8 +28,8 @@ const MAX_STUDIO_TTL_SECONDS: u64 = 300;
 const MAX_JSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const IMAGEFORGE_WORKER_IMAGE_DIGEST: &str =
     "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:38ed950746e98a65ae13eee35583408dc367e268d91697b49538e5a623efa5a4";
-const IMAGEFORGE_MODEL_ID: &str = "black-forest-labs/FLUX.2-klein-4B";
-const IMAGEFORGE_MODEL_REVISION: &str = "e7b7dc27f91deacad38e78976d1f2b499d76a294";
+const IMAGEFORGE_MODEL_ID: &str = "Comfy-Org/Mage-Flow";
+const IMAGEFORGE_MODEL_REVISION: &str = "d8c99241f6fa80fbd453014234af2bf337ea21e6";
 const WORKER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const WORKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 

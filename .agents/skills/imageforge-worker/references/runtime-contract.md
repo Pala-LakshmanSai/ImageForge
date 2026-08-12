@@ -1,6 +1,6 @@
 # Runtime contract
 
-- Model: `black-forest-labs/FLUX.2-klein-4B`, pinned revision.
+- Model: `Comfy-Org/Mage-Flow`, pinned revision.
 - Precision: BF16; no NVFP4 in the portable release.
 - Default: 1280x720, four steps, guidance 1.0, JPEG quality 95.
 - Ordinary approved GPU types: RTX 4090, RTX 5090, RTX 5080, RTX 4080 SUPER,

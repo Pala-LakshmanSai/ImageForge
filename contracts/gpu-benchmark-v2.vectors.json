@@ -3,7 +3,7 @@
   "promptFixture": { "path": "contracts/gpu-benchmark-prompts-v2.json", "sha256": "5f2f0ae47b8220672a29f9fbf477c4990686fe4973ed72d6343348b326154aa4", "count": 30 },
   "seedFixture": { "path": "contracts/gpu-benchmark-seeds-v2.json", "sha256": "55e18eaa16ff11474196c731e7a5cea20312ab8ec12d5fc3f137e35c5f675489", "count": 30 },
   "contract": {
-    "modelId": "black-forest-labs/FLUX.2-klein-4B",
+    "modelId": "Comfy-Org/Mage-Flow",
     "modelRevision": "0123456789abcdef0123456789abcdef01234567",
     "workerImageDigest": "ghcr.io/imageforge/worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "templateId": "imageforge-template-v1",

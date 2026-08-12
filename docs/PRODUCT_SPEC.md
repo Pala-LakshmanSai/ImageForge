@@ -120,7 +120,7 @@ application took 30-60 minutes to become usable.
 
 ## Default generation contract
 
-- Model: `black-forest-labs/FLUX.2-klein-4B`
+- Model: `Comfy-Org/Mage-Flow`
 - Precision: BF16
 - Size: 1280x720
 - Steps: 4

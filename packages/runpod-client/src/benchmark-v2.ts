@@ -7,7 +7,7 @@ const FAILURE_CODE_V1 = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
 const UTC_MILLISECONDS_V1 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 export interface GpuBenchmarkContractV2 {
-  readonly modelId: "black-forest-labs/FLUX.2-klein-4B";
+  readonly modelId: "Comfy-Org/Mage-Flow";
   readonly modelRevision: string;
   readonly workerImageDigest: string;
   readonly templateId: string;
@@ -110,7 +110,7 @@ export function parseGpuBenchmarkContractV2(value: unknown): GpuBenchmarkContrac
   const record = exactRecord(value, keys);
   if (
     record === null ||
-    record.modelId !== "black-forest-labs/FLUX.2-klein-4B" ||
+    record.modelId !== "Comfy-Org/Mage-Flow" ||
     typeof record.modelRevision !== "string" || record.modelRevision.length < 1 || record.modelRevision.length > 128 ||
     !isLowercaseRegistryImageDigestV1(record.workerImageDigest) ||
     typeof record.templateId !== "string" || record.templateId.length < 1 || record.templateId.length > 191 ||

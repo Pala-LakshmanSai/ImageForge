@@ -190,7 +190,7 @@ function requirePositiveFinite(value: unknown, field: string): number {
 function validateBenchmarkContract(value: unknown, field: string): BenchmarkContract {
   const contract = requireRecord(value, field);
   rejectUnknownKeys(contract, BENCHMARK_CONTRACT_KEYS, field);
-  if (contract.model !== "black-forest-labs/FLUX.2-klein-4B") {
+  if (contract.model !== "Comfy-Org/Mage-Flow") {
     configurationError(`${field}.model must use FLUX.2 Klein 4B.`, `${field}.model`);
   }
   const modelRevision = requireString(contract.modelRevision, `${field}.modelRevision`);
@@ -215,7 +215,7 @@ function validateBenchmarkContract(value: unknown, field: string): BenchmarkCont
     );
   }
   return Object.freeze({
-    model: "black-forest-labs/FLUX.2-klein-4B",
+    model: "Comfy-Org/Mage-Flow",
     modelRevision,
     softwareImage,
     precision: "BF16",

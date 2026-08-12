@@ -13,24 +13,14 @@ export type TwoClientSmokeCheckpoint =
   | 'veto_done'
   | 'release_initial_batch'
   | 'idle_after_release'
-  | 'approval_request_a'
-  | 'approval_response_b'
-  | 'approval_delete_a'
+  | 'direct_stop_a'
   | 'offline_a_to_b'
   | 'reset_second_pod'
   | 'ready_second_pod'
-  | 'denial_request_b'
-  | 'denial_response_a'
-  | 'clear_denial'
-  | 'timeout_request_a'
-  | 'expire_timeout'
-  | 'clear_timeout'
-  | 'generation_request_a'
   | 'generation_started_b'
+  | 'generation_veto_a'
   | 'release_generated_batch'
-  | 'reverse_request_b'
-  | 'reverse_response_a'
-  | 'reverse_delete_b'
+  | 'direct_stop_b'
   | 'offline_b_to_a'
   | 'final';
 
@@ -272,21 +262,26 @@ export function createTwoClientSmokePort(role: TwoClientSmokeRole): {
         if (current.status !== 200 && current.status !== 404) {
           throw new Error('The two-client native fixture rejected the exact Pod preflight.');
         }
-        finalizationCounter += 1;
-        // The two installed clients share one worker authority. Keep the
-        // deterministic smoke IDs unique across clients as well as across
-        // repeated Stop calls within one client.
-        const clientNamespace = role === 'A' ? '1' : '2';
-        const finalizationId = `70000000-0000-4000-8000-${clientNamespace}${String(finalizationCounter).padStart(11, '0')}`;
-        const finalized = await exchange({
-          operation: 'studio_finalize',
-          request_id: input.stopRequestId,
-          session_id: input.sessionId,
-          pod_id: input.podId,
-          finalization_id: finalizationId,
-        });
-        if (finalized.status !== 200) {
-          throw new Error('The two-client native fixture rejected the worker finalization.');
+        // A direct Stop never created a worker stop request, so there is
+        // nothing to finalize. Native skips the same socket; this port has to
+        // match it or the smoke exercises a path the product no longer takes.
+        if (!input.direct) {
+          finalizationCounter += 1;
+          // The two installed clients share one worker authority. Keep the
+          // deterministic smoke IDs unique across clients as well as across
+          // repeated Stop calls within one client.
+          const clientNamespace = role === 'A' ? '1' : '2';
+          const finalizationId = `70000000-0000-4000-8000-${clientNamespace}${String(finalizationCounter).padStart(11, '0')}`;
+          const finalized = await exchange({
+            operation: 'studio_finalize',
+            request_id: input.stopRequestId,
+            session_id: input.sessionId,
+            pod_id: input.podId,
+            finalization_id: finalizationId,
+          });
+          if (finalized.status !== 200) {
+            throw new Error('The two-client native fixture rejected the worker finalization.');
+          }
         }
         const deleted = await exchange({ operation: 'runpod_delete', pod_id: input.podId });
         if (deleted.status !== 204 && deleted.status !== 404) {

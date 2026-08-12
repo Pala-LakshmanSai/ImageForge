@@ -1127,9 +1127,13 @@ jobs:
           trap cleanup EXIT
           hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" "$dmg_path" >/dev/null
           mounted=1
-          app_path="$(find "$mount_dir" -maxdepth 2 -type d -name 'ImageForge.app' -print | head -n 1)"
+          app_path="$(find "$mount_dir" -maxdepth 4 -type d -name 'ImageForge.app' -print | head -n 1)"
           if [ -z "$app_path" ]; then
             echo 'The selector performance DMG did not contain ImageForge.app.' >&2
+            echo "Mounted DMG: $dmg_path" >&2
+            echo 'Mount contents:' >&2
+            ls -la "$mount_dir" >&2
+            find "$mount_dir" -maxdepth 4 -name '*.app' -print >&2 || true
             exit 1
           fi
           installed_app="$install_root/ImageForge.app"

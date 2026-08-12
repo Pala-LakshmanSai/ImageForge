@@ -10,10 +10,10 @@ const WORKER_SERVICE = "imageforge-worker";
 // a mismatch is rejected as `api_response_invalid`, which the lifecycle latches
 // into a terminal `error` phase, so a stale value here bricks a healthy Pod.
 // src/adapters/workerHealthContract.test.ts pins the two together.
-const WORKER_VERSION = "0.1.7";
-const MODEL_ID = "black-forest-labs/FLUX.2-klein-4B";
-const MODEL_REVISION = "e7b7dc27f91deacad38e78976d1f2b499d76a294";
-const MODEL_PRECISION = "bfloat16";
+const WORKER_VERSION = "0.2.0";
+const MODEL_ID = "Comfy-Org/Mage-Flow";
+const MODEL_REVISION = "d8c99241f6fa80fbd453014234af2bf337ea21e6";
+const MODEL_PRECISION = "int8-convrot";
 
 function healthAborted(): RunPodClientError {
   return new RunPodClientError({

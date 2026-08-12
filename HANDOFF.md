@@ -7,7 +7,7 @@ before touching anything. Everything below was measured, not guessed.
 
 ImageForge is a Tauri 2 desktop app (macOS/Windows) at `/Volumes/ESD-USB/ImageForge`.
 It drives **one** RunPod GPU pod running a Python/FastAPI worker that generates
-300–450 images per batch with `black-forest-labs/FLUX.2-klein-4B` (BF16, 4 steps,
+300–450 images per batch with `Comfy-Org/Mage-Flow` (BF16, 4 steps,
 guidance 1.0) and streams the finished JPEGs down to the user's Mac while
 generation continues.
 

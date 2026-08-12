@@ -19,7 +19,7 @@
     "minRamPerGpuGb": 16
   },
   "benchmarkContract": {
-    "model": "black-forest-labs/FLUX.2-klein-4B",
+    "model": "Comfy-Org/Mage-Flow",
     "modelRevision": "replace-with-pinned-model-revision",
     "softwareImage": "ghcr.io/imageforge/worker@sha256:0000000000000000000000000000000000000000000000000000000000000000",
     "precision": "BF16",

@@ -134,7 +134,7 @@
         "jpegQuality"
       ],
       "properties": {
-        "model": { "const": "black-forest-labs/FLUX.2-klein-4B" },
+        "model": { "const": "Comfy-Org/Mage-Flow" },
         "modelRevision": { "type": "string", "minLength": 1 },
         "softwareImage": {
           "type": "string",
