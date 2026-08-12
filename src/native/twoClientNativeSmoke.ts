@@ -263,6 +263,13 @@ async function runRole(
       outcome?.type === 'stop-complete',
       `A direct Stop did not complete: ${JSON.stringify(outcome).slice(0, 160)}`,
     );
+    // A Pod reported as already stopped never reaches the provider delete, so
+    // the guarded-delete evidence would be missing for a reason the checkpoint
+    // alone cannot express.
+    invariant(
+      outcome.alreadyStopped === false,
+      `A direct Stop reported the Pod was already stopped`,
+    );
   }
   await controls.checkpoint('direct_stop_a');
   if (role === 'B') await runtime.observe(readyState(FIRST_POD_ID));
@@ -310,6 +317,13 @@ async function runRole(
     invariant(
       outcome?.type === 'stop-complete',
       `B direct Stop did not complete: ${JSON.stringify(outcome).slice(0, 160)}`,
+    );
+    // A Pod reported as already stopped never reaches the provider delete, so
+    // the guarded-delete evidence would be missing for a reason the checkpoint
+    // alone cannot express.
+    invariant(
+      outcome.alreadyStopped === false,
+      `B direct Stop reported the Pod was already stopped`,
     );
   }
   await controls.checkpoint('direct_stop_b');
