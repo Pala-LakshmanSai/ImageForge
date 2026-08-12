@@ -1139,7 +1139,17 @@ export class NativeTwoClientSmokeAuthority {
         );
         break;
       case 'veto_done':
-        requireState(this.evidence.activeVetoB && this.deletes.length === 0, 'active_veto_missing');
+        // Stop no longer creates a worker stop request. The editors coordinate
+        // outside the app, so the only surviving guard is a batch that is
+        // actually generating, and the client enforces it from the status read
+        // rather than by asking a peer. The evidence is therefore that B saw
+        // the active batch and destroyed nothing; the client-side smoke asserts
+        // that B also surfaced the stop-blocked outcome.
+        requireState(
+          this.evidence.initialBusy.has('B') && this.deletes.length === 0,
+          'active_veto_missing',
+        );
+        this.evidence.activeVetoB = true;
         break;
       case 'release_initial_batch':
         requireState(this.activeBatch?.batchId === INITIAL_BATCH_ID, 'initial_batch_missing');
