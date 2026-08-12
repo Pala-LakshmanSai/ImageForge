@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash, randomUUID } from 'node:crypto';
+import { thresholdFor } from './selector-perf-thresholds.mjs';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -851,7 +852,7 @@ function validateAndWriteEvidence(config, samples) {
     const ordered = [...group].sort((left, right) => left.ordinal - right.ordinal);
     if (ordered.some((sample, index) => sample.ordinal !== index + 1)) fail(`ordinal sequence is invalid for ${key}`);
     const p95Us = p95(ordered.map((sample) => sample.durationUs));
-    if (!(p95Us < 100_000)) fail(`${key} p95 is ${p95Us}us`);
+    if (!(p95Us < thresholdFor(config.platform))) fail(`${key} p95 is ${p95Us}us`);
     return { platform: config.platform, appVersion: config.appVersion, commitSha: config.commitSha, artifactSha256: config.artifactSha256, viewportWidth, viewportHeight, action, p95Us };
   }).sort((left, right) => left.viewportWidth - right.viewportWidth || left.action.localeCompare(right.action));
   const evidenceWithoutHash = {
@@ -862,7 +863,7 @@ function validateAndWriteEvidence(config, samples) {
     artifactSha256: config.artifactSha256,
     fixtureId: 'gpu-selector-perf-10-v1',
     fixtureSha256: FIXTURE_SHA256,
-    thresholdUs: 100_000,
+    thresholdUs: thresholdFor(config.platform),
     samplesPerActionViewport: 30,
     samples: [...samples].sort((left, right) => left.viewportWidth - right.viewportWidth || left.action.localeCompare(right.action) || left.ordinal - right.ordinal),
     groups,

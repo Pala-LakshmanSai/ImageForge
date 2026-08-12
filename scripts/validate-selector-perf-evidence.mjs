@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
+import { thresholdFor } from './selector-perf-thresholds.mjs';
 import { createReadStream, lstatSync, readFileSync } from 'node:fs';
 import { relative, resolve, sep } from 'node:path';
 
@@ -89,7 +90,7 @@ async function main() {
   ensureNoSymlink(config.artifact);
   const evidence = JSON.parse(readFileSync(config.evidence, 'utf8'));
   keys(evidence, ['schemaVersion', 'platform', 'appVersion', 'commitSha', 'artifactSha256', 'fixtureId', 'fixtureSha256', 'thresholdUs', 'samplesPerActionViewport', 'samples', 'groups', 'evidenceSha256'], 'evidence');
-  if (evidence.schemaVersion !== 1 || evidence.platform !== config.platform || evidence.appVersion !== config.version || evidence.commitSha !== config.commit || evidence.fixtureId !== 'gpu-selector-perf-10-v1' || evidence.fixtureSha256 !== FIXTURE_SHA256 || evidence.thresholdUs !== 100_000 || evidence.samplesPerActionViewport !== 30 || !SHA256.test(evidence.artifactSha256) || evidence.artifactSha256 !== await hashFile(config.artifact)) fail('top-level build, fixture, threshold, or artifact binding mismatch');
+  if (evidence.schemaVersion !== 1 || evidence.platform !== config.platform || evidence.appVersion !== config.version || evidence.commitSha !== config.commit || evidence.fixtureId !== 'gpu-selector-perf-10-v1' || evidence.fixtureSha256 !== FIXTURE_SHA256 || evidence.thresholdUs !== thresholdFor(config.platform) || evidence.samplesPerActionViewport !== 30 || !SHA256.test(evidence.artifactSha256) || evidence.artifactSha256 !== await hashFile(config.artifact)) fail('top-level build, fixture, threshold, or artifact binding mismatch');
   const canonicalPath = relative(process.cwd(), config.evidence).split(sep).join('/');
   const expectedPath = `release-evidence/gpu-selector-perf-v1/${config.commit}/${config.version}/${config.platform}/${evidence.artifactSha256}/gpu-selector-perf-10-v1__1280x720__1440x900.json`;
   if (canonicalPath !== expectedPath) fail(`canonical path is ${canonicalPath}, expected ${expectedPath}`);
@@ -107,7 +108,7 @@ async function main() {
   if (groups.size !== 10 || [...groups.values()].some((group) => group.length !== 30)) fail('every viewport/action group must contain 30 samples');
   for (const [key, group] of groups) {
     const ordered = [...group].sort((left, right) => left.ordinal - right.ordinal);
-    if (ordered.some((sample, index) => sample.ordinal !== index + 1) || p95(ordered.map((sample) => sample.durationUs)) >= 100_000) fail(`ordinal or p95 failed for ${key}`);
+    if (ordered.some((sample, index) => sample.ordinal !== index + 1) || p95(ordered.map((sample) => sample.durationUs)) >= thresholdFor(config.platform)) fail(`ordinal or p95 failed for ${key}`);
   }
   const declaredGroups = new Set();
   for (const group of evidence.groups) {
