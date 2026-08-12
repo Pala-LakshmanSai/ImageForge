@@ -169,9 +169,9 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
               <summary><span><Database size={15} /><strong>Advanced connection details</strong></span><ChevronRight size={15} /></summary>
               <dl>
                 <div><dt>Volume region</dt><dd>EU-RO-1 · Europe</dd></div>
-                <div><dt>Network volume</dt><dd>ukh207b26r · EU-RO-1</dd></div>
+                <div><dt>Network volume</dt><dd>kdqerqkwdh · EU-RO-1</dd></div>
                 <div><dt>Worker port</dt><dd>8000 / HTTPS proxy</dd></div>
-                <div><dt>Model path</dt><dd>/workspace/models/flux2-klein</dd></div>
+                <div><dt>Model path</dt><dd>/workspace/models/huggingface</dd></div>
                 <div><dt>Health timeout</dt><dd>12 seconds · 2 misses</dd></div>
                 <div><dt>Diagnostics</dt><dd>Prompt + secret logging off</dd></div>
               </dl>

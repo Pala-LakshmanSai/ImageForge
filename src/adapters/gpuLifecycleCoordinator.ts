@@ -81,7 +81,7 @@ function configFor(profile: StudioProfile, allowSlowEmergency: boolean): RunPodC
       // benchmark profiles are admitted only when recorded against this exact
       // template binding and all other fixed image/model settings.
       softwareImage: IMAGEFORGE_WORKER_IMAGE,
-      precision: 'BF16',
+      precision: 'INT8',
       width: 1280,
       height: 720,
       steps: 4,

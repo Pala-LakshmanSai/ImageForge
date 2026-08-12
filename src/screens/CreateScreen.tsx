@@ -386,7 +386,7 @@ export function CreateScreen({ state, dispatch, adapter, batchStartPending = fal
             <dl className="contract-grid">
               <div><dt>Model</dt><dd>Mage-Flow Turbo 4B</dd></div>
               <div><dt>Output</dt><dd>{ASPECT_RATIOS.find((option) => option.value === state.draft.aspectRatio)?.width} × {ASPECT_RATIOS.find((option) => option.value === state.draft.aspectRatio)?.height} JPEG</dd></div>
-              <div><dt>Precision</dt><dd>BF16</dd></div>
+              <div><dt>Precision</dt><dd>INT8</dd></div>
               <div><dt>Sampling</dt><dd>4 steps · 1.0 guidance</dd></div>
             </dl>
             <div className="aspect-ratio-picker">

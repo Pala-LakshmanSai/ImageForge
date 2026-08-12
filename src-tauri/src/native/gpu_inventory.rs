@@ -43,7 +43,7 @@ const GPU_INVENTORY_EVENT: &str = "gpu-inventory-v1";
 const START_JOURNAL_SCHEMA_VERSION: u8 = 1;
 const MAX_START_JOURNAL_BYTES: u64 = 64 * 1024;
 const IMAGEFORGE_TEMPLATE_ID: &str = "q8sfgixfy2";
-const IMAGEFORGE_NETWORK_VOLUME_ID: &str = "ukh207b26r";
+const IMAGEFORGE_NETWORK_VOLUME_ID: &str = "kdqerqkwdh";
 const IMAGEFORGE_WORKER_IMAGE: &str =
     "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:5606ac29b07f85b831bba1e6aa359d32b99c55027679eb871f0166fa3bd3773e";
 

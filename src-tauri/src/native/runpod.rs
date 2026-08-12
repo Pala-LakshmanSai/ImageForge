@@ -24,7 +24,7 @@ const EMERGENCY_GPU_ID: &str = "NVIDIA RTX 2000 Ada Generation";
 // The renderer may import a profile, but it must not be able to redirect a
 // paid Pod to another template, volume, or worker image.
 const IMAGEFORGE_TEMPLATE_ID: &str = "q8sfgixfy2";
-const IMAGEFORGE_NETWORK_VOLUME_ID: &str = "ukh207b26r";
+const IMAGEFORGE_NETWORK_VOLUME_ID: &str = "kdqerqkwdh";
 const IMAGEFORGE_WORKER_IMAGE: &str =
     "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:5606ac29b07f85b831bba1e6aa359d32b99c55027679eb871f0166fa3bd3773e";
 const IMAGEFORGE_VOLUME_MOUNT_PATH: &str = "/workspace";

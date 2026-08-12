@@ -105,7 +105,7 @@ function runPodPod() {
     gpu: { id: 'NVIDIA GeForce RTX 4090', displayName: 'RTX 4090', count: 1 },
     templateId: 'q8sfgixfy2',
     interruptible: false,
-    networkVolume: { id: 'ukh207b26r', dataCenterId: 'EU-RO-1' },
+    networkVolume: { id: 'kdqerqkwdh', dataCenterId: 'EU-RO-1' },
     volumeMountPath: '/workspace',
     machine: { secureCloud: true, dataCenterId: 'EU-RO-1' },
     ports: ['8000/http'],

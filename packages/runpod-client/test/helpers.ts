@@ -10,7 +10,7 @@ export const benchmarkContract: BenchmarkContract = Object.freeze({
   model: "Comfy-Org/Mage-Flow",
   modelRevision: "0123456789abcdef",
   softwareImage: "ghcr.io/imageforge/worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-  precision: "BF16",
+  precision: "INT8",
   width: 1280,
   height: 720,
   steps: 4,

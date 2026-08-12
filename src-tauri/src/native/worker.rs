@@ -5229,7 +5229,7 @@ mod tests {
             principal_binding_id: "88888888-8888-4888-8888-888888888888".to_owned(),
             server_instance_id: "99999999-9999-4999-8999-999999999999".to_owned(),
             runtime_pod_id: "replacement-pod-1".to_owned(),
-            runtime_volume_id: "ukh207b26r".to_owned(),
+            runtime_volume_id: "kdqerqkwdh".to_owned(),
             runtime_data_center_id: "EU-RO-1".to_owned(),
             data_root_binding_sha256:
                 "1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
@@ -5319,7 +5319,7 @@ mod tests {
             principal_binding_id: "88888888-8888-4888-8888-888888888888".to_owned(),
             server_instance_id: "99999999-9999-4999-8999-999999999999".to_owned(),
             runtime_pod_id: "replacement-pod-1".to_owned(),
-            runtime_volume_id: "ukh207b26r".to_owned(),
+            runtime_volume_id: "kdqerqkwdh".to_owned(),
             runtime_data_center_id: "EU-RO-1".to_owned(),
             data_root_binding_sha256:
                 "1111111111111111111111111111111111111111111111111111111111111111".to_owned(),

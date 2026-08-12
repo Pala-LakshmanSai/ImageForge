@@ -25,7 +25,7 @@ export const EU_RO_ORDINARY_GPUS = [
 // shared-volume gates. Keep them immutable so a normal Start cannot silently
 // fall back to an unpinned worker image or an outdated template.
 export const IMAGEFORGE_TEMPLATE_ID = 'q8sfgixfy2';
-export const IMAGEFORGE_NETWORK_VOLUME_ID = 'ukh207b26r';
+export const IMAGEFORGE_NETWORK_VOLUME_ID = 'kdqerqkwdh';
 export const IMAGEFORGE_WORKER_IMAGE =
   'ghcr.io/pala-lakshmansai/imageforge-worker@sha256:5606ac29b07f85b831bba1e6aa359d32b99c55027679eb871f0166fa3bd3773e';
 
@@ -36,7 +36,7 @@ export const DEFAULT_STUDIO_PROFILE = [
   'data_center: EU-RO-1',
   'gpu_policy: eu-ro-1-approved-v1',
   'worker_port: 8000',
-  'model_preset: flux2-klein-bf16',
+  'model_preset: mageflow-turbo-int8',
 ].join('\n');
 
 export interface PodLifecycleUpdate {
@@ -87,7 +87,7 @@ export interface StudioProfile {
   dataCenter: 'EU-RO-1';
   gpuPolicy: string;
   workerPort: 8000;
-  modelPreset: 'flux2-klein-bf16';
+  modelPreset: 'mageflow-turbo-int8';
 }
 
 export interface ImageForgeAdapter {
@@ -172,7 +172,7 @@ export function parseStudioProfile(source: string): StudioProfile | null {
     !safeId.test(gpuPolicy) ||
     entries.get('data_center') !== 'EU-RO-1' ||
     entries.get('worker_port') !== '8000' ||
-    entries.get('model_preset') !== 'flux2-klein-bf16'
+    entries.get('model_preset') !== 'mageflow-turbo-int8'
   ) return null;
   return {
     profile,
@@ -181,7 +181,7 @@ export function parseStudioProfile(source: string): StudioProfile | null {
     dataCenter: 'EU-RO-1',
     gpuPolicy,
     workerPort: 8000,
-    modelPreset: 'flux2-klein-bf16',
+    modelPreset: 'mageflow-turbo-int8',
   };
 }
 

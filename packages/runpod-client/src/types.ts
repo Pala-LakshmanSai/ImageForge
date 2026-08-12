@@ -94,7 +94,7 @@ export interface BenchmarkContract {
   readonly model: "Comfy-Org/Mage-Flow";
   readonly modelRevision: string;
   readonly softwareImage: string;
-  readonly precision: "BF16";
+  readonly precision: "INT8";
   readonly width: 1280;
   readonly height: 720;
   readonly steps: 4;

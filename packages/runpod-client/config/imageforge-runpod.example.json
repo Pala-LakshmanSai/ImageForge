@@ -20,9 +20,9 @@
   },
   "benchmarkContract": {
     "model": "Comfy-Org/Mage-Flow",
-    "modelRevision": "replace-with-pinned-model-revision",
+    "modelRevision": "d8c99241f6fa80fbd453014234af2bf337ea21e6",
     "softwareImage": "ghcr.io/imageforge/worker@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-    "precision": "BF16",
+    "precision": "INT8",
     "width": 1280,
     "height": 720,
     "steps": 4,

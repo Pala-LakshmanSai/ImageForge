@@ -191,7 +191,7 @@ function validateBenchmarkContract(value: unknown, field: string): BenchmarkCont
   const contract = requireRecord(value, field);
   rejectUnknownKeys(contract, BENCHMARK_CONTRACT_KEYS, field);
   if (contract.model !== "Comfy-Org/Mage-Flow") {
-    configurationError(`${field}.model must use FLUX.2 Klein 4B.`, `${field}.model`);
+    configurationError(`${field}.model must be Comfy-Org/Mage-Flow.`, `${field}.model`);
   }
   const modelRevision = requireString(contract.modelRevision, `${field}.modelRevision`);
   if (modelRevision.trim().length === 0) {
@@ -202,7 +202,7 @@ function validateBenchmarkContract(value: unknown, field: string): BenchmarkCont
     configurationError(`${field}.softwareImage must pin a container image.`, `${field}.softwareImage`);
   }
   if (
-    contract.precision !== "BF16" ||
+    contract.precision !== "INT8" ||
     contract.width !== 1280 ||
     contract.height !== 720 ||
     contract.steps !== 4 ||
@@ -210,7 +210,7 @@ function validateBenchmarkContract(value: unknown, field: string): BenchmarkCont
     contract.jpegQuality !== 95
   ) {
     configurationError(
-      `${field} must match the ImageForge BF16 1280x720, four-step, guidance 1.0, JPEG 95 contract.`,
+      `${field} must match the ImageForge INT8 1280x720, four-step, guidance 1.0, JPEG 95 contract.`,
       field,
     );
   }
@@ -218,7 +218,7 @@ function validateBenchmarkContract(value: unknown, field: string): BenchmarkCont
     model: "Comfy-Org/Mage-Flow",
     modelRevision,
     softwareImage,
-    precision: "BF16",
+    precision: "INT8",
     width: 1280,
     height: 720,
     steps: 4,

@@ -23,7 +23,7 @@
         "modelRevision": { "type": "string", "minLength": 1, "maxLength": 128 },
         "workerImageDigest": { "type": "string", "maxLength": 512, "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[1-9][0-9]{0,4})?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$" },
         "templateId": { "type": "string", "minLength": 1, "maxLength": 191 },
-        "precision": { "const": "bf16" }, "width": { "const": 1280 }, "height": { "const": 720 },
+        "precision": { "const": "int8" }, "width": { "const": 1280 }, "height": { "const": 720 },
         "steps": { "const": 4 }, "guidanceMilli": { "const": 1000 }, "jpegQuality": { "const": 95 },
         "referenceMode": { "const": "none" }, "promptFixtureId": { "const": "imageforge-gpu-benchmark-30-v1" },
         "promptFixtureSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },

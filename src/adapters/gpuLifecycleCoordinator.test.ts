@@ -272,7 +272,7 @@ describe('GpuLifecycleCoordinator', () => {
     const snapshot = await coordinator.start(DEFAULT_STUDIO_PROFILE, 450, false);
 
     expect(snapshot.phase).toBe('ready');
-    expect(port.bindProfile).toHaveBeenCalledWith('q8sfgixfy2', 'ukh207b26r');
+    expect(port.bindProfile).toHaveBeenCalledWith('q8sfgixfy2', 'kdqerqkwdh');
     expect(port.authorizeStart).toHaveBeenCalledWith(false);
     expect(port.clearStartAuthorization).toHaveBeenCalledOnce();
     expect(providers[0].calls.create).toHaveLength(0);
@@ -650,14 +650,14 @@ describe('GpuLifecycleCoordinator', () => {
     expect(() => coordinator.resolveAmbiguousStart()).not.toThrow();
   });
 
-  it('pins the portable BF16 contract and keeps emergency capacity opt-in', () => {
+  it('pins the portable INT8 contract and keeps emergency capacity opt-in', () => {
     const normal = productionRunPodConfig(DEFAULT_STUDIO_PROFILE, false);
     const emergency = productionRunPodConfig(DEFAULT_STUDIO_PROFILE, true);
     expect(normal.benchmarkContract).toMatchObject({
       model: 'Comfy-Org/Mage-Flow',
       modelRevision: 'd8c99241f6fa80fbd453014234af2bf337ea21e6',
       softwareImage: IMAGEFORGE_WORKER_IMAGE,
-      precision: 'BF16',
+      precision: 'INT8',
       width: 1280,
       height: 720,
       steps: 4,

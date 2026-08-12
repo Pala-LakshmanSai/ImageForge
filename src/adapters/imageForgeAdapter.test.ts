@@ -6,11 +6,11 @@ describe('studio profile parser', () => {
     expect(parseStudioProfile(DEFAULT_STUDIO_PROFILE)).toEqual({
       profile: 'imageforge-studio-v1',
       templateId: 'q8sfgixfy2',
-      networkVolumeId: 'ukh207b26r',
+      networkVolumeId: 'kdqerqkwdh',
       dataCenter: 'EU-RO-1',
       gpuPolicy: 'eu-ro-1-approved-v1',
       workerPort: 8000,
-      modelPreset: 'flux2-klein-bf16',
+      modelPreset: 'mageflow-turbo-int8',
     });
   });
 

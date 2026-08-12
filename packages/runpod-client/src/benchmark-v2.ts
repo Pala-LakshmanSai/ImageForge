@@ -11,7 +11,7 @@ export interface GpuBenchmarkContractV2 {
   readonly modelRevision: string;
   readonly workerImageDigest: string;
   readonly templateId: string;
-  readonly precision: "bf16";
+  readonly precision: "int8";
   readonly width: 1280;
   readonly height: 720;
   readonly steps: 4;
@@ -114,7 +114,7 @@ export function parseGpuBenchmarkContractV2(value: unknown): GpuBenchmarkContrac
     typeof record.modelRevision !== "string" || record.modelRevision.length < 1 || record.modelRevision.length > 128 ||
     !isLowercaseRegistryImageDigestV1(record.workerImageDigest) ||
     typeof record.templateId !== "string" || record.templateId.length < 1 || record.templateId.length > 191 ||
-    record.precision !== "bf16" || record.width !== 1280 || record.height !== 720 ||
+    record.precision !== "int8" || record.width !== 1280 || record.height !== 720 ||
     record.steps !== 4 || record.guidanceMilli !== 1000 || record.jpegQuality !== 95 ||
     record.referenceMode !== "none" ||
     record.promptFixtureId !== "imageforge-gpu-benchmark-30-v1" ||
