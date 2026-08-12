@@ -28,8 +28,8 @@ of scope.
 
 | Resource | Value |
 | --- | --- |
-| Volume | `imageforge-mageflow-50gb` (`<VOLUME_ID>`), 50 GB, EU-RO-1 |
-| Spike Pod | RunPod stock PyTorch image, one RTX 4090, volume at `/workspace` |
+| Volume | `imageforge-mageflow-50gb` (`8zupqv4zrm`), 50 GB, EU-RO-1 |
+| Spike Pod | `pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime`, one RTX 4090, volume at `/workspace`. The 25 GB `runpod/pytorch` image stalled placement repeatedly; the smaller image starts in about 90 s |
 | Staging worker image | `<DIGEST>` (worker `0.2.0-mageflow-rc1`) |
 
 Filled in as each phase runs. A row still holding a placeholder means that
@@ -80,7 +80,8 @@ positioned by its publisher as a compromise, not as a free win.
 Option 1 preserves the current architecture and the reference quality. Options
 2 and 3 trade a large rewrite for public, ungated weights.
 
-_Awaiting the studio owner's decision before Phase 1 begins._
+Decision: **option 2, headless ComfyUI with INT8**, with BF16 kept as the
+quality reference and the fallback. Results below.
 
 ## Generation results, official ComfyUI workflow
 
