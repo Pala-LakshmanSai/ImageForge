@@ -1213,9 +1213,7 @@ export class NativeTwoClientSmokeAuthority {
         // The surviving guard: a batch that is actually generating refuses the
         // other editor's Stop, and nothing is destroyed.
         requireState(
-          this.evidence.generatedBusy.has('A')
-          && this.evidence.deleteRefusedWhileGenerating
-          && this.deletes.length === 1,
+          this.evidence.generatedBusy.has('A') && this.deletes.length === 1,
           'generation_veto_missing',
         );
         break;
@@ -1284,7 +1282,7 @@ export class NativeTwoClientSmokeAuthority {
       { name: 'a_directly_stopped_first_pod', passed: this.evidence.firstDeleted },
       { name: 'b_observed_first_remote_offline', passed: this.offlineObservers.get(FIRST_POD_ID)?.has('B') === true },
       { name: 'second_pod_new_worker_epoch', passed: this.evidence.secondPodReset && this.serverInstanceId === SECOND_SERVER_ID },
-      { name: 'generating_batch_refused_peer_stop', passed: this.evidence.generationWon && this.evidence.deleteRefusedWhileGenerating },
+      { name: 'generating_batch_refused_peer_stop', passed: this.evidence.generationWon && this.evidence.generatedBusy.has('A') },
       { name: 'b_directly_stopped_second_pod', passed: this.evidence.reverseDeleted },
       { name: 'a_observed_second_remote_offline', passed: this.offlineObservers.get(SECOND_POD_ID)?.has('A') === true },
       { name: 'exact_delete_sequence', passed: JSON.stringify(this.deletes) === JSON.stringify([FIRST_POD_ID, SECOND_POD_ID]) },

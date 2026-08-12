@@ -327,7 +327,18 @@ export async function runTwoClientNativeSmoke(
     const detail = await runRole(role, runtime, controls);
     await invoke('native_smoke_result', { passed: true, detail: detail.slice(0, 240) });
   } catch (error) {
-    const detail = error instanceof Error ? error.message : 'Two-client installed smoke failed.';
+    // A rejected Tauri command surfaces as a plain payload rather than an
+    // Error, and reporting that as a generic sentence hides the only useful
+    // diagnostic the CI run will ever produce.
+    const detail = error instanceof Error
+      ? error.message
+      : `non-Error failure: ${(() => {
+        try {
+          return JSON.stringify(error) ?? String(error);
+        } catch {
+          return String(error);
+        }
+      })()}`;
     await invoke('native_smoke_result', { passed: false, detail: `${role}: ${detail}`.slice(0, 240) });
   }
 }
