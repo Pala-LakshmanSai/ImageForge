@@ -4,16 +4,21 @@
 
 **Goal:** Replace FLUX.2 Klein 4B with Microsoft Mage-Flow Turbo (INT8 convrot) as ImageForge's only image model — better faces, prompt adherence and text rendering at a **lower cost per finished image and a faster boot** — with the new model fully proven on a second network volume before any production code changes.
 
-**Success is measured, not asserted.** The migration ships only if, against the FLUX.2 Klein baseline in `docs/QA_LOG.md`:
+**Priority order is fixed: quality first, then boot speed, then cost.** Speed and cost are optimizations applied *within* the set of configurations that already pass the quality bar. No speed or cost result may relax the quality bar.
 
-| Metric | Target |
-| --- | --- |
-| Text rendering, faces, prompt adherence | Strictly better (Task 10 scoring) |
-| Median seconds per image at 1280x720 | No worse; the goal is better |
-| Boot to `phase=ready` | No worse; INT8 reads 4.16 GB instead of 13 GB off the volume |
-| Estimated micro-USD for a 450-image batch | Lower, using the existing `RUNPOD_OPERATIONS.md` formula |
+**Success is measured, not asserted.** Against the FLUX.2 Klein baseline in `docs/QA_LOG.md`:
 
-The last row is the one that matters commercially: hourly price alone is not the cost. `estimated_micro_usd = p * (boot_ms * 1000 + s * n) / 3_600_000_000`. A slower, cheaper GPU wins whenever `p * s` is smaller.
+| Rank | Metric | Target | Kind |
+| --- | --- | --- | --- |
+| 1 | Text rendering, faces, prompt adherence | Strictly better (Task 10 scoring) | **Hard gate** |
+| 2 | INT8 output quality vs the same model in BF16 | Indistinguishable at the Task 10 scoring granularity | **Hard gate** |
+| 3 | Boot to `phase=ready` | No worse; INT8 reads 4.16 GB instead of roughly 13 GB off the volume | Optimize |
+| 4 | Median seconds per image at 1280x720 | No worse; the goal is better | Optimize |
+| 5 | Estimated micro-USD for a 450-image batch | Lower | Optimize |
+
+Rank 2 exists because INT8 is a lossy quantization of the BF16 checkpoint, and it is exactly the kind of loss that shows up first in small text glyphs, hands and faces — the failure modes that motivated this migration. If INT8 measurably degrades any of them, the migration proceeds on the **BF16 transformer** (8.23 GB, higher VRAM floor, slower boot) and the INT8 file is abandoned. Quality is not traded for the smaller file.
+
+Ranks 3-5 are chosen among passing configurations only. Hourly price is not the cost: `estimated_micro_usd = p * (boot_ms * 1000 + s * n) / 3_600_000_000`, so a slower, cheaper GPU wins whenever `p * s` is smaller — but only if it clears ranks 1 and 2 first.
 
 **Architecture:** Production ImageForge is untouched through Phases 0–2. A second EU-RO-1 network volume (`imageforge-mageflow-50gb`) holds the new weights, and a throwaway staging Pod proves loading, VRAM, throughput and quality. The worker gains a second inference adapter selected by `IMAGEFORGE_INFERENCE_BACKEND=mageflow`, so both models coexist in one image and the cutover is a constants/contract change plus a template repin — production downtime is one Pod restart.
 
@@ -1037,9 +1042,13 @@ quality gate in Task 10.
 
 Compile the transformer once and re-measure. It costs 60-120 s of boot and
 typically returns 10-20% per image, so it pays off above roughly 200 images and
-loses on short batches. Record both numbers and state the break-even count. Do
-not enable it in the adapter unless the measured break-even sits below 300
-images.
+loses on short batches. Record both numbers and state the break-even count.
+
+Two conditions before it enters the adapter: the measured break-even sits below
+300 images, **and** compiled output for a fixed seed is visually identical to
+uncompiled output. Compilation changes kernel selection and therefore numerics;
+under a quality-first priority that is a reason to leave it off, not a 15% gain
+to accept quietly. Generate the four spike prompts both ways and compare.
 
 - [ ] **Step 7: Commit**
 
@@ -1057,20 +1066,30 @@ git commit -m "docs: record Mage-Flow boot, throughput and cost-per-batch eviden
 
 Use an ordinary production session with the same seeds and aspect ratio. This is the only Phase 2 step that touches production, and it is read-only generation — no code, template, or volume change.
 
-- [ ] **Step 2: Score both sets**
+- [ ] **Step 2: Score all three sets**
 
-For each of the four prompt categories, count images that are usable without regeneration. Record the counts as a table: category, FLUX usable/20, Mage-Flow usable/20.
+Generate the same 20 prompts and seeds a third time with the **BF16** transformer on the staging Pod, so the quantization cost is measured rather than assumed.
+
+For each of the four prompt categories, count images that are usable without regeneration. Record the counts as a table: category, FLUX usable/20, Mage-Flow INT8 usable/20, Mage-Flow BF16 usable/20.
+
+Then inspect the INT8 and BF16 images pairwise at 100% zoom, same seed, and note any category where INT8 is visibly worse — small glyph shapes, finger count and joints, and eye/teeth structure are where INT8 damage appears first. A single clearly-worse category is enough to fail rank 2 and move the migration to BF16 weights.
 
 - [ ] **Step 3: Decide go / no-go**
 
-Go requires all four of:
+Apply the criteria in priority order. The first two are hard gates; a failure there ends the migration regardless of how good the speed and cost numbers look.
 
-1. Mage-Flow at least as good on faces and clearly better on text and adherence.
-2. Median seconds per image, at the winning batch size from Task 9b, no worse than FLUX.
+1. **Quality vs FLUX** — at least as good on faces, clearly better on text and adherence. Fail here and the migration is dead.
+2. **INT8 vs BF16 quality** — indistinguishable at this scoring granularity. Fail here and the migration continues on BF16 weights; re-run Task 9b's boot and cost numbers for the BF16 configuration before proceeding.
+
+Then, among configurations that passed 1 and 2, prefer in this order:
+
 3. Boot to ready no worse than FLUX.
-4. Estimated micro-USD per 450-image batch **lower** than FLUX on its current tier.
+4. Median seconds per image, at the winning batch size from Task 9b, no worse than FLUX.
+5. Lowest estimated micro-USD per 450-image batch.
 
-Criterion 4 is the point of the migration alongside quality; a quality win that costs more per batch is a no-go, not a compromise. Write the decision and the numbers behind it into `docs/MAGEFLOW_STAGING.md`.
+A configuration that is cheaper or faster but scores worse on 1 or 2 is not a trade-off to weigh — it is rejected. If the only quality-passing configuration costs more per batch than FLUX does today, record that plainly and ship it anyway: the migration exists because the current images are unusable, and a usable image at a higher unit cost beats a cheap one that gets regenerated.
+
+Write the decision and the numbers behind it into `docs/MAGEFLOW_STAGING.md`.
 
 - [ ] **Step 4: Stop the staging Pod**
 
