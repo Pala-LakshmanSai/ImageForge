@@ -256,7 +256,14 @@ async function runRole(
   await controls.checkpoint('idle_after_release');
 
   await heartbeat(runtime, FIRST_POD_ID);
-  if (role === 'A') await runtime.requestGpuStop(readyState(FIRST_POD_ID));
+  if (role === 'A') {
+    await runtime.requestGpuStop(readyState(FIRST_POD_ID));
+    const outcome = events.at(-1);
+    invariant(
+      outcome?.type === 'stop-complete',
+      `A direct Stop did not complete: ${JSON.stringify(outcome).slice(0, 160)}`,
+    );
+  }
   await controls.checkpoint('direct_stop_a');
   if (role === 'B') await runtime.observe(readyState(FIRST_POD_ID));
   invariant(runtime.getAuthoritativePodState?.()?.phase === 'offline', `${role} did not converge Offline after A Stop`);
@@ -297,7 +304,14 @@ async function runRole(
   );
 
   await heartbeat(runtime, SECOND_POD_ID);
-  if (role === 'B') await runtime.requestGpuStop(readyState(SECOND_POD_ID));
+  if (role === 'B') {
+    await runtime.requestGpuStop(readyState(SECOND_POD_ID));
+    const outcome = events.at(-1);
+    invariant(
+      outcome?.type === 'stop-complete',
+      `B direct Stop did not complete: ${JSON.stringify(outcome).slice(0, 160)}`,
+    );
+  }
   await controls.checkpoint('direct_stop_b');
   if (role === 'A') await runtime.observe(readyState(SECOND_POD_ID));
   invariant(runtime.getAuthoritativePodState?.()?.phase === 'offline', `${role} did not converge Offline after B Stop`);
