@@ -126,7 +126,7 @@ function workerHealth() {
     model: {
       id: 'Comfy-Org/Mage-Flow',
       revision: 'd8c99241f6fa80fbd453014234af2bf337ea21e6',
-      precision: 'bfloat16',
+      precision: 'int8-convrot',
       status: 'ready',
     },
     gpu: {
