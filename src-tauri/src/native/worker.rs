@@ -27,7 +27,7 @@ const MAX_STUDIO_TIMESTAMP_BYTES: usize = 32;
 const MAX_STUDIO_TTL_SECONDS: u64 = 300;
 const MAX_JSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const IMAGEFORGE_WORKER_IMAGE_DIGEST: &str =
-    "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:38ed950746e98a65ae13eee35583408dc367e268d91697b49538e5a623efa5a4";
+    "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:5606ac29b07f85b831bba1e6aa359d32b99c55027679eb871f0166fa3bd3773e";
 const IMAGEFORGE_MODEL_ID: &str = "Comfy-Org/Mage-Flow";
 const IMAGEFORGE_MODEL_REVISION: &str = "d8c99241f6fa80fbd453014234af2bf337ea21e6";
 const WORKER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);

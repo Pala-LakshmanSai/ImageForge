@@ -38,7 +38,7 @@ Current immutable worker release evidence (published 2026-08-07):
 
 - Repository: `Pala-LakshmanSai/imageforge-worker`
 - Source commit: `26f7566033f1994e15ec1e16ef6312d009ed98fe`
-- Image: `ghcr.io/pala-lakshmansai/imageforge-worker@sha256:38ed950746e98a65ae13eee35583408dc367e268d91697b49538e5a623efa5a4`
+- Image: `ghcr.io/pala-lakshmansai/imageforge-worker@sha256:5606ac29b07f85b831bba1e6aa359d32b99c55027679eb871f0166fa3bd3773e`
 - Worker version: `0.1.7`
 - Architecture: `linux/amd64`
 

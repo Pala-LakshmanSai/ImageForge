@@ -28,16 +28,6 @@ COMFY_FILES = (
     "vae/mage_flow_vae_bf16.safetensors",
 )
 
-DIFFUSERS_REPO = "microsoft/Mage-Flow-Turbo"
-# The transformer is deliberately excluded: the INT8 single file above replaces
-# it, and the BF16 folder would otherwise duplicate 8.23 GB on the volume.
-DIFFUSERS_ALLOW_PATTERNS = (
-    "model_index.json",
-    "scheduler/*",
-    "text_encoder/config.json",
-    "tokenizer/*",
-    "vae/config.json",
-)
 
 
 def main() -> None:
@@ -71,7 +61,7 @@ def main() -> None:
         wanted.append(BF16_TRANSFORMER_FILE)
 
     with _hub_download_enabled():
-        from huggingface_hub import hf_hub_download, snapshot_download
+        from huggingface_hub import hf_hub_download
 
         for relative_name in wanted:
             path = hf_hub_download(
@@ -82,17 +72,6 @@ def main() -> None:
             )
             print(f"prepared {relative_name} at {path}")
 
-        snapshot_path = snapshot_download(
-            repo_id=DIFFUSERS_REPO,
-            revision=arguments.revision,
-            cache_dir=str(arguments.cache_dir),
-            allow_patterns=list(DIFFUSERS_ALLOW_PATTERNS),
-        )
-        print(f"prepared the Diffusers scaffolding at {snapshot_path}")
-
-    missing = [name for name in ("model_index.json",) if not (Path(snapshot_path) / name).is_file()]
-    if missing:
-        raise SystemExit("the Mage-Flow Diffusers scaffolding is incomplete")
     print("Mage-Flow Turbo preparation complete")
 
 

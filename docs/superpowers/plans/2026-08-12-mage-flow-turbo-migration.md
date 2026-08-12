@@ -1328,7 +1328,7 @@ git commit -m "docs: record the Mage-Flow Turbo production cutover"
 
 - [ ] **Step 1: Document the rollback**
 
-Add a "Rolling back to FLUX.2 Klein" section to `docs/RECOVERY.md`: repin the template to the previous digest `sha256:38ed950746e98a65ae13eee35583408dc367e268d91697b49538e5a623efa5a4` with `IMAGEFORGE_INFERENCE_BACKEND=flux`, and have both editors install the previous desktop build. State that the FLUX snapshot remains on the production volume for this purpose and give the exact date after which it may be deleted.
+Add a "Rolling back to FLUX.2 Klein" section to `docs/RECOVERY.md`: repin the template to the previous digest `sha256:5606ac29b07f85b831bba1e6aa359d32b99c55027679eb871f0166fa3bd3773e` with `IMAGEFORGE_INFERENCE_BACKEND=flux`, and have both editors install the previous desktop build. State that the FLUX snapshot remains on the production volume for this purpose and give the exact date after which it may be deleted.
 
 - [ ] **Step 2: Delete the staging volume**
 
