@@ -148,26 +148,36 @@ image after the batch is committed. The whole reference path still ships and
 still has test coverage against the FLUX profile, so a future reference-capable
 model is a one-flag change.
 
-## Production cutover
-
-The staging volume becomes the production volume. Its 21 GB of weights are
-already in the layout the adapter resolves, so nothing is downloaded again and
-no GPU hour is spent re-staging.
+## Production volume
 
 | | |
 | --- | --- |
-| New production volume | `imageforge-mageflow-50gb` (`8zupqv4zrm`), EU-RO-1 |
-| Previous production volume | `imageforge-prod-50gb` (`ukh207b26r`), holds the FLUX weights |
+| Production volume | `imageforge-prod-50gb` (`kdqerqkwdh`), 50 GB, EU-RO-1 |
+| Weights on it | 13 GB: INT8 ConvRot transformer, Qwen3-VL-4B text encoder, Mage-VAE |
 
-Keep `ukh207b26r` until the first Mage-Flow batch has run in production. It is
-the rollback: repointing the profile and template back at it restores FLUX
-without downloading anything.
+Both earlier volumes, including the one holding the FLUX weights, were deleted
+on 2026-08-12, so there is no no-download rollback. Restoring FLUX now means
+staging its weights again.
 
-Two cleanup items before the first production Pod, both left over from the
-spike: `/workspace/ComfyUI` (the image now ships its own pinned copy) and
-`/workspace/spike`. Neither is read by the worker, and together they are small,
-but leaving a second ComfyUI checkout on the volume invites the wrong one being
-used later.
+The desktop connection profile carries the volume ID, so it has to name
+`kdqerqkwdh` before the app can create a Pod.
+
+## End-to-end verification
+
+The published image `sha256:5606ac29...` was booted against `kdqerqkwdh` and
+reached `ready`, which the worker only reports after ComfyUI starts, the INT8
+weights load, and a warmup image is generated:
+
+```
+15:46:38 warmup loading
+15:47:41 ready  ready
+```
+
+Roughly four minutes from Pod creation to a warm worker on a cold volume.
+
+Pods must be created with `allowedCudaVersions: ["13.0"]`. A Pod placed without
+that constraint landed on a host with a 12.4 driver, and the pinned cu130 wheels
+cannot initialise CUDA there. The desktop app already applies the constraint.
 
 ## Health and throughput on the real worker
 
