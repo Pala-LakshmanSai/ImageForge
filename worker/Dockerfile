@@ -32,6 +32,8 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /opt/imageforge-worker
 
+COPY scripts/verify_comfyui_nodes.py ./verify_comfyui_nodes.py
+
 # Keep the OS and CUDA layers independent of worker source changes so a normal
 # release rebuild reuses the expensive CUDA wheel layer. Installation happens
 # while the image is built, never during normal Pod boot.
@@ -63,13 +65,13 @@ RUN git clone --filter=blob:none https://github.com/comfyanonymous/ComfyUI.git /
     && rm -rf /opt/comfyui/.git \
     && python -m pip install --no-cache-dir \
       'https://download.pytorch.org/whl/cu130/torchvision-0.28.0%2Bcu130-cp311-cp311-manylinux_2_28_x86_64.whl#sha256=67893cf4fb4ace73da60968637b1eb6bbd8cb3226995f12322ec0041fbae98a1' \
-      'https://download.pytorch.org/whl/cu130/torchaudio-2.9.1%2Bcu130-cp311-cp311-manylinux_2_28_x86_64.whl#sha256=1023bb6598fa6312e1990fdc78660f4b4ef128d8942a1f10c5827aea23d6bd7e' \
-    && printf 'torch==2.13.0+cu130\ntorchvision==0.28.0+cu130\ntorchaudio==2.9.1+cu130\n' > /tmp/comfy-constraints.txt \
+    && printf 'torch==2.13.0+cu130\ntorchvision==0.28.0+cu130\n' > /tmp/comfy-constraints.txt \
+    && grep -v '^torchaudio' /opt/comfyui/requirements.txt > /tmp/comfy-requirements.txt \
     && python -m pip install --no-cache-dir --constraint /tmp/comfy-constraints.txt \
-      --requirement /opt/comfyui/requirements.txt \
-    && rm /tmp/comfy-constraints.txt \
+      --requirement /tmp/comfy-requirements.txt \
+    && rm /tmp/comfy-constraints.txt /tmp/comfy-requirements.txt \
     && python -c "import torch; assert torch.__version__.endswith('+cu130'), torch.__version__" \
-    && python -c "import sys; sys.path.insert(0, '/opt/comfyui'); import comfy.options"
+    && python /opt/imageforge-worker/verify_comfyui_nodes.py
 
 COPY pyproject.toml README.md ./
 COPY src ./src
