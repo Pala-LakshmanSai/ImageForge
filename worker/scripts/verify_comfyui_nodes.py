@@ -31,9 +31,16 @@ REQUIRED_NODES = (
 
 def main() -> None:
     sys.path.insert(0, COMFYUI_ROOT)
-    # Image builders have no GPU. ComfyUI reads its device selection from argv
-    # at import time, so --cpu has to be in place before `nodes` is imported.
+
+    # Image builders have no GPU, and ComfyUI picks its device while importing
+    # comfy.model_management. It ignores argv unless argument parsing is enabled
+    # first, which main.py normally does and a direct import does not, so both
+    # steps have to happen before `nodes` is imported.
+    import comfy.options
+
+    comfy.options.enable_args_parsing()
     sys.argv = [sys.argv[0], "--cpu"]
+
     import nodes
 
     import_failed = asyncio.run(
