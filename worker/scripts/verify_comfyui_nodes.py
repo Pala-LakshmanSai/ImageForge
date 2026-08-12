@@ -7,6 +7,9 @@ validation error on a live Pod, after the model had already loaded.
 `torchaudio` is deliberately absent from the image: no build exists for the
 pinned torch, and ComfyUI treats a failed extra-node import as a warning. This
 check also proves that omission costs nothing the worker needs.
+
+It runs on a GPU-less build machine, so it forces ComfyUI onto CPU. That is
+enough to populate the node registry, which is all this verifies.
 """
 
 from __future__ import annotations
@@ -28,6 +31,9 @@ REQUIRED_NODES = (
 
 def main() -> None:
     sys.path.insert(0, COMFYUI_ROOT)
+    # Image builders have no GPU. ComfyUI reads its device selection from argv
+    # at import time, so --cpu has to be in place before `nodes` is imported.
+    sys.argv = [sys.argv[0], "--cpu"]
     import nodes
 
     import_failed = asyncio.run(
