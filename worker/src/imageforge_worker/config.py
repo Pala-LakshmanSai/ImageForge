@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .constants import MAX_GENERATION_ATTEMPTS, MODEL_ID, MODEL_REVISION
+from .model_profiles import supported_backends
 
 _USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 BEARER_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9._~+/\-]+=*$")
@@ -57,8 +58,11 @@ class WorkerSettings:
             raise ValueError("worker credential user IDs must be unique")
         if len({item.token for item in self.credentials}) != len(self.credentials):
             raise ValueError("worker bearer credentials must be unique")
-        if self.inference_backend not in {"flux", "fake"}:
-            raise ValueError("inference backend must be 'flux' or 'fake'")
+        if self.inference_backend not in {*supported_backends(), "fake"}:
+            raise ValueError(
+                "inference backend must be one of "
+                f"{', '.join(sorted({*supported_backends(), 'fake'}))}"
+            )
         if self.inference_backend == "fake" and not self.allow_fake_inference:
             raise ValueError("fake inference requires IMAGEFORGE_ALLOW_FAKE_INFERENCE=1")
         if self.max_generation_attempts != MAX_GENERATION_ATTEMPTS:
