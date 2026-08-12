@@ -2,7 +2,18 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace FLUX.2 Klein 4B with Microsoft Mage-Flow Turbo (INT8 convrot) as ImageForge's only image model, with the new model fully proven on a second network volume before any production code changes.
+**Goal:** Replace FLUX.2 Klein 4B with Microsoft Mage-Flow Turbo (INT8 convrot) as ImageForge's only image model — better faces, prompt adherence and text rendering at a **lower cost per finished image and a faster boot** — with the new model fully proven on a second network volume before any production code changes.
+
+**Success is measured, not asserted.** The migration ships only if, against the FLUX.2 Klein baseline in `docs/QA_LOG.md`:
+
+| Metric | Target |
+| --- | --- |
+| Text rendering, faces, prompt adherence | Strictly better (Task 10 scoring) |
+| Median seconds per image at 1280x720 | No worse; the goal is better |
+| Boot to `phase=ready` | No worse; INT8 reads 4.16 GB instead of 13 GB off the volume |
+| Estimated micro-USD for a 450-image batch | Lower, using the existing `RUNPOD_OPERATIONS.md` formula |
+
+The last row is the one that matters commercially: hourly price alone is not the cost. `estimated_micro_usd = p * (boot_ms * 1000 + s * n) / 3_600_000_000`. A slower, cheaper GPU wins whenever `p * s` is smaller.
 
 **Architecture:** Production ImageForge is untouched through Phases 0–2. A second EU-RO-1 network volume (`imageforge-mageflow-50gb`) holds the new weights, and a throwaway staging Pod proves loading, VRAM, throughput and quality. The worker gains a second inference adapter selected by `IMAGEFORGE_INFERENCE_BACKEND=mageflow`, so both models coexist in one image and the cutover is a constants/contract change plus a template repin — production downtime is one Pod restart.
 
@@ -949,6 +960,94 @@ git add docs/MAGEFLOW_STAGING.md
 git commit -m "docs: record the Mage-Flow staging health and throughput evidence"
 ```
 
+### Task 9b: Boot, throughput and cost-per-batch measurement
+
+The commercial case for this migration is cost per finished image, not hourly
+price. This task produces the numbers the `RUNPOD_OPERATIONS.md` selection
+formula consumes, on more than one GPU tier, so the cheapest viable tier is
+chosen with evidence.
+
+**Files:**
+- Modify: `docs/MAGEFLOW_STAGING.md`
+
+- [ ] **Step 1: Measure boot on the staging Pod**
+
+From a cold Pod create to `"phase": "ready"`, record: provisioning ms, image
+pull ms, weights-load ms, GPU-load ms, warmup ms. The worker already reports
+these phases through `/v1/health`.
+
+Expected shape: the INT8 transformer reads 4.16 GB off the volume where FLUX
+reads roughly 13 GB, so weights-load should drop sharply. If it does not, the
+bottleneck is the Qwen3-VL-4B text encoder, and that is the thing to attack.
+
+- [ ] **Step 2: Measure per-image time at batch size 1**
+
+Run 30 prompts. Record median and p90 seconds per image at 1280x720, and the
+split between denoise, VAE decode, JPEG encode and preview encode. Mage-VAE is
+documented at ~12x/~22x fewer encode/decode MACs per pixel than FLUX.2-VAE, so
+the decode share should shrink noticeably; confirm it rather than assume it.
+
+- [ ] **Step 3: Measure prompt batching**
+
+ImageForge generates 300-450 independent prompts per batch, which is the ideal
+shape for batching several prompts into one forward pass. Re-run the same 30
+prompts at pipeline batch sizes 1, 2 and 4, recording seconds per image and
+peak VRAM for each.
+
+```python
+images = pipeline(
+    prompt=[prompt_a, prompt_b],
+    height=720, width=1280,
+    num_inference_steps=4, guidance_scale=1.0,
+    generator=[
+        torch.Generator(device="cuda").manual_seed(seed_a),
+        torch.Generator(device="cuda").manual_seed(seed_b),
+    ],
+).images
+```
+
+Per-image seeds must stay independent — batching must not change the image a
+given seed produces, or resumed batches would drift from their manifests.
+
+Stop at the largest batch size whose peak VRAM still clears the floor with
+headroom. Record the throughput multiplier.
+
+- [ ] **Step 4: Repeat steps 1-3 on one cheaper GPU tier**
+
+Delete the 4090 Pod, create an `NVIDIA L4` Pod on the same staging volume, and
+repeat. L4 is roughly half the hourly price and materially slower; the formula
+decides, not intuition.
+
+- [ ] **Step 5: Compute cost per 450-image batch for every configuration**
+
+For each (GPU, batch size) pair, compute with the exact
+`docs/RUNPOD_OPERATIONS.md` arithmetic:
+
+```text
+runtime_us = boot_ms * 1000 + seconds_per_image * 1_000_000 * 450
+estimated_micro_usd = round_half_up(hourly_micro_usd * runtime_us / 3_600_000_000)
+```
+
+Record a table of GPU, batch size, boot ms, median s/image, peak VRAM,
+micro-USD per 450-image batch, and the same figure for FLUX on the 4090 from
+`docs/QA_LOG.md`. The winning configuration is the cheapest row that clears the
+quality gate in Task 10.
+
+- [ ] **Step 6: Decide on torch.compile**
+
+Compile the transformer once and re-measure. It costs 60-120 s of boot and
+typically returns 10-20% per image, so it pays off above roughly 200 images and
+loses on short batches. Record both numbers and state the break-even count. Do
+not enable it in the adapter unless the measured break-even sits below 300
+images.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add docs/MAGEFLOW_STAGING.md
+git commit -m "docs: record Mage-Flow boot, throughput and cost-per-batch evidence"
+```
+
 ### Task 10: Side-by-side quality gate
 
 **Files:**
@@ -964,7 +1063,14 @@ For each of the four prompt categories, count images that are usable without reg
 
 - [ ] **Step 3: Decide go / no-go**
 
-Go requires Mage-Flow to be at least as good on faces and clearly better on text, with median ms/image no worse than 1.5× FLUX and peak VRAM inside the floor claimed by the profile. Write the decision and the numbers behind it into `docs/MAGEFLOW_STAGING.md`.
+Go requires all four of:
+
+1. Mage-Flow at least as good on faces and clearly better on text and adherence.
+2. Median seconds per image, at the winning batch size from Task 9b, no worse than FLUX.
+3. Boot to ready no worse than FLUX.
+4. Estimated micro-USD per 450-image batch **lower** than FLUX on its current tier.
+
+Criterion 4 is the point of the migration alongside quality; a quality win that costs more per batch is a no-go, not a compromise. Write the decision and the numbers behind it into `docs/MAGEFLOW_STAGING.md`.
 
 - [ ] **Step 4: Stop the staging Pod**
 
