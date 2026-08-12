@@ -654,8 +654,8 @@ describe('GpuLifecycleCoordinator', () => {
     const normal = productionRunPodConfig(DEFAULT_STUDIO_PROFILE, false);
     const emergency = productionRunPodConfig(DEFAULT_STUDIO_PROFILE, true);
     expect(normal.benchmarkContract).toMatchObject({
-      model: 'black-forest-labs/FLUX.2-klein-4B',
-      modelRevision: 'e7b7dc27f91deacad38e78976d1f2b499d76a294',
+      model: 'Comfy-Org/Mage-Flow',
+      modelRevision: 'd8c99241f6fa80fbd453014234af2bf337ea21e6',
       softwareImage: IMAGEFORGE_WORKER_IMAGE,
       precision: 'BF16',
       width: 1280,

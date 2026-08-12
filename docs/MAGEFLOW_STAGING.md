@@ -134,6 +134,21 @@ Two limits on this table:
    saving it. Boot was the second-ranked requirement, so it needs a clean
    per-precision cold-boot measurement before any claim is made.
 
+## Integration status
+
+Worker `0.2.0` ships the `mageflow` backend as the default. The worker owns a
+ComfyUI child process bound to loopback, pinned at ComfyUI commit
+`26d7f8556822d9d08c2d3e1878636ac3b4969af9` and baked into the image, so a Pod
+boot clones nothing and downloads nothing.
+
+Reference images are **disabled, not removed**. `ModelProfile.supports_references`
+gates them, the active profile sets it to `False`, and the API refuses such a
+batch at submission with `references_unsupported` rather than failing every
+image after the batch is committed. The whole reference path still ships and
+still has test coverage against the FLUX profile, so a future reference-capable
+model is a one-flag change.
+
 ## Health and throughput on the real worker
 
-_Not yet run (Phase 2, Task 9)._
+_Not yet run. The staging measurements above came from a bare ComfyUI on a spike
+Pod, not from the worker's own health endpoint under batch load._

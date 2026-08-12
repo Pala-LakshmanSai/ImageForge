@@ -91,7 +91,7 @@ export interface GpuOffer {
 }
 
 export interface BenchmarkContract {
-  readonly model: "black-forest-labs/FLUX.2-klein-4B";
+  readonly model: "Comfy-Org/Mage-Flow";
   readonly modelRevision: string;
   readonly softwareImage: string;
   readonly precision: "BF16";

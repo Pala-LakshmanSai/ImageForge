@@ -283,8 +283,8 @@ function workerHealth(stage) {
     version: WORKER_VERSION,
     process: { status: 'ok', uptime_ms: 100 },
     model: {
-      id: 'black-forest-labs/FLUX.2-klein-4B',
-      revision: 'e7b7dc27f91deacad38e78976d1f2b499d76a294',
+      id: 'Comfy-Org/Mage-Flow',
+      revision: 'd8c99241f6fa80fbd453014234af2bf337ea21e6',
       precision: 'bfloat16',
       status: ready ? 'ready' : 'loading',
     },

@@ -95,6 +95,11 @@ _PROFILES: Final = {
 }
 
 
+# The profile the shipped constants describe, and therefore what the worker
+# reports and enforces regardless of which adapter is instantiated.
+ACTIVE_PROFILE: Final = MAGE_FLOW_TURBO_INT8
+
+
 def profile_for_backend(backend: str) -> ModelProfile:
     try:
         return _PROFILES[backend]

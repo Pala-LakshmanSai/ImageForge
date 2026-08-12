@@ -220,7 +220,7 @@ function podSteps(policy: GpuSelectionPolicy): Array<Omit<PodLifecycleUpdate, 'p
       at: 1_420,
       phase: 'loading',
       progress: 64,
-      detail: 'Loading FLUX.2 Klein 4B from the volume · BF16',
+      detail: 'Loading Mage-Flow Turbo from the volume · INT8',
       ...selected,
     },
     {

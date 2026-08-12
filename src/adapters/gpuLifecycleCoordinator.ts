@@ -28,7 +28,7 @@ import type {
 } from '../native/gpuPodBridge';
 import { NativeObservedRunPodProvider } from './nativeRunPodProvider';
 
-const MODEL_REVISION = 'e7b7dc27f91deacad38e78976d1f2b499d76a294';
+const MODEL_REVISION = 'd8c99241f6fa80fbd453014234af2bf337ea21e6';
 
 export interface GpuLifecycleNativePort {
   workerHealthFetch: typeof fetch;
@@ -75,7 +75,7 @@ function configFor(profile: StudioProfile, allowSlowEmergency: boolean): RunPodC
     stopConfirmationTtlMs: 2 * 60_000,
     constraints: { allowedCudaVersions: ['13.0'], minRamPerGpuGb: 16 },
     benchmarkContract: {
-      model: 'black-forest-labs/FLUX.2-klein-4B',
+      model: 'Comfy-Org/Mage-Flow',
       modelRevision: MODEL_REVISION,
       // A RunPod template is immutable from ImageForge's perspective. Paid
       // benchmark profiles are admitted only when recorded against this exact

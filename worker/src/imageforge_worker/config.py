@@ -42,7 +42,8 @@ class WorkerSettings:
     data_root: Path
     model_cache_dir: Path
     credentials: tuple[Credential, ...]
-    inference_backend: str = "flux"
+    comfyui_root: Path = Path("/opt/comfyui")
+    inference_backend: str = "mageflow"
     allow_fake_inference: bool = False
     fsync_writes: bool = True
     retry_delay_seconds: float = 0.25
@@ -76,7 +77,7 @@ class WorkerSettings:
     def from_env(cls, environ: Mapping[str, str] | None = None) -> WorkerSettings:
         env = os.environ if environ is None else environ
         credentials = _parse_credentials(env.get("IMAGEFORGE_AUTH_TOKENS_JSON", ""))
-        backend = env.get("IMAGEFORGE_INFERENCE_BACKEND", "flux").strip().lower()
+        backend = env.get("IMAGEFORGE_INFERENCE_BACKEND", "mageflow").strip().lower()
         metadata_keys = (
             "RUNPOD_POD_ID",
             "RUNPOD_DC_ID",
@@ -99,6 +100,7 @@ class WorkerSettings:
             model_cache_dir=Path(
                 env.get("IMAGEFORGE_MODEL_CACHE_DIR", "/workspace/models/huggingface")
             ),
+            comfyui_root=Path(env.get("IMAGEFORGE_COMFYUI_ROOT", "/opt/comfyui")),
             credentials=credentials,
             inference_backend=backend,
             allow_fake_inference=_parse_bool(env.get("IMAGEFORGE_ALLOW_FAKE_INFERENCE", "0")),

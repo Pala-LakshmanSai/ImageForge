@@ -524,7 +524,7 @@ function scenarioState(state: AppState, scenario: OperationalScenario): AppState
     pod = podDetails('provisioning', 28, 'Creating one RTX 4090 Pod', emptyPod());
     batch = null;
   } else if (scenario === 'loading') {
-    pod = podDetails('loading', 66, 'Loading FLUX.2 Klein 4B · BF16', readyPod());
+    pod = podDetails('loading', 66, 'Loading Mage-Flow Turbo · INT8', readyPod());
     batch = null;
   } else if (scenario === 'warming') {
     pod = podDetails('warming', 86, 'Warming inference graph · step 3 of 4', readyPod());
@@ -814,7 +814,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
             : {}),
         },
         ...(action.phase === 'ready'
-          ? toast(state, 'success', 'GPU ready', 'FLUX.2 Klein 4B is warm and ready for one batch.')
+          ? toast(state, 'success', 'GPU ready', 'Mage-Flow Turbo is warm and ready for one batch.')
           : {}),
       };
     case 'SYNC_RUNTIME_POD': {

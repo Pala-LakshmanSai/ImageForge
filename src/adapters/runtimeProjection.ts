@@ -49,7 +49,7 @@ function podDetail(snapshot: RunPodSnapshot, selected: PodView | undefined): str
     case 'selecting': return 'Checking approved Secure GPUs in EU-RO-1';
     case 'provisioning': return `${selected?.gpuDisplayName ?? 'Approved GPU'} selected · provisioning compute`;
     case 'booting': return 'Attaching the persistent ImageForge network volume';
-    case 'loading': return 'Loading FLUX.2 Klein 4B from the network volume · BF16';
+    case 'loading': return 'Loading Mage-Flow Turbo from the network volume · INT8';
     case 'warming': return 'Warming the four-step inference graph';
     case 'ready': return 'Model warm · accepting one batch';
     case 'stopping': return 'Terminating the explicitly confirmed compute Pod';

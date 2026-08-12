@@ -7,13 +7,15 @@
 FROM python:3.11-slim-bookworm@sha256:28255a3ace7eb4c48bc1b57b90af29e1bc82b4fd6c60614a8e3dce61b87ff941
 
 LABEL org.opencontainers.image.title="ImageForge Worker" \
-      org.opencontainers.image.version="0.1.4" \
+      org.opencontainers.image.version="0.2.0" \
       ai.imageforge.api-schema="1" \
       ai.imageforge.cuda-min="13.0" \
       ai.imageforge.python="3.11" \
       ai.imageforge.torch-wheel="torch-2.13.0+cu130-cp311-cp311-manylinux_2_28_x86_64" \
-      ai.imageforge.model="black-forest-labs/FLUX.2-klein-4B" \
-      ai.imageforge.model-revision="e7b7dc27f91deacad38e78976d1f2b499d76a294"
+      ai.imageforge.model="Comfy-Org/Mage-Flow" \
+      ai.imageforge.model-revision="d8c99241f6fa80fbd453014234af2bf337ea21e6" \
+      ai.imageforge.model-file="mage_flow_turbo_int8_convrot.safetensors" \
+      ai.imageforge.comfyui-revision="26d7f8556822d9d08c2d3e1878636ac3b4969af9"
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -25,7 +27,8 @@ ENV PYTHONUNBUFFERED=1 \
     HF_HOME=/workspace/models/huggingface \
     IMAGEFORGE_DATA_ROOT=/workspace/imageforge \
     IMAGEFORGE_MODEL_CACHE_DIR=/workspace/models/huggingface \
-    IMAGEFORGE_INFERENCE_BACKEND=flux
+    IMAGEFORGE_INFERENCE_BACKEND=mageflow \
+    IMAGEFORGE_COMFYUI_ROOT=/opt/comfyui
 
 WORKDIR /opt/imageforge-worker
 
@@ -40,10 +43,33 @@ RUN apt-get update \
       libnuma1 \
       gcc \
       libc6-dev \
+      git \
     && rm -rf /var/lib/apt/lists/* \
     && python --version | grep -Eq '^Python 3\.11\.' \
     && python -m pip install --no-cache-dir --no-deps \
       'https://download-r2.pytorch.org/whl/cu130/torch-2.13.0%2Bcu130-cp311-cp311-manylinux_2_28_x86_64.whl#sha256=794664c05a3470a5e738447b54495cc6bbf1efca48bf2794270a897d9f4356c4'
+
+
+# ComfyUI is the only public loader for the Mage-Flow INT8 ConvRot checkpoint:
+# Diffusers 0.39.0 is the latest release and exports no Mage-Flow pipeline.
+# It is baked in at a pinned commit so a Pod boot never clones anything.
+#
+# ComfyUI's requirements leave torch, torchvision and torchaudio unpinned, which
+# would silently replace the CUDA 13 wheel installed above with a default-index
+# build. The constraint file below pins all three to the cu130 set.
+ARG COMFYUI_REVISION=26d7f8556822d9d08c2d3e1878636ac3b4969af9
+RUN git clone --filter=blob:none https://github.com/comfyanonymous/ComfyUI.git /opt/comfyui \
+    && git -C /opt/comfyui checkout --detach "${COMFYUI_REVISION}" \
+    && rm -rf /opt/comfyui/.git \
+    && python -m pip install --no-cache-dir \
+      'https://download.pytorch.org/whl/cu130/torchvision-0.28.0%2Bcu130-cp311-cp311-manylinux_2_28_x86_64.whl#sha256=67893cf4fb4ace73da60968637b1eb6bbd8cb3226995f12322ec0041fbae98a1' \
+      'https://download.pytorch.org/whl/cu130/torchaudio-2.9.1%2Bcu130-cp311-cp311-manylinux_2_28_x86_64.whl#sha256=1023bb6598fa6312e1990fdc78660f4b4ef128d8942a1f10c5827aea23d6bd7e' \
+    && printf 'torch==2.13.0+cu130\ntorchvision==0.28.0+cu130\ntorchaudio==2.9.1+cu130\n' > /tmp/comfy-constraints.txt \
+    && python -m pip install --no-cache-dir --constraint /tmp/comfy-constraints.txt \
+      --requirement /opt/comfyui/requirements.txt \
+    && rm /tmp/comfy-constraints.txt \
+    && python -c "import torch; assert torch.__version__.endswith('+cu130'), torch.__version__" \
+    && python -c "import sys; sys.path.insert(0, '/opt/comfyui'); import comfy.options"
 
 COPY pyproject.toml README.md ./
 COPY src ./src

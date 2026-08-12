@@ -2,7 +2,7 @@
 
 ImageForge is a Tauri 2 desktop application for macOS and Windows. It controls
 one RunPod GPU worker and turns 300-450 prompts into ordered, locally downloaded
-images using `black-forest-labs/FLUX.2-klein-4B` in BF16.
+images using `Comfy-Org/Mage-Flow` in BF16.
 
 ## Read before editing
 
