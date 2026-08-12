@@ -111,7 +111,13 @@ Create one ImageForge template with:
 The template does not pin a physical GPU. The desktop supplies the live ordered
 GPU list when it explicitly creates each disposable Pod.
 
-The repository profile is already wired to volume `ukh207b26r`; the template
+Mage-Flow moves production onto volume `8zupqv4zrm`
+(`imageforge-mageflow-50gb`), which already holds the pinned weights. Repoint
+the template and the desktop profile at it, and keep `ukh207b26r` until the
+first Mage-Flow batch succeeds: it still holds the FLUX weights and is the
+no-download rollback.
+
+The repository profile was wired to volume `ukh207b26r`; the template
 ID remains a deliberate one-time deployment value until the immutable worker
 image/template is published. Do not substitute RunPod's default ComfyUI
 template.

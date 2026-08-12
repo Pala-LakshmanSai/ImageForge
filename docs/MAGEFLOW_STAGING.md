@@ -148,6 +148,27 @@ image after the batch is committed. The whole reference path still ships and
 still has test coverage against the FLUX profile, so a future reference-capable
 model is a one-flag change.
 
+## Production cutover
+
+The staging volume becomes the production volume. Its 21 GB of weights are
+already in the layout the adapter resolves, so nothing is downloaded again and
+no GPU hour is spent re-staging.
+
+| | |
+| --- | --- |
+| New production volume | `imageforge-mageflow-50gb` (`8zupqv4zrm`), EU-RO-1 |
+| Previous production volume | `imageforge-prod-50gb` (`ukh207b26r`), holds the FLUX weights |
+
+Keep `ukh207b26r` until the first Mage-Flow batch has run in production. It is
+the rollback: repointing the profile and template back at it restores FLUX
+without downloading anything.
+
+Two cleanup items before the first production Pod, both left over from the
+spike: `/workspace/ComfyUI` (the image now ships its own pinned copy) and
+`/workspace/spike`. Neither is read by the worker, and together they are small,
+but leaving a second ComfyUI checkout on the volume invites the wrong one being
+used later.
+
 ## Health and throughput on the real worker
 
 _Not yet run. The staging measurements above came from a bare ComfyUI on a spike
