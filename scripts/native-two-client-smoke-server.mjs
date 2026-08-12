@@ -47,24 +47,14 @@ const CHECKPOINTS = Object.freeze([
   'veto_done',
   'release_initial_batch',
   'idle_after_release',
-  'approval_request_a',
-  'approval_response_b',
-  'approval_delete_a',
+  'direct_stop_a',
   'offline_a_to_b',
   'reset_second_pod',
   'ready_second_pod',
-  'denial_request_b',
-  'denial_response_a',
-  'clear_denial',
-  'timeout_request_a',
-  'expire_timeout',
-  'clear_timeout',
-  'generation_request_a',
   'generation_started_b',
+  'generation_veto_a',
   'release_generated_batch',
-  'reverse_request_b',
-  'reverse_response_a',
-  'reverse_delete_b',
+  'direct_stop_b',
   'offline_b_to_a',
   'final',
 ]);
@@ -478,6 +468,8 @@ export class NativeTwoClientSmokeAuthority {
       initialBusy: new Set(),
       initialArtifactsDownloaded: false,
       activeVetoB: false,
+      generatedBusy: new Set(),
+      deleteRefusedWhileGenerating: false,
       initialReleased: false,
       firstApproved: false,
       firstDeleted: false,
@@ -663,14 +655,34 @@ export class NativeTwoClientSmokeAuthority {
   #runpodDelete(role, candidate) {
     const request = this.stopRequest;
     const expectedRole = this.deletes.length === 0 ? 'A' : 'B';
+    // Stop terminates directly now, so a delete arrives without a worker stop
+    // request. The guards that still matter are the ones against destroying
+    // work or the wrong Pod: the exact Pod, the expected role, a foreground
+    // session, and no batch generating.
+    // A delete refused because a batch is generating is the guard working, not
+    // an unexpected mutation, so it is not counted as one.
+    if (this.activeBatch !== null) {
+      this.evidence.deleteRefusedWhileGenerating = true;
+      return workerError(
+        409,
+        'delete_blocked_by_active_batch',
+        'A batch is generating, so the Pod cannot be destroyed.',
+      );
+    }
+    const directAuthorized = request === null
+      && this.podId === candidate
+      && role === expectedRole
+      && this.sessions.get(role)?.availability === 'foreground'
+      && this.activeBatch === null;
+    const approvedAuthorized = request !== null
+      && request.state === 'finalizing'
+      && request.requesterRole === role
+      && request.podId === candidate
+      && request.finalizationId !== null;
     if (
       this.podId !== candidate
-      || request === null
-      || request.state !== 'finalizing'
-      || request.requesterRole !== role
       || role !== expectedRole
-      || request.podId !== candidate
-      || request.finalizationId === null
+      || !(directAuthorized || approvedAuthorized)
     ) {
       this.unexpectedDeletes += 1;
       return workerError(409, 'delete_not_authorized', 'The exact guarded Pod delete is not authorized.');
@@ -684,7 +696,7 @@ export class NativeTwoClientSmokeAuthority {
       sequence: this.sequence,
       role,
       podId: candidate,
-      requestId: request.requestId,
+      requestId: request?.requestId ?? null,
       ordinal: this.deletes.length,
     });
     this.podId = null;
@@ -707,6 +719,7 @@ export class NativeTwoClientSmokeAuthority {
     if (this.podId === null) return workerError(503, 'worker_offline', 'The worker is offline.');
     const active = this.activeBatch;
     if (active?.batchId === INITIAL_BATCH_ID) this.evidence.initialBusy.add(role);
+    if (active?.batchId === GENERATED_BATCH_ID) this.evidence.generatedBusy.add(role);
     if (active === null && this.evidence.initialReleased && !this.generatedBatchCreated) {
       this.idleObservers.add(role);
     }
@@ -903,18 +916,13 @@ export class NativeTwoClientSmokeAuthority {
         total: this.activeBatch.total,
       });
     }
-    if (
-      role !== 'B'
-      || this.generatedBatchCreated
-      || this.stopRequest?.ordinal !== 4
-      || !['pending', 'approved'].includes(this.stopRequest.state)
-    ) {
+    // The generation no longer races a pending stop request, because Stop no
+    // longer creates one. B simply starts the batch, and A's Stop is refused
+    // for as long as it generates.
+    if (role !== 'B' || this.generatedBatchCreated) {
       this.unexpectedCreates += 1;
       return workerError(409, 'scenario_order_invalid', 'The generation admission is out of scenario order.');
     }
-    this.stopRequest.state = 'cancelled';
-    this.stopRequest.reason = 'generation_started';
-    this.stopRequest.waitingRoles = [];
     this.activeBatch = {
       batchId: GENERATED_BATCH_ID,
       ownerRole: 'B',
@@ -1160,14 +1168,14 @@ export class NativeTwoClientSmokeAuthority {
       case 'idle_after_release':
         requireState(['A', 'B'].every((role) => this.idleObservers.has(role)), 'idle_convergence_missing');
         break;
-      case 'approval_request_a':
-        requireState(this.stopRequest?.ordinal === 1 && this.stopRequest.requesterRole === 'A' && this.stopRequest.state === 'pending', 'approval_request_missing');
-        break;
-      case 'approval_response_b':
-        requireState(this.evidence.firstApproved && this.stopRequest?.state === 'approved', 'approval_response_missing');
-        break;
-      case 'approval_delete_a':
-        requireState(this.evidence.firstDeleted && this.deletes.length === 1 && this.deletes[0] === FIRST_POD_ID, 'approval_delete_missing');
+      case 'direct_stop_a':
+        // Stop no longer asks a peer, so the only evidence is the exact guarded
+        // delete of the Pod A terminated.
+        requireState(
+          this.deletes.length === 1 && this.deletes[0] === FIRST_POD_ID,
+          'direct_stop_a_missing',
+        );
+        this.evidence.firstDeleted = true;
         break;
       case 'offline_a_to_b':
         requireState(this.offlineObservers.get(FIRST_POD_ID)?.has('B'), 'first_offline_convergence_missing');
@@ -1192,73 +1200,37 @@ export class NativeTwoClientSmokeAuthority {
           'second_ready_convergence_missing',
         );
         break;
-      case 'denial_request_b':
-        requireState(this.stopRequest?.ordinal === 2 && this.stopRequest.requesterRole === 'B' && this.stopRequest.state === 'pending', 'denial_request_missing');
-        break;
-      case 'denial_response_a':
-        requireState(this.evidence.denial && this.stopRequest?.state === 'denied' && this.deletes.length === 1, 'denial_response_missing');
-        break;
-      case 'clear_denial':
-        requireState(this.stopRequest?.state === 'denied', 'denial_state_missing');
-        this.stopRequest = null;
-        this.revision += 1;
-        break;
-      case 'timeout_request_a':
-        requireState(this.stopRequest?.ordinal === 3 && this.stopRequest.requesterRole === 'A' && this.stopRequest.state === 'pending', 'timeout_request_missing');
-        break;
-      case 'expire_timeout':
-        requireState(this.stopRequest?.ordinal === 3 && this.stopRequest.state === 'pending', 'timeout_state_missing');
-        this.stopRequest.state = 'expired';
-        this.stopRequest.reason = 'response_timeout';
-        this.stopRequest.waitingRoles = [];
-        this.evidence.timeout = true;
-        this.revision += 1;
-        break;
-      case 'clear_timeout':
-        requireState(
-          this.evidence.timeout
-          && this.stopRequest?.state === 'expired'
-          && ['A', 'B'].every((role) => this.stopStateObservers.get('expired')?.has(role))
-          && this.deletes.length === 1,
-          'timeout_convergence_missing',
-        );
-        this.stopRequest = null;
-        this.revision += 1;
-        break;
-      case 'generation_request_a':
-        requireState(this.stopRequest?.ordinal === 4 && this.stopRequest.requesterRole === 'A' && this.stopRequest.state === 'pending', 'generation_request_missing');
-        break;
       case 'generation_started_b':
         requireState(
-          this.evidence.generationWon
-          && this.stopRequest?.state === 'cancelled'
-          && this.stopRequest.reason === 'generation_started'
-          && this.activeBatch?.batchId === GENERATED_BATCH_ID
+          this.activeBatch?.batchId === GENERATED_BATCH_ID
           && this.activeBatch.ownerRole === 'B'
           && this.deletes.length === 1,
-          'generation_race_missing',
+          'generation_start_missing',
+        );
+        this.evidence.generationWon = true;
+        break;
+      case 'generation_veto_a':
+        // The surviving guard: a batch that is actually generating refuses the
+        // other editor's Stop, and nothing is destroyed.
+        requireState(
+          this.evidence.generatedBusy.has('A')
+          && this.evidence.deleteRefusedWhileGenerating
+          && this.deletes.length === 1,
+          'generation_veto_missing',
         );
         break;
       case 'release_generated_batch':
         requireState(this.activeBatch?.batchId === GENERATED_BATCH_ID, 'generated_batch_missing');
         this.activeBatch = null;
-        this.stopRequest = null;
         this.evidence.generatedReleased = true;
         this.revision += 1;
         break;
-      case 'reverse_request_b':
-        requireState(this.stopRequest?.ordinal === 5 && this.stopRequest.requesterRole === 'B' && this.stopRequest.state === 'pending', 'reverse_request_missing');
-        break;
-      case 'reverse_response_a':
-        requireState(this.evidence.reverseApproved && this.stopRequest?.state === 'approved', 'reverse_response_missing');
-        break;
-      case 'reverse_delete_b':
+      case 'direct_stop_b':
         requireState(
-          this.evidence.reverseDeleted
-          && this.deletes.length === 2
-          && this.deletes[1] === SECOND_POD_ID,
-          'reverse_delete_missing',
+          this.deletes.length === 2 && this.deletes[1] === SECOND_POD_ID,
+          'direct_stop_b_missing',
         );
+        this.evidence.reverseDeleted = true;
         break;
       case 'offline_b_to_a':
         requireState(this.offlineObservers.get(SECOND_POD_ID)?.has('A'), 'second_offline_convergence_missing');
@@ -1309,17 +1281,15 @@ export class NativeTwoClientSmokeAuthority {
       { name: 'initial_owner_streamed_137_artifacts', passed: this.evidence.initialArtifactsDownloaded },
       { name: 'active_batch_stop_vetoed_without_delete', passed: this.evidence.activeVetoB && this.evidence.initialReleased },
       { name: 'both_roles_observed_idle_release', passed: ['A', 'B'].every((role) => this.idleObservers.has(role)) },
-      { name: 'a_requested_b_approved_first_stop', passed: this.evidence.firstApproved && this.evidence.firstDeleted },
+      { name: 'a_directly_stopped_first_pod', passed: this.evidence.firstDeleted },
       { name: 'b_observed_first_remote_offline', passed: this.offlineObservers.get(FIRST_POD_ID)?.has('B') === true },
       { name: 'second_pod_new_worker_epoch', passed: this.evidence.secondPodReset && this.serverInstanceId === SECOND_SERVER_ID },
-      { name: 'b_requested_a_denied_without_delete', passed: this.evidence.denial && this.deletes.length === 2 },
-      { name: 'timeout_failed_closed', passed: this.evidence.timeout },
-      { name: 'b_generation_cancelled_a_pending_stop', passed: this.evidence.generationWon && this.evidence.generatedReleased },
-      { name: 'b_requested_a_approved_reverse_stop', passed: this.evidence.reverseApproved && this.evidence.reverseDeleted },
+      { name: 'generating_batch_refused_peer_stop', passed: this.evidence.generationWon && this.evidence.deleteRefusedWhileGenerating },
+      { name: 'b_directly_stopped_second_pod', passed: this.evidence.reverseDeleted },
       { name: 'a_observed_second_remote_offline', passed: this.offlineObservers.get(SECOND_POD_ID)?.has('A') === true },
       { name: 'exact_delete_sequence', passed: JSON.stringify(this.deletes) === JSON.stringify([FIRST_POD_ID, SECOND_POD_ID]) },
       { name: 'no_unexpected_lifecycle_mutations', passed: this.unexpectedCreates === 0 && this.unexpectedDeletes === 0 },
-      { name: 'all_stop_scenarios_created_once', passed: this.stopOrdinal === 5 && this.stopRequestIds.size === 5 },
+      { name: 'no_stop_requests_were_created', passed: this.stopOrdinal === 0 },
     ];
   }
 
@@ -1522,22 +1492,11 @@ async function runSelfTest() {
     }
     await checkpoint('idle_after_release');
 
-    await exchange('A', {
-      operation: 'studio_create_stop', request_id: requestIds[0], session_id: sessionA,
-      pod_id: FIRST_POD_ID, gpu_display_name: 'RTX 4090',
-    });
-    await checkpoint('approval_request_a');
-    await exchange('B', {
-      operation: 'studio_respond', request_id: requestIds[0], session_id: sessionB, decision: 'approve',
-    });
-    await checkpoint('approval_response_b');
-    await exchange('A', { operation: 'runpod_get', pod_id: FIRST_POD_ID });
-    await exchange('A', {
-      operation: 'studio_finalize', request_id: requestIds[0], session_id: sessionA,
-      pod_id: FIRST_POD_ID, finalization_id: '80000000-0000-4000-8000-000000000001',
-    });
-    expect((await exchange('A', { operation: 'runpod_delete', pod_id: FIRST_POD_ID })).status === 204, 'first Pod was not deleted');
-    await checkpoint('approval_delete_a');
+    expect(
+      (await exchange('A', { operation: 'runpod_delete', pod_id: FIRST_POD_ID })).status === 204,
+      'first Pod was not directly deleted',
+    );
+    await checkpoint('direct_stop_a');
     expect((await exchange('B', { operation: 'runpod_get', pod_id: FIRST_POD_ID })).status === 404, 'B did not observe first offline');
     await checkpoint('offline_a_to_b');
     await checkpoint('reset_second_pod');
@@ -1552,58 +1511,31 @@ async function runSelfTest() {
     }
     await checkpoint('ready_second_pod');
 
-    await exchange('B', {
-      operation: 'studio_create_stop', request_id: requestIds[1], session_id: sessionB,
-      pod_id: SECOND_POD_ID, gpu_display_name: 'RTX 4090',
-    });
-    await checkpoint('denial_request_b');
-    await exchange('A', {
-      operation: 'studio_respond', request_id: requestIds[1], session_id: sessionA, decision: 'deny',
-    });
-    await checkpoint('denial_response_a');
-    await checkpoint('clear_denial');
-
-    await exchange('A', {
-      operation: 'studio_create_stop', request_id: requestIds[2], session_id: sessionA,
-      pod_id: SECOND_POD_ID, gpu_display_name: 'RTX 4090',
-    });
-    await checkpoint('timeout_request_a');
-    await checkpoint('expire_timeout');
-    await exchange('A', { operation: 'studio_status', session_id: sessionA });
-    await exchange('B', { operation: 'studio_status', session_id: sessionB });
-    await checkpoint('clear_timeout');
-
-    await exchange('A', {
-      operation: 'studio_create_stop', request_id: requestIds[3], session_id: sessionA,
-      pod_id: SECOND_POD_ID, gpu_display_name: 'RTX 4090',
-    });
-    await checkpoint('generation_request_a');
     const created = await exchange('B', { operation: 'batch_create', prompt_count: 1, base_seed: 700 });
-    expect(created.status === 201 && created.body.batch_id === GENERATED_BATCH_ID, 'B generation did not win');
+    expect(created.status === 201 && created.body.batch_id === GENERATED_BATCH_ID, 'B generation did not start');
     expect((await exchange('B', { operation: 'batch_get', batch_id: GENERATED_BATCH_ID })).status === 200, 'B batch was not readable');
     await checkpoint('generation_started_b');
+
+    // A reads the generating batch and its delete must be refused.
+    await exchange('A', { operation: 'worker_status' });
+    expect(
+      (await exchange('A', { operation: 'runpod_delete', pod_id: SECOND_POD_ID })).status === 409,
+      'a generating batch did not refuse the peer delete',
+    );
+    await checkpoint('generation_veto_a');
     await checkpoint('release_generated_batch');
 
-    await exchange('B', {
-      operation: 'studio_create_stop', request_id: requestIds[4], session_id: sessionB,
-      pod_id: SECOND_POD_ID, gpu_display_name: 'RTX 4090',
-    });
-    await checkpoint('reverse_request_b');
-    await exchange('A', {
-      operation: 'studio_respond', request_id: requestIds[4], session_id: sessionA, decision: 'approve',
-    });
-    await checkpoint('reverse_response_a');
-    await exchange('B', { operation: 'runpod_get', pod_id: SECOND_POD_ID });
-    await exchange('B', {
-      operation: 'studio_finalize', request_id: requestIds[4], session_id: sessionB,
-      pod_id: SECOND_POD_ID, finalization_id: '80000000-0000-4000-8000-000000000002',
-    });
-    expect((await exchange('B', { operation: 'runpod_delete', pod_id: SECOND_POD_ID })).status === 204, 'second Pod was not deleted');
-    await checkpoint('reverse_delete_b');
+    expect(
+      (await exchange('B', { operation: 'runpod_delete', pod_id: SECOND_POD_ID })).status === 204,
+      'second Pod was not directly deleted',
+    );
+    await checkpoint('direct_stop_b');
     expect((await exchange('A', { operation: 'runpod_list' })).body.length === 0, 'A did not observe second offline');
     await checkpoint('offline_b_to_a');
     const final = await checkpoint('final');
-    expect(final.passed, 'final checkpoint did not pass');
+    if (!final.passed) {
+      throw new Error(`final checkpoint failures: ${JSON.stringify(final.failures ?? final)}`);
+    }
     expect(JSON.stringify(final.deletes) === JSON.stringify([FIRST_POD_ID, SECOND_POD_ID]), 'delete audit mismatch');
     const auditResult = await exchange('A', { operation: 'audit' });
     expect(auditResult.body.passed && auditResult.body.unexpectedDeletes === 0, 'audit operation did not pass');

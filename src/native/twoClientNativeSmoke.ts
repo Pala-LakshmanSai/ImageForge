@@ -84,9 +84,6 @@ function lastEvent<T extends ProductionRuntimeEvent['type']>(
   );
 }
 
-function stopPhase(events: readonly ProductionRuntimeEvent[]) {
-  return lastEvent(events, 'studio')?.studio.stop;
-}
 
 function auditResult(value: unknown): {
   passed: boolean;
@@ -260,16 +257,7 @@ async function runRole(
 
   await heartbeat(runtime, FIRST_POD_ID);
   if (role === 'A') await runtime.requestGpuStop(readyState(FIRST_POD_ID));
-  await controls.checkpoint('approval_request_a');
-  if (role === 'B') {
-    await heartbeat(runtime, FIRST_POD_ID);
-    const request = stopPhase(events);
-    invariant(request?.phase === 'pending' && request.canRespond && request.requestId !== null, 'B did not receive A approval request');
-    await runtime.respondToGpuStop(request.requestId, 'approve');
-  }
-  await controls.checkpoint('approval_response_b');
-  if (role === 'A') await heartbeat(runtime, FIRST_POD_ID);
-  await controls.checkpoint('approval_delete_a');
+  await controls.checkpoint('direct_stop_a');
   if (role === 'B') await runtime.observe(readyState(FIRST_POD_ID));
   invariant(runtime.getAuthoritativePodState?.()?.phase === 'offline', `${role} did not converge Offline after A Stop`);
   await controls.checkpoint('offline_a_to_b');
@@ -280,41 +268,23 @@ async function runRole(
   await heartbeat(runtime, SECOND_POD_ID);
   await controls.checkpoint('ready_second_pod');
 
-  if (role === 'B') await runtime.requestGpuStop(readyState(SECOND_POD_ID));
-  await controls.checkpoint('denial_request_b');
-  if (role === 'A') {
-    await heartbeat(runtime, SECOND_POD_ID);
-    const request = stopPhase(events);
-    invariant(request?.phase === 'pending' && request.canRespond && request.requestId !== null, 'A did not receive B denial request');
-    await runtime.respondToGpuStop(request.requestId, 'deny');
-  }
-  await controls.checkpoint('denial_response_a');
-  if (role === 'B') {
-    await heartbeat(runtime, SECOND_POD_ID);
-    invariant(stopPhase(events)?.phase === 'denied', 'B did not observe A denial');
-  }
-  invariant(runtime.getAuthoritativePodState?.()?.phase === 'ready', `${role} left Ready after denial`);
-  await controls.checkpoint('clear_denial');
-
-  if (role === 'A') await runtime.requestGpuStop(readyState(SECOND_POD_ID));
-  await controls.checkpoint('timeout_request_a');
-  await controls.checkpoint('expire_timeout');
-  await heartbeat(runtime, SECOND_POD_ID);
-  invariant(stopPhase(events)?.phase === 'expired', `${role} did not observe stop timeout`);
-  invariant(runtime.getAuthoritativePodState?.()?.phase === 'ready', `${role} left Ready after timeout`);
-  await controls.checkpoint('clear_timeout');
-
-  if (role === 'A') await runtime.requestGpuStop(readyState(SECOND_POD_ID));
-  await controls.checkpoint('generation_request_a');
   if (role === 'B') {
     await runtime.startBatch(validatingState(SECOND_POD_ID));
     invariant(lastEvent(events, 'batch')?.batch.owner === 'Sujal', 'B generation did not acquire the shared lease');
   }
   await controls.checkpoint('generation_started_b');
+
+  // Stop no longer asks the other editor. The one guard that survives is a
+  // batch that is actually generating, and it must refuse without destroying
+  // anything.
   if (role === 'A') {
     await heartbeat(runtime, SECOND_POD_ID);
-    invariant(stopPhase(events)?.phase === 'cancelled', 'A pending Stop was not cancelled by generation');
+    await runtime.requestGpuStop(readyState(SECOND_POD_ID));
+    invariant(lastEvent(events, 'stop-blocked')?.type === 'stop-blocked', 'B generation did not veto A Stop');
+    invariant(runtime.getAuthoritativePodState?.()?.phase !== 'offline', 'A destroyed a generating Pod');
   }
+  await controls.checkpoint('generation_veto_a');
+
   const generatedReleaseEventOffset = events.length;
   await controls.checkpoint('release_generated_batch');
   await waitForFreshWorkerEvent(
@@ -328,16 +298,7 @@ async function runRole(
 
   await heartbeat(runtime, SECOND_POD_ID);
   if (role === 'B') await runtime.requestGpuStop(readyState(SECOND_POD_ID));
-  await controls.checkpoint('reverse_request_b');
-  if (role === 'A') {
-    await heartbeat(runtime, SECOND_POD_ID);
-    const request = stopPhase(events);
-    invariant(request?.phase === 'pending' && request.canRespond && request.requestId !== null, 'A did not receive reverse approval request');
-    await runtime.respondToGpuStop(request.requestId, 'approve');
-  }
-  await controls.checkpoint('reverse_response_a');
-  if (role === 'B') await heartbeat(runtime, SECOND_POD_ID);
-  await controls.checkpoint('reverse_delete_b');
+  await controls.checkpoint('direct_stop_b');
   if (role === 'A') await runtime.observe(readyState(SECOND_POD_ID));
   invariant(runtime.getAuthoritativePodState?.()?.phase === 'offline', `${role} did not converge Offline after B Stop`);
   await controls.checkpoint('offline_b_to_a');
@@ -354,7 +315,7 @@ async function runRole(
   invariant(audit.principals.includes('Lakshman') && audit.principals.includes('Sujal'), 'fixture did not observe both principals');
   invariant(controls.counters.mutatingReceiptReconciliations === 0, `${role} performed a forbidden receipt mutation`);
 
-  return `${role}: two installed clients passed status-first recovery, shared busy/progress, veto, approve, deny/timeout, generation race, and bidirectional remote Stop`;
+  return `${role}: two installed clients passed status-first recovery, shared busy/progress, the active-batch veto, and bidirectional direct Stop`;
 }
 
 export async function runTwoClientNativeSmoke(
