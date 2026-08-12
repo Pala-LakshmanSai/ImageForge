@@ -255,8 +255,8 @@ async function runRole(
   );
   await controls.checkpoint('idle_after_release');
 
-  await heartbeat(runtime, FIRST_POD_ID);
   if (role === 'A') {
+    await heartbeat(runtime, FIRST_POD_ID);
     await runtime.requestGpuStop(readyState(FIRST_POD_ID));
     const outcome = events.at(-1);
     invariant(
@@ -310,8 +310,8 @@ async function runRole(
     `${role} did not observe generated-batch release`,
   );
 
-  await heartbeat(runtime, SECOND_POD_ID);
   if (role === 'B') {
+    await heartbeat(runtime, SECOND_POD_ID);
     await runtime.requestGpuStop(readyState(SECOND_POD_ID));
     const outcome = events.at(-1);
     invariant(
