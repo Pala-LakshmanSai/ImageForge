@@ -793,6 +793,17 @@ export function nativeResolveRunPodCreateMarker(
   return invoke('resolve_runpod_create_marker', { attemptId, reconciledPodId });
 }
 
+export interface NativeLocalStateResetV1 {
+  readonly schemaVersion: number;
+  readonly archivedPath: string | null;
+  readonly archivedDirectories: readonly string[];
+}
+
+/** Archive the device-local GPU lifecycle records. */
+export function nativeResetLocalLifecycleState(): Promise<NativeLocalStateResetV1> {
+  return invoke('reset_local_lifecycle_state');
+}
+
 export function nativeWorkerHealth(): Promise<NativeHttpResponse> {
   return invoke('worker_health');
 }

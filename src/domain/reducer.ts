@@ -892,9 +892,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           : {}),
       };
     case 'REQUEST_STOP_POD':
-      return state.pod.podId === null
-        ? state
-        : { ...state, dialog: { type: 'stop-pod', podId: state.pod.podId } };
+      // Stop terminates on click. The owner asked for no confirmation step, so
+      // the dialog is gone and the request goes straight to the stop path.
+      return state.pod.podId === null ? state : { ...state, dialog: null };
     case 'REQUEST_RESOLVE_CREATE':
       return state.pod.createRecovery
         ? { ...state, dialog: { type: 'resolve-create' } }
@@ -902,7 +902,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case 'CONFIRM_RESOLVE_CREATE':
       return { ...state, dialog: null };
     case 'CONFIRM_STOP_POD':
-      if (state.dialog?.type !== 'stop-pod' || state.dialog.podId !== state.pod.podId || state.pod.podId === null) {
+      // There is no confirmation dialog any more, so the only thing that still
+      // has to hold is an exact Pod to terminate.
+      if (state.pod.podId === null) {
         return {
           ...state,
           dialog: null,
@@ -914,7 +916,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         dialog: null,
         pod: {
           ...podDetails('stopping', 72, 'Terminating compute after your confirmation', state.pod),
-          stopTargetPodId: state.dialog.podId,
+          stopTargetPodId: state.pod.podId,
         },
       };
     case 'POD_STOPPED': {

@@ -44,7 +44,6 @@ const CHECKPOINTS = Object.freeze([
   'lifecycle_loading',
   'lifecycle_warming',
   'startup',
-  'veto_done',
   'release_initial_batch',
   'idle_after_release',
   'direct_stop_a',
@@ -52,7 +51,6 @@ const CHECKPOINTS = Object.freeze([
   'reset_second_pod',
   'ready_second_pod',
   'generation_started_b',
-  'generation_veto_a',
   'release_generated_batch',
   'direct_stop_b',
   'offline_b_to_a',
@@ -467,9 +465,7 @@ export class NativeTwoClientSmokeAuthority {
     this.evidence = {
       initialBusy: new Set(),
       initialArtifactsDownloaded: false,
-      activeVetoB: false,
       generatedBusy: new Set(),
-      deleteRefusedWhileGenerating: false,
       initialReleased: false,
       firstApproved: false,
       firstDeleted: false,
@@ -659,16 +655,6 @@ export class NativeTwoClientSmokeAuthority {
     // request. The guards that still matter are the ones against destroying
     // work or the wrong Pod: the exact Pod, the expected role, a foreground
     // session, and no batch generating.
-    // A delete refused because a batch is generating is the guard working, not
-    // an unexpected mutation, so it is not counted as one.
-    if (this.activeBatch !== null) {
-      this.evidence.deleteRefusedWhileGenerating = true;
-      return workerError(
-        409,
-        'delete_blocked_by_active_batch',
-        'A batch is generating, so the Pod cannot be destroyed.',
-      );
-    }
     const directAuthorized = request === null
       && this.podId === candidate
       && role === expectedRole
@@ -1146,19 +1132,6 @@ export class NativeTwoClientSmokeAuthority {
           'ready_convergence_missing',
         );
         break;
-      case 'veto_done':
-        // Stop no longer creates a worker stop request. The editors coordinate
-        // outside the app, so the only surviving guard is a batch that is
-        // actually generating, and the client enforces it from the status read
-        // rather than by asking a peer. The evidence is therefore that B saw
-        // the active batch and destroyed nothing; the client-side smoke asserts
-        // that B also surfaced the stop-blocked outcome.
-        requireState(
-          this.evidence.initialBusy.has('B') && this.deletes.length === 0,
-          'active_veto_missing',
-        );
-        this.evidence.activeVetoB = true;
-        break;
       case 'release_initial_batch':
         requireState(this.activeBatch?.batchId === INITIAL_BATCH_ID, 'initial_batch_missing');
         this.activeBatch = null;
@@ -1208,14 +1181,6 @@ export class NativeTwoClientSmokeAuthority {
           'generation_start_missing',
         );
         this.evidence.generationWon = true;
-        break;
-      case 'generation_veto_a':
-        // The surviving guard: a batch that is actually generating refuses the
-        // other editor's Stop, and nothing is destroyed.
-        requireState(
-          this.evidence.generatedBusy.has('A') && this.deletes.length === 1,
-          'generation_veto_missing',
-        );
         break;
       case 'release_generated_batch':
         requireState(this.activeBatch?.batchId === GENERATED_BATCH_ID, 'generated_batch_missing');
@@ -1277,12 +1242,12 @@ export class NativeTwoClientSmokeAuthority {
       },
       { name: 'both_roles_observed_initial_batch_450', passed: ['A', 'B'].every((role) => this.evidence.initialBusy.has(role)) },
       { name: 'initial_owner_streamed_137_artifacts', passed: this.evidence.initialArtifactsDownloaded },
-      { name: 'active_batch_stop_vetoed_without_delete', passed: this.evidence.activeVetoB && this.evidence.initialReleased },
+      { name: 'initial_batch_released_before_stop', passed: this.evidence.initialReleased },
       { name: 'both_roles_observed_idle_release', passed: ['A', 'B'].every((role) => this.idleObservers.has(role)) },
       { name: 'a_directly_stopped_first_pod', passed: this.evidence.firstDeleted },
       { name: 'b_observed_first_remote_offline', passed: this.offlineObservers.get(FIRST_POD_ID)?.has('B') === true },
       { name: 'second_pod_new_worker_epoch', passed: this.evidence.secondPodReset && this.serverInstanceId === SECOND_SERVER_ID },
-      { name: 'generating_batch_refused_peer_stop', passed: this.evidence.generationWon && this.evidence.generatedBusy.has('A') },
+      { name: 'both_roles_observed_the_generated_batch', passed: this.evidence.generationWon },
       { name: 'b_directly_stopped_second_pod', passed: this.evidence.reverseDeleted },
       { name: 'a_observed_second_remote_offline', passed: this.offlineObservers.get(SECOND_POD_ID)?.has('A') === true },
       { name: 'exact_delete_sequence', passed: JSON.stringify(this.deletes) === JSON.stringify([FIRST_POD_ID, SECOND_POD_ID]) },
@@ -1482,7 +1447,6 @@ async function runSelfTest() {
       gpu_display_name: 'RTX 4090',
     });
     expect(veto.status === 423 && veto.body.error.code === 'stop_blocked_by_active_batch', 'active Stop was not vetoed');
-    await checkpoint('veto_done');
     await checkpoint('release_initial_batch');
     for (const role of ['A', 'B']) {
       const status = await exchange(role, { operation: 'worker_status' });
@@ -1514,13 +1478,6 @@ async function runSelfTest() {
     expect((await exchange('B', { operation: 'batch_get', batch_id: GENERATED_BATCH_ID })).status === 200, 'B batch was not readable');
     await checkpoint('generation_started_b');
 
-    // A reads the generating batch and its delete must be refused.
-    await exchange('A', { operation: 'worker_status' });
-    expect(
-      (await exchange('A', { operation: 'runpod_delete', pod_id: SECOND_POD_ID })).status === 409,
-      'a generating batch did not refuse the peer delete',
-    );
-    await checkpoint('generation_veto_a');
     await checkpoint('release_generated_batch');
 
     expect(

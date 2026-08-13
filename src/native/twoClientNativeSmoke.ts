@@ -238,11 +238,6 @@ async function runRole(
   }
   await controls.checkpoint('startup');
 
-  if (role === 'B') {
-    await runtime.requestGpuStop(readyState(FIRST_POD_ID));
-    invariant(lastEvent(events, 'stop-blocked')?.type === 'stop-blocked', 'active batch did not veto B Stop');
-  }
-  await controls.checkpoint('veto_done');
   const initialReleaseEventOffset = events.length;
   await controls.checkpoint('release_initial_batch');
   await waitForFreshWorkerEvent(
@@ -288,17 +283,6 @@ async function runRole(
   }
   await controls.checkpoint('generation_started_b');
 
-  // Stop no longer asks the other editor. The one guard that survives is a
-  // batch that is actually generating, and it must refuse without destroying
-  // anything.
-  if (role === 'A') {
-    await heartbeat(runtime, SECOND_POD_ID);
-    await runtime.requestGpuStop(readyState(SECOND_POD_ID));
-    invariant(lastEvent(events, 'stop-blocked')?.type === 'stop-blocked', 'B generation did not veto A Stop');
-    invariant(runtime.getAuthoritativePodState?.()?.phase !== 'offline', 'A destroyed a generating Pod');
-  }
-  await controls.checkpoint('generation_veto_a');
-
   const generatedReleaseEventOffset = events.length;
   await controls.checkpoint('release_generated_batch');
   await waitForFreshWorkerEvent(
@@ -343,7 +327,7 @@ async function runRole(
   invariant(audit.principals.includes('Lakshman') && audit.principals.includes('Sujal'), 'fixture did not observe both principals');
   invariant(controls.counters.mutatingReceiptReconciliations === 0, `${role} performed a forbidden receipt mutation`);
 
-  return `${role}: two installed clients passed status-first recovery, shared busy/progress, the active-batch veto, and bidirectional direct Stop`;
+  return `${role}: two installed clients passed status-first recovery, shared busy/progress, and bidirectional direct Stop`;
 }
 
 export async function runTwoClientNativeSmoke(

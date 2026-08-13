@@ -600,6 +600,15 @@ async fn clear_runpod_start_authorization(state: State<'_, NativeState>) -> Nati
 }
 
 #[tauri::command]
+fn reset_local_lifecycle_state() -> Result<crate::native::local_state::LocalStateResetV1, NativeError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or_default();
+    crate::native::local_state::reset_local_lifecycle_state(now)
+}
+
+#[tauri::command]
 fn runpod_create_marker_metadata(
     state: State<'_, NativeState>,
 ) -> NativeResult<RunPodCreateMarkerMetadata> {
@@ -4300,6 +4309,7 @@ pub fn run() {
             authorize_emergency_gpu,
             clear_runpod_start_authorization,
             runpod_create_marker_metadata,
+            reset_local_lifecycle_state,
             resolve_runpod_create_marker,
             gpu_inventory_load,
             gpu_selector_perf_arm,

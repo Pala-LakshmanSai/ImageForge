@@ -63,6 +63,31 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
   const [setupInitialStep, setSetupInitialStep] = useState(0);
   const [credentialOnlyKind, setCredentialOnlyKind] = useState<CredentialKind | undefined>();
 
+  async function resetLocalState() {
+    // Stale lifecycle records name a Pod, volume or image that no longer
+    // exists, and the app reconciles against them on every start until they
+    // are cleared. Archiving them is the supported repair.
+    try {
+      const { nativeResetLocalLifecycleState } = await import('../native/tauriBridge');
+      const result = await nativeResetLocalLifecycleState();
+      dispatch({
+        type: 'SHOW_TOAST',
+        tone: 'success',
+        title: result.archivedPath === null ? 'No local GPU records to reset' : 'Local GPU records reset',
+        message: result.archivedPath === null
+          ? 'This computer had no saved GPU start or switch records.'
+          : `Archived ${result.archivedDirectories.join(', ')}. Start the GPU again when you are ready.`,
+      });
+    } catch {
+      dispatch({
+        type: 'SHOW_TOAST',
+        tone: 'error',
+        title: 'Reset failed',
+        message: 'ImageForge could not archive this computer\u2019s GPU records.',
+      });
+    }
+  }
+
   async function chooseDefaultDestination() {
     if (productionLocked) return;
     setChoosingDestination(true);
@@ -163,7 +188,7 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
               <div className="duplicate-pod-card" role="alert"><AlertTriangle size={19} /><div><strong>Duplicate hourly spend detected</strong><small>{state.pod.matchingPodIds.join(' · ')}. Neither Pod will be silently deleted.</small></div></div>
             ) : null}
             <div className="manual-only-card"><ShieldCheck size={18} /><div><strong>GPU stops only when you confirm</strong><small>Finishing a batch, closing the app, idling, or losing connection will not stop it.</small></div></div>
-            {powerAction === 'stop' ? <Button tone="danger" onClick={() => dispatch({ type: 'REQUEST_STOP_POD' })}>Stop GPU with confirmation</Button> : <Button tone="primary" icon={Zap} disabled={!['offline', 'error'].includes(state.pod.phase) || state.pod.createRecovery !== null} onClick={() => dispatch({ type: 'START_POD' })}>{state.pod.phase === 'ready' ? 'GPU identity needed' : 'Start GPU explicitly'}</Button>}
+            {powerAction === 'stop' ? <Button tone="danger" onClick={() => dispatch({ type: 'REQUEST_STOP_POD' })}>Stop GPU</Button> : <Button tone="primary" icon={Zap} disabled={!['offline', 'error'].includes(state.pod.phase) || state.pod.createRecovery !== null} onClick={() => dispatch({ type: 'START_POD' })}>{state.pod.phase === 'ready' ? 'GPU identity needed' : 'Start GPU explicitly'}</Button>}
             <Button icon={Check} disabled={productionLocked} onClick={() => void testConnection()}>Run read-only connection test</Button>
             <details className="advanced-settings">
               <summary><span><Database size={15} /><strong>Advanced connection details</strong></span><ChevronRight size={15} /></summary>
@@ -175,6 +200,19 @@ export function SettingsScreen({ state, dispatch, adapter }: ScreenProps) {
                 <div><dt>Health timeout</dt><dd>12 seconds · 2 misses</dd></div>
                 <div><dt>Diagnostics</dt><dd>Prompt + secret logging off</dd></div>
               </dl>
+              <div className="reset-local-state">
+                <Button
+                  tone="danger"
+                  onClick={() => { void resetLocalState(); }}
+                >
+                  Reset local GPU records
+                </Button>
+                <p>
+                  Archives this computer&rsquo;s saved GPU start and switch records. Use it when the
+                  app keeps reconciling against a Pod or volume that no longer exists. Your queue,
+                  receipts, downloads folder and saved credentials are left untouched.
+                </p>
+              </div>
               <p>EU-RO-1 cold order includes RTX 4090, RTX PRO 4500/4000 Blackwell, RTX 5090, L4, RTX A4500, RTX 4000 Ada, A100 PCIe, and both RTX PRO 6000 Blackwell editions. RTX 2000 Ada is slow emergency-only; B200 remains excluded.</p>
             </details>
           </section>

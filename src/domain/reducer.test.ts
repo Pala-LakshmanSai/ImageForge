@@ -64,14 +64,19 @@ describe('appReducer', () => {
     expect(state.pod).toMatchObject({ phase: 'ready', health: 'healthy', podId: 'pod-if-next', matchingPodIds: ['pod-if-next'] });
 
     state = appReducer(state, { type: 'REQUEST_STOP_POD' });
-    expect(state.dialog).toEqual({ type: 'stop-pod', podId: 'pod-if-next' });
+    // Stop terminates on click: no confirmation dialog stands between the
+    // button and the termination.
+    expect(state.dialog).toBeNull();
     state = appReducer(state, { type: 'CONFIRM_STOP_POD' });
     expect(state.pod.phase).toBe('stopping');
     state = appReducer(state, { type: 'POD_STOPPED' });
     expect(state.pod).toMatchObject({ phase: 'offline', gpu: null, podId: null });
   });
 
-  it('refuses a stop confirmation when the authoritative Pod changed', () => {
+  it('binds the stop to whichever Pod is authoritative at the moment of the click', () => {
+    // Stop terminates on click, so the reducer no longer holds a confirmation
+    // window that could go stale. Guarding against terminating a Pod the user
+    // never saw is done in the shell, which re-reads the exact Pod first.
     let state = readyDraft(1);
     state = appReducer(state, { type: 'REQUEST_STOP_POD' });
     state = appReducer(state, {
@@ -79,9 +84,8 @@ describe('appReducer', () => {
       pod: { ...state.pod, podId: 'pod-replaced', phase: 'ready' },
     });
     const result = appReducer(state, { type: 'CONFIRM_STOP_POD' });
-    expect(result.pod.phase).toBe('ready');
-    expect(result.dialog).toBeNull();
-    expect(result.toast?.title).toBe('Stop confirmation expired');
+    expect(result.pod.phase).toBe('stopping');
+    expect(result.pod.stopTargetPodId).toBe('pod-replaced');
   });
 
   it('clears the bound stop target when the authoritative lifecycle reports the Pod gone', () => {

@@ -7,6 +7,7 @@ pub mod gpu_pod;
 pub mod gpu_selector_perf;
 pub mod gpu_stop;
 pub mod gpu_switch;
+pub mod local_state;
 pub mod power;
 pub mod profile_control;
 pub mod queue;

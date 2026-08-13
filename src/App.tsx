@@ -1648,12 +1648,8 @@ export default function App({ initialState, adapter: injectedAdapter, alarmPort:
       void controlBatchVisibly('cancel', current);
       return;
     }
-    if (action.type === 'CONFIRM_STOP_POD') {
-      if (
-        current.dialog?.type !== 'stop-pod'
-        || current.dialog.podId !== current.pod.podId
-        || current.pod.podId === null
-      ) {
+    if (action.type === 'REQUEST_STOP_POD' || action.type === 'CONFIRM_STOP_POD') {
+      if (current.pod.podId === null) {
         dispatch(action);
         return;
       }

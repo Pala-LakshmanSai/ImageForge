@@ -673,55 +673,22 @@ describe('production ImageForge adapter', () => {
     expect(native.authorizeStart).not.toHaveBeenCalled();
   });
 
-  it('refuses to terminate while a batch is generating and never asks a peer', async () => {
-    // Stop no longer creates a worker stop request, so the refusal comes from
-    // reading worker status directly. Cancel the batch first, then stop.
-    const native = port({
-      status: vi.fn(async () => ({
-        status: 200,
-        body: {
-          schema_version: 1,
-          ready: true,
-          active_batch: {
-            batch_id: '77777777-7777-4777-8777-777777777777',
-            owner: { user_id: 'user-sujal', display_name: 'Sujal' },
-            state: 'running',
-            progress: {
-              total: 450,
-              completed: 73,
-              downloaded: 73,
-              failed: 0,
-              cancelled: 0,
-              processed: 73,
-              current_index: 74,
-            },
-            pause_requested: false,
-            cancel_requested: false,
-          },
-          permissions: {
-            can_create: false,
-            can_manage_active: false,
-            is_owner: false,
-            create_block_reason: null,
-          },
-        },
-      })),
-    });
+  it('terminates on click even while a batch is generating', async () => {
+    // The owner asked for a Stop with no pre-flight refusal, so a generating
+    // batch no longer vetoes termination and no peer is consulted.
+    const native = port();
     const adapter = createProductionImageForgeAdapter(native);
+    await adapter.runtime!.refresh(stateWithReadyPod());
     const events: ProductionRuntimeEvent[] = [];
     adapter.runtime!.subscribe((event) => events.push(event));
 
     await adapter.runtime!.requestGpuStop(stateWithReadyPod());
 
-    expect(events.at(-1)).toEqual({
-      type: 'stop-blocked',
-      owner: 'Sujal',
-      completed: 73,
-      total: 450,
-      message: 'Sujal is generating 73 of 450 images. Stop the batch before terminating the GPU.',
-    });
+    expect(events.some((event) => event.type === 'stop-blocked')).toBe(false);
     expect(native.studioCreateStopRequest).not.toHaveBeenCalled();
-    expect(native.gpuPod.normalStop).not.toHaveBeenCalled();
+    expect(native.gpuPod.normalStop).toHaveBeenCalledWith(
+      expect.objectContaining({ podId: 'pod-exact-1', direct: true }),
+    );
   });
 
   it('terminates directly with no stop request and no approval wait', async () => {

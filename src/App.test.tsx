@@ -704,7 +704,9 @@ describe('ImageForge shell', () => {
     expect(screen.queryByRole('button', { name: 'Start GPU' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Start GPU explicitly' })).not.toBeInTheDocument();
     expect(screen.getAllByRole('button', { name: 'Stop GPU' }).length).toBeGreaterThan(0);
-    if (view === 'settings') expect(screen.getByRole('button', { name: 'Stop GPU with confirmation' })).toBeVisible();
+    // Settings shows the same immediate Stop as the shell: there is no
+    // separate confirmation variant any more.
+    if (view === 'settings') expect(screen.getAllByRole('button', { name: 'Stop GPU' }).length).toBeGreaterThan(0);
   });
 
   it('keeps Stop authoritative through an unknown-style reconnecting state', () => {
@@ -1735,18 +1737,49 @@ describe('ImageForge shell', () => {
   });
 
   it('closes a portaled confirmation with Escape and restores trigger focus', async () => {
+    // Stop no longer opens a dialog, so the portal behaviour is exercised
+    // through the library clear confirmation instead.
     const user = userEvent.setup();
     let state = createConfiguredInitialState();
     state = appReducer(state, { type: 'SET_POD_PHASE', phase: 'ready', progress: 100, detail: 'Ready', podId: 'pod-test' });
+    state = appReducer(state, { type: 'NAVIGATE', view: 'library' });
+    state = {
+      ...state,
+      library: [{
+        id: 'asset-1',
+        batchId: '11111111-1111-4111-8111-111111111111',
+        batchName: 'Batch',
+        index: 1,
+        prompt: 'a red bicycle',
+        seed: 7,
+        filename: '000001.jpg',
+        checksum: 'a'.repeat(64),
+        createdAt: '2026-08-13T00:00:00.000Z',
+        durationSeconds: 4,
+        destination: '/tmp/imageforge',
+        palette: 0,
+      }],
+    };
     render(<App initialState={state} adapter={immediateAdapter()} />);
 
-    const trigger = screen.getByRole('button', { name: 'Stop GPU' });
+    const trigger = screen.getByRole('button', { name: 'Clear library' });
     await user.click(trigger);
     expect(screen.getByRole('alertdialog')).toBeVisible();
     expect(document.querySelector('.app-shell')).toHaveAttribute('inert');
     await user.keyboard('{Escape}');
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
     expect(trigger).toHaveFocus();
+  });
+
+  it('terminates the GPU on the first Stop click without a confirmation step', async () => {
+    const user = userEvent.setup();
+    let state = createConfiguredInitialState();
+    state = appReducer(state, { type: 'SET_POD_PHASE', phase: 'ready', progress: 100, detail: 'Ready', podId: 'pod-test' });
+    render(<App initialState={state} adapter={immediateAdapter()} />);
+
+    await user.click(screen.getByRole('button', { name: 'Stop GPU' }));
+
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
   });
 
   it('surfaces a failed batch cancel instead of silently doing nothing', async () => {

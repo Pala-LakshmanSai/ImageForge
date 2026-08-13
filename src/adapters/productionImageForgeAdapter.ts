@@ -893,27 +893,11 @@ class ProductionRuntime implements ProductionRuntimeFacade {
     const expectedPodId = state.pod.podId;
     if (expectedPodId === null) throw new Error('No verified ImageForge Pod is selected.');
     try {
-      // The editors coordinate outside the app, so Stop never asks a peer and
-      // never creates a worker stop request. One guard survives: a batch that
-      // is actually generating. That is not permission from a person, it is
-      // refusing to destroy work in flight, and the read must fail closed
-      // because an unknown batch state cannot be treated as "no batch".
-      const statusResponse = await this.#port.status();
-      if (statusResponse.status !== 200) {
-        throw new Error('Worker status could not be read, so ImageForge cannot confirm the GPU is idle.');
-      }
-      const status = parseWorkerStatus(statusResponse.body);
-      if (status.activeBatch !== null) {
-        const { owner, progress } = status.activeBatch;
-        this.#emit({
-          type: 'stop-blocked',
-          owner: owner.displayName,
-          completed: progress.completed,
-          total: progress.total,
-          message: `${owner.displayName} is generating ${progress.completed} of ${progress.total} images. Stop the batch before terminating the GPU.`,
-        });
-        return;
-      }
+      // Stop terminates on click. The editors coordinate outside the app, and
+      // the owner asked for no pre-flight refusal: no peer approval, and no
+      // active-batch veto. Native still guards against double-termination and
+      // unconfirmed provider responses, which protect the Pod rather than
+      // second-guess the click.
       // A heartbeat still establishes this session and the current worker
       // epoch, so the native mutation gate can reject a stale click.
       await this.heartbeat(state, 'foreground');
