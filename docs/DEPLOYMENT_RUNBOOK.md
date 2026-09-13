@@ -34,12 +34,12 @@ read-only package-pull secret in RunPod and record that it was used; for a
 public package, verify the package visibility explicitly. Never put a personal
 GitHub token in the repository, desktop profile, or this runbook.
 
-Current immutable worker release evidence (published 2026-08-07):
+Current immutable worker release evidence (published 2026-09-13):
 
 - Repository: `Pala-LakshmanSai/imageforge-worker`
-- Source commit: `26f7566033f1994e15ec1e16ef6312d009ed98fe`
+- Source commit: `53f73bd8330b0e4bcc65cc3fd9366bf52b8abdc3`
 - Image: `ghcr.io/pala-lakshmansai/imageforge-worker@sha256:3fe3074cc365cfe6f984907733d996e81ddda5f26240272f543071c60df2f09b`
-- Worker version: `0.1.7`
+- Worker version: `0.2.0`
 - Architecture: `linux/amd64`
 
 ### Bumping the worker version
