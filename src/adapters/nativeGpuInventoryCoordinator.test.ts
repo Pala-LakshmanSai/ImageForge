@@ -201,6 +201,14 @@ describe('NativeGpuInventoryCoordinator', () => {
       await vi.waitFor(() => expect(port.beginRefresh).toHaveBeenCalledTimes(1));
       await vi.advanceTimersByTimeAsync(30_000);
       await rejection;
+
+      vi.mocked(port.load).mockResolvedValue(snapshot('ready'));
+      vi.mocked(port.beginRefresh).mockResolvedValue(snapshot('ready'));
+      await expect(coordinator.refreshForVisibleSelector(false)).resolves.toMatchObject({
+        state: 'ready',
+        receipt: { receiptId: RECEIPT },
+      });
+      expect(port.beginRefresh).toHaveBeenCalledTimes(2);
       coordinator.dispose();
     } finally {
       vi.useRealTimers();

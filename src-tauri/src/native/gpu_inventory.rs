@@ -2421,8 +2421,28 @@ fn apply_current_pod_projection(
     current: &CurrentPodProjection,
 ) {
     snapshot.current_pod = current.pod.clone();
-    snapshot.current_pod_observed_at = current.observed_at.clone();
-    snapshot.current_pod_stale = current.stale;
+    if snapshot.current_pod.is_some() {
+        snapshot.current_pod_observed_at = current.observed_at.clone();
+        snapshot.current_pod_stale = current.stale;
+    } else {
+        snapshot.current_pod_observed_at = None;
+        snapshot.current_pod_stale = false;
+    }
+
+    let current_gpu_id = snapshot.current_pod.as_ref().map(|pod| pod.gpu_id.as_str());
+    for offer in &mut snapshot.offers {
+        if offer.source != "live" {
+            continue;
+        }
+        if offer.disabled_reason.as_deref() == Some("same_as_current") {
+            offer.disabled_reason = None;
+            offer.selectable = true;
+        }
+        if current_gpu_id == Some(offer.gpu_id.as_str()) && offer.disabled_reason.is_none() {
+            offer.disabled_reason = Some("same_as_current".to_owned());
+            offer.selectable = false;
+        }
+    }
 }
 
 fn parse_safe_pod(body: &str) -> NativeResult<NativeGpuSwitchPodV1> {
@@ -3239,6 +3259,157 @@ mod tests {
           {"id":"NVIDIA GeForce RTX 4090","name":"RTX 4090","manufacturer":"NVIDIA","memory":24,"secure":true,"price":{"secure":0.500001},"maxCount":{"secure":1},"dataCenters":[{"id":"EU-RO-1","availability":"HIGH"}]},
           {"id":"bad","name":"Bad","manufacturer":"NVIDIA","memory":24,"secure":true,"price":{"secure":"0.7"},"maxCount":{"secure":1},"dataCenters":[{"id":"EU-RO-1","availability":"HIGH"}]}
         ]}"#
+    }
+
+    #[test]
+    fn current_pod_join_keeps_live_offer_and_null_metadata_relations_valid() {
+        let observation_id = "10000000-0000-4000-8000-000000000000";
+        let receipt_id = "20000000-0000-4000-8000-000000000000";
+        let observed_at = "2026-09-13T00:00:00.000Z";
+        let offer = ParsedOffer {
+            gpu_id: "NVIDIA GeForce RTX 4090".to_owned(),
+            policy_key: "rtx_4090".to_owned(),
+            display_name: "RTX 4090".to_owned(),
+            memory_gb: 24,
+            emergency: false,
+            availability: "high".to_owned(),
+            hourly_price_micro_usd: Some(500_001),
+            max_count: 1,
+            secure: true,
+            cuda_13_ok: true,
+        };
+        let unavailable_offer = ParsedOffer {
+            gpu_id: "NVIDIA GeForce RTX 5090".to_owned(),
+            policy_key: "rtx_5090".to_owned(),
+            display_name: "RTX 5090".to_owned(),
+            memory_gb: 32,
+            availability: "none".to_owned(),
+            ..offer.clone()
+        };
+        let price_unavailable_offer = ParsedOffer {
+            gpu_id: "NVIDIA RTX A4500".to_owned(),
+            policy_key: "rtx_a4500".to_owned(),
+            display_name: "RTX A4500".to_owned(),
+            memory_gb: 20,
+            hourly_price_micro_usd: None,
+            ..offer.clone()
+        };
+        let mut snapshot = NativeGpuInventorySnapshotV1 {
+            schema_version: 1,
+            observation_id: observation_id.to_owned(),
+            process_epoch_id: "30000000-0000-4000-8000-000000000000".to_owned(),
+            include_emergency_tier: false,
+            state: "ready".to_owned(),
+            observed_at: Some(observed_at.to_owned()),
+            receipt: Some(NativeGpuInventoryReceiptV1 {
+                schema_version: 1,
+                receipt_id: receipt_id.to_owned(),
+                process_epoch_id: "30000000-0000-4000-8000-000000000000".to_owned(),
+                received_at: observed_at.to_owned(),
+                valid_for_ms: RECEIPT_VALID_FOR_MS,
+                catalog_sha256: "a".repeat(64),
+            }),
+            offers: vec![
+                live_offer(observation_id, receipt_id, observed_at, &offer),
+                live_offer(
+                    observation_id,
+                    receipt_id,
+                    observed_at,
+                    &unavailable_offer,
+                ),
+                live_offer(
+                    observation_id,
+                    receipt_id,
+                    observed_at,
+                    &price_unavailable_offer,
+                ),
+            ],
+            current_pod: None,
+            current_pod_observed_at: None,
+            current_pod_stale: false,
+            issue: None,
+        };
+
+        apply_current_pod_projection(
+            &mut snapshot,
+            &CurrentPodProjection {
+                pod: Some(NativeGpuSwitchPodV1 {
+                    pod_id: "pod-current-1".to_owned(),
+                    gpu_id: "NVIDIA GeForce RTX 4090".to_owned(),
+                    gpu_display_name: "RTX 4090".to_owned(),
+                    hourly_price_micro_usd: Some(500_001),
+                }),
+                observed_at: Some("2026-09-13T00:00:01.000Z".to_owned()),
+                stale: true,
+            },
+        );
+        assert_eq!(
+            snapshot.offers[0].disabled_reason.as_deref(),
+            Some("same_as_current")
+        );
+        assert!(!snapshot.offers[0].selectable);
+
+        apply_current_pod_projection(
+            &mut snapshot,
+            &CurrentPodProjection {
+                pod: Some(NativeGpuSwitchPodV1 {
+                    pod_id: "pod-current-2".to_owned(),
+                    gpu_id: "NVIDIA GeForce RTX 5090".to_owned(),
+                    gpu_display_name: "RTX 5090".to_owned(),
+                    hourly_price_micro_usd: Some(500_001),
+                }),
+                observed_at: Some("2026-09-13T00:00:01.000Z".to_owned()),
+                stale: false,
+            },
+        );
+        assert!(snapshot.offers[0].disabled_reason.is_none());
+        assert!(snapshot.offers[0].selectable);
+        assert_eq!(
+            snapshot.offers[1].disabled_reason.as_deref(),
+            Some("unavailable")
+        );
+        assert!(!snapshot.offers[1].selectable);
+
+        apply_current_pod_projection(
+            &mut snapshot,
+            &CurrentPodProjection {
+                pod: Some(NativeGpuSwitchPodV1 {
+                    pod_id: "pod-current-3".to_owned(),
+                    gpu_id: "NVIDIA RTX A4500".to_owned(),
+                    gpu_display_name: "RTX A4500".to_owned(),
+                    hourly_price_micro_usd: None,
+                }),
+                observed_at: Some("2026-09-13T00:00:01.000Z".to_owned()),
+                stale: false,
+            },
+        );
+        assert_eq!(
+            snapshot.offers[2].disabled_reason.as_deref(),
+            Some("price_unavailable")
+        );
+        assert!(!snapshot.offers[2].selectable);
+
+        apply_current_pod_projection(
+            &mut snapshot,
+            &CurrentPodProjection {
+                pod: None,
+                observed_at: Some("2026-09-13T00:00:02.000Z".to_owned()),
+                stale: true,
+            },
+        );
+        assert!(snapshot.current_pod.is_none());
+        assert!(snapshot.current_pod_observed_at.is_none());
+        assert!(!snapshot.current_pod_stale);
+        assert!(snapshot.offers[0].disabled_reason.is_none());
+        assert!(snapshot.offers[0].selectable);
+        assert_eq!(
+            snapshot.offers[1].disabled_reason.as_deref(),
+            Some("unavailable")
+        );
+        assert_eq!(
+            snapshot.offers[2].disabled_reason.as_deref(),
+            Some("price_unavailable")
+        );
     }
 
     #[test]

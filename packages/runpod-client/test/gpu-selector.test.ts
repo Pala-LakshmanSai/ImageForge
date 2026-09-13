@@ -220,6 +220,30 @@ describe("strict GPU selector snapshots and receipts", () => {
     assert.equal(snapshot.currentPod?.gpuId, "NVIDIA GeForce RTX 4090");
     assert.equal(snapshot.offers.find((offer) => offer.gpuId === snapshot.currentPod?.gpuId)?.disabledReason,
       "same_as_current");
+
+    const preFixJoin = {
+      ...snapshot,
+      offers: snapshot.offers.map((offer) => offer.gpuId === snapshot.currentPod?.gpuId
+        ? { ...offer, selectable: true, disabledReason: null }
+        : offer),
+    };
+    assert.equal(parseNativeGpuInventorySnapshotV1(preFixJoin, EPOCH), null);
+
+    const retryAfterCurrentPodClears = {
+      ...preFixJoin,
+      currentPod: null,
+      currentPodObservedAt: null,
+      currentPodStale: false,
+    };
+    assert.notEqual(parseNativeGpuInventorySnapshotV1(retryAfterCurrentPodClears, EPOCH), null);
+    assert.notEqual(
+      projectManualGpuSelectionV1(
+        retryAfterCurrentPodClears,
+        "NVIDIA GeForce RTX 4090",
+        EPOCH,
+      ),
+      null,
+    );
   });
 
   it("keeps a dynamic current Pod strict only alongside its fresh catalog identity", async () => {
