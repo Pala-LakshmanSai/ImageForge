@@ -152,6 +152,27 @@ describe('native GPU Start bridge', () => {
     expect(parseNativeGpuStartResultV1(ready)).toBeNull();
   });
 
+  it('accepts a terminal create_failed result and rejects a malformed one', () => {
+    // A capacity refusal settles terminally; it must never carry a Pod, an
+    // actual price, or an issue, because nothing was allocated.
+    const failed = {
+      schemaVersion: 1,
+      operationId: '00000000-0000-4000-8000-0000000000aa',
+      lifecycleRevision: 2,
+      state: 'create_failed',
+      pod: null,
+      confirmedHourlyPriceMicroUsd: 490000,
+      actualHourlyPriceMicroUsd: null,
+      issue: null,
+    };
+    expect(parseNativeGpuStartResultV1(failed)).toMatchObject({ state: 'create_failed' });
+    expect(parseNativeGpuStartResultV1({ ...failed, actualHourlyPriceMicroUsd: 490000 })).toBeNull();
+    expect(parseNativeGpuStartResultV1({
+      ...failed,
+      issue: { code: 'gpu_start_create_uncertain', retryable: false },
+    })).toBeNull();
+  });
+
   it('invokes Auto Start with only the exact four-field input', async () => {
     const input = parseNativeAutoGpuStartV1(
       vectors.acceptedInputs.find((vector) => vector.id === 'initial_auto_start')!.value,

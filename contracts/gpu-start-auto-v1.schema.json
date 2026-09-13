@@ -140,6 +140,7 @@
           "enum": [
             "create_intent",
             "create_uncertain",
+            "create_failed",
             "provisioning",
             "ready",
             "price_attention"
@@ -196,6 +197,19 @@
                 "retryable": { "const": false }
               }
             }
+          }
+        }
+      ]
+    },
+    "createFailedResult": {
+      "allOf": [
+        { "$ref": "#/$defs/resultBase" },
+        {
+          "properties": {
+            "state": { "const": "create_failed" },
+            "pod": { "type": "null" },
+            "actualHourlyPriceMicroUsd": { "type": "null" },
+            "issue": { "type": "null" }
           }
         }
       ]
@@ -271,6 +285,7 @@
       "oneOf": [
         { "$ref": "#/$defs/createIntentResult" },
         { "$ref": "#/$defs/createUncertainResult" },
+        { "$ref": "#/$defs/createFailedResult" },
         { "$ref": "#/$defs/provisioningResult" },
         { "$ref": "#/$defs/readyResult" },
         { "$ref": "#/$defs/priceAttentionChangedResult" },

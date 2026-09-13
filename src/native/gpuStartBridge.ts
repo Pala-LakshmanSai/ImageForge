@@ -44,7 +44,7 @@ export interface NativeGpuStartResultV1 {
   readonly schemaVersion: 1;
   readonly operationId: string;
   readonly lifecycleRevision: number;
-  readonly state: 'create_intent' | 'create_uncertain' | 'provisioning' | 'ready' | 'price_attention';
+  readonly state: 'create_intent' | 'create_uncertain' | 'create_failed' | 'provisioning' | 'ready' | 'price_attention';
   readonly pod: NativeGpuStartPodV1 | null;
   readonly confirmedHourlyPriceMicroUsd: number;
   readonly actualHourlyPriceMicroUsd: number | null;
@@ -197,7 +197,7 @@ export function parseNativeGpuStartResultV1(value: unknown): NativeGpuStartResul
     value.schemaVersion !== 1
     || !isUuid(value.operationId)
     || !isRevision(value.lifecycleRevision, true)
-    || !['create_intent', 'create_uncertain', 'provisioning', 'ready', 'price_attention'].includes(value.state as string)
+    || !['create_intent', 'create_uncertain', 'create_failed', 'provisioning', 'ready', 'price_attention'].includes(value.state as string)
     || !isMicroUsd(value.confirmedHourlyPriceMicroUsd)
     || (value.actualHourlyPriceMicroUsd !== null && !isMicroUsd(value.actualHourlyPriceMicroUsd))
   ) return null;
@@ -210,6 +210,7 @@ export function parseNativeGpuStartResultV1(value: unknown): NativeGpuStartResul
   const actual = value.actualHourlyPriceMicroUsd as number | null;
   if (
     (state === 'create_intent' && (pod !== null || actual !== null || issue !== null))
+    || (state === 'create_failed' && (pod !== null || actual !== null || issue !== null))
     || (state === 'create_uncertain' && (
       pod !== null || actual !== null || issue?.code !== 'gpu_start_create_uncertain'
     ))

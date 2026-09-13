@@ -46,6 +46,7 @@ const IMAGEFORGE_TEMPLATE_ID: &str = "q8sfgixfy2";
 const IMAGEFORGE_NETWORK_VOLUME_ID: &str = "kdqerqkwdh";
 const IMAGEFORGE_WORKER_IMAGE: &str =
     "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:5606ac29b07f85b831bba1e6aa359d32b99c55027679eb871f0166fa3bd3773e";
+const REQUIRED_CUDA_VERSION: &str = "13.0";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -339,6 +340,10 @@ struct ParsedOffer {
     hourly_price_micro_usd: Option<u64>,
     max_count: u64,
     secure: bool,
+    /// Whether the catalog row offers the exact CUDA version the create body
+    /// demands. RunPod treats that constraint as an exact-match set, so a row
+    /// without it can never be created no matter how available it looks.
+    cuda_13_ok: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1540,18 +1545,37 @@ impl GpuInventoryService {
         self.persist_replace(&sent, intent.result.lifecycle_revision)?;
         let created = match runpod.native_create_selected_pod(body, body_jcs).await {
             Ok(created) => created,
-            Err(error) if error.code == "gpu_start_create_uncertain" => {
-                let uncertain = start_result_transition(
-                    &sent,
-                    "create_uncertain",
-                    None,
-                    None,
-                    Some(start_issue("gpu_start_create_uncertain")),
-                )?;
-                self.persist_replace(&uncertain, sent.result.lifecycle_revision)?;
-                return Ok(uncertain.result);
+            Err(error) if error.code == "gpu_start_no_capacity" => {
+                // The provider refused before allocating anything and the
+                // transport already cleared its marker, so this is a settled
+                // terminal outcome rather than an ambiguous create. Recording
+                // it leaves no in-flight state to wedge the next Start.
+                let failed = start_result_transition(&sent, "create_failed", None, None, None)?;
+                self.persist_replace(&failed, sent.result.lifecycle_revision)?;
+                return Ok(failed.result);
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                // Every error leaving the create step must settle the journal out
+                // of its in-flight state. A pending marker means a provider write
+                // may have happened, so the outcome stays uncertain; no marker
+                // means nothing was sent and the attempt failed terminally. An
+                // in-flight journal here refused every later Start as
+                // `gpu_start_operation_in_progress` with no recovery control able
+                // to clear it, which is how a rejected create bricked the app.
+                let pending = runpod.create_marker_metadata()?.pending;
+                let settled = start_result_transition(
+                    &sent,
+                    if pending { "create_uncertain" } else { "create_failed" },
+                    None,
+                    None,
+                    pending.then(|| start_issue("gpu_start_create_uncertain")),
+                )?;
+                self.persist_replace(&settled, sent.result.lifecycle_revision)?;
+                if pending {
+                    return Ok(settled.result);
+                }
+                return Err(error);
+            }
         };
         let mut pod = parse_safe_pod(&created.projected_body)?;
         let actual = parse_created_pod_price(&created.raw_body);
@@ -2020,6 +2044,15 @@ struct GpuEntry {
     price: SecurePrice,
     max_count: SecureMaxCount,
     data_centers: Vec<GpuDataCenter>,
+    /// Absent on rows that report no CUDA information at all.
+    #[serde(default)]
+    cuda_versions: Vec<GpuCudaVersion>,
+}
+
+#[derive(Deserialize)]
+struct GpuCudaVersion {
+    version: String,
+    available: bool,
 }
 
 #[derive(Deserialize)]
@@ -2118,6 +2151,10 @@ fn parse_gpu_catalog(
         let Some(max_count) = parse_max_count(entry.max_count.secure.get()) else {
             continue;
         };
+        let cuda_13_ok = entry
+            .cuda_versions
+            .iter()
+            .any(|cuda| cuda.version == REQUIRED_CUDA_VERSION && cuda.available);
         if policy.exact_ids.is_empty() {
             dynamic_catalog.insert(entry.id.clone(), policy.display_name.to_owned());
         }
@@ -2131,6 +2168,7 @@ fn parse_gpu_catalog(
             hourly_price_micro_usd,
             max_count,
             secure: true,
+            cuda_13_ok,
         });
     }
     offers.sort_by(|left, right| {
@@ -2285,6 +2323,7 @@ fn auto_order(offers: &[ParsedOffer]) -> Vec<String> {
             !offer.emergency
                 && offer.availability != "none"
                 && offer.max_count > 0
+                && offer.cuda_13_ok
                 && offer.hourly_price_micro_usd.is_some()
         })
         .collect::<Vec<_>>();
@@ -2318,7 +2357,7 @@ fn create_body(operation_id: &str, gpu_type_ids: &[String]) -> Value {
         "gpuCount": 1,
         "interruptible": false,
         "dataCenterIds": ["EU-RO-1"],
-        "allowedCudaVersions": ["13.0"],
+        "allowedCudaVersions": [REQUIRED_CUDA_VERSION],
         "minRAMPerGPU": 16,
     })
 }
@@ -2641,6 +2680,10 @@ fn start_error(code: &'static str) -> NativeError {
             true,
             "Another ImageForge GPU operation is already in progress.",
         ),
+        "gpu_start_no_capacity" => (
+            true,
+            "No capacity for the selected GPU right now. Use Auto to let ImageForge choose, or pick another GPU.",
+        ),
         "gpu_start_create_uncertain" => (
             false,
             "RunPod may have created the GPU. Resolve this Start before trying again.",
@@ -2805,11 +2848,11 @@ fn validate_persisted_start(record: &PersistedNormalStartV1) -> NativeResult<()>
         (NormalStartPostStateV1::PostSendPending, "create_intent")
             | (
                 NormalStartPostStateV1::PostSent,
-                "create_intent" | "create_uncertain"
+                "create_intent" | "create_uncertain" | "create_failed"
             )
             | (
                 NormalStartPostStateV1::Settled,
-                "create_uncertain" | "provisioning" | "ready" | "price_attention"
+                "create_uncertain" | "create_failed" | "provisioning" | "ready" | "price_attention"
             )
     );
     post_state_valid
@@ -2844,6 +2887,11 @@ fn validate_start_result_shape(result: &NativeManualGpuStartResultV1) -> NativeR
             .is_some_and(|issue| issue.code == code && !issue.retryable)
     };
     let valid = match result.state.as_str() {
+        "create_failed" => {
+            result.pod.is_none()
+                && result.actual_hourly_price_micro_usd.is_none()
+                && result.issue.is_none()
+        }
         "create_intent" => {
             result.pod.is_none()
                 && result.actual_hourly_price_micro_usd.is_none()
@@ -3635,5 +3683,61 @@ mod tests {
             recovered.post_state,
             NormalStartPostStateV1::PostSent
         ));
+    }
+
+    #[test]
+    fn a_capacity_refusal_settles_as_a_terminal_create_failure() {
+        // The provider refused before allocating anything, so the journal has to
+        // hold a settled terminal outcome. An in-flight state here is exactly
+        // what left every later Start refused as `gpu_start_operation_in_progress`.
+        let failed = start_result_transition(&sent_start_record(), "create_failed", None, None, None)
+            .unwrap();
+        assert!(matches!(
+            failed.post_state,
+            NormalStartPostStateV1::Settled
+        ));
+        assert!(!is_in_flight_start_state(&failed.result.state));
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("gpu-start");
+        NormalStartJournal::new(root.clone())
+            .unwrap()
+            .persist(&failed)
+            .unwrap();
+        let loaded = GpuInventoryService::new_for_test(root)
+            .unwrap()
+            .start_load()
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.state, "create_failed");
+        assert!(loaded.pod.is_none());
+        assert!(loaded.issue.is_none());
+    }
+
+    #[test]
+    fn create_failed_result_shape_rejects_any_pod_or_issue() {
+        assert!(start_result_transition(
+            &sent_start_record(),
+            "create_failed",
+            None,
+            None,
+            Some(start_issue("gpu_start_create_uncertain")),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn auto_order_excludes_a_gpu_missing_the_exact_required_cuda_version() {
+        // The create body demands one exact CUDA version, so a GPU whose catalog
+        // row only offers a newer one cannot be created however available it is.
+        let offers = parse_gpu_catalog(cuda_catalog(), false).unwrap().offers;
+        assert_eq!(auto_order(&offers), vec!["NVIDIA L4".to_owned()]);
+    }
+
+    fn cuda_catalog() -> &'static str {
+        r#"{"gpus":[
+          {"id":"NVIDIA RTX A4500","name":"RTX A4500","manufacturer":"NVIDIA","memory":20,"secure":true,"price":{"secure":0.27},"maxCount":{"secure":1},"dataCenters":[{"id":"EU-RO-1","availability":"HIGH"}],"cudaVersions":[{"available":false,"version":"13.0"},{"available":true,"version":"13.2"}]},
+          {"id":"NVIDIA L4","name":"L4","manufacturer":"NVIDIA","memory":24,"secure":true,"price":{"secure":0.49},"maxCount":{"secure":1},"dataCenters":[{"id":"EU-RO-1","availability":"HIGH"}],"cudaVersions":[{"available":true,"version":"13.0"}]}
+        ]}"#
     }
 }

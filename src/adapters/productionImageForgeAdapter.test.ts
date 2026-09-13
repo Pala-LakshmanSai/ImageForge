@@ -1539,6 +1539,50 @@ describe('production ImageForge adapter', () => {
     expect(native.authorizeStart).not.toHaveBeenCalled();
   });
 
+  it('reports a capacity refusal as a pod error without latching create recovery', async () => {
+    // A settled create_failed outcome means nothing was allocated, so the app
+    // must offer the ordinary retry instead of the duplicate-Pod recovery latch.
+    const native = port({});
+    const adapter = createProductionImageForgeAdapter(native);
+    const events: ProductionRuntimeEvent[] = [];
+    adapter.runtime!.subscribe((event) => events.push(event));
+    const refresh = vi.spyOn(GpuLifecycleCoordinator.prototype, 'refresh')
+      .mockResolvedValue(undefined as never);
+    const startSelected = vi.spyOn(GpuLifecycleCoordinator.prototype, 'startSelected')
+      .mockResolvedValue({
+        schemaVersion: 1,
+        operationId: '00000000-0000-4000-8000-0000000000aa',
+        lifecycleRevision: 2,
+        state: 'create_failed',
+        pod: null,
+        confirmedHourlyPriceMicroUsd: 490_000,
+        actualHourlyPriceMicroUsd: null,
+        issue: null,
+      } as never);
+    try {
+      await adapter.runtime!.startGpuChoice(createConfiguredInitialState(), {
+        kind: 'manual_start',
+        projection: {
+          schemaVersion: 1,
+          observationId: '11111111-1111-4111-8111-111111111111',
+          receiptId: '22222222-2222-4222-8222-222222222222',
+          targetGpuId: 'NVIDIA L4',
+          confirmedHourlyPriceMicroUsd: 490_000,
+        },
+        offer: { gpuId: 'NVIDIA L4' },
+      } as never);
+    } finally {
+      startSelected.mockRestore();
+      refresh.mockRestore();
+    }
+    expect(events.filter((event) => event.type === 'error').at(-1)).toMatchObject({
+      type: 'error',
+      scope: 'pod',
+      message: 'No capacity for the selected GPU right now. Use Auto to let ImageForge choose, or pick another GPU.',
+    });
+    expect(events.some((event) => event.type === 'create-recovery' && event.marker !== null)).toBe(false);
+  });
+
   it('surfaces the pending create attempt when a Start is refused by it', async () => {
     // A Start blocked by an unreconciled create attempt previously published
     // nothing, so the recovery panel never rendered and the button looked dead.

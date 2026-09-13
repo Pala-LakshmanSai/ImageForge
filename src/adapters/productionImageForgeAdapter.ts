@@ -848,6 +848,21 @@ class ProductionRuntime implements ProductionRuntimeFacade {
     state: AppState,
     result: NativeGpuStartResultV1,
   ): Promise<void> {
+    if (result.state === 'create_failed') {
+      // The provider refused before allocating anything and native already
+      // cleared its create marker, so there is no Pod to hunt for. Report a
+      // plain retryable capacity failure instead of latching create recovery,
+      // then refresh so the selector reflects current availability.
+      const message = 'No capacity for the selected GPU right now. Use Auto to let ImageForge choose, or pick another GPU.';
+      this.#emitError('pod', new Error(message), message);
+      const count = state.batch?.prompts.length || state.draft.prompts.length || 450;
+      await this.#gpu.refresh(
+        state.setup.studioProfile,
+        count,
+        state.settings.slowEmergencyGpuEnabled,
+      );
+      return;
+    }
     if (result.state === 'create_uncertain') {
       this.#emitError(
         'pod',

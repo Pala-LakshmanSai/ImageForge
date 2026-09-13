@@ -29,6 +29,10 @@ const IMAGEFORGE_WORKER_IMAGE: &str =
     "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:5606ac29b07f85b831bba1e6aa359d32b99c55027679eb871f0166fa3bd3773e";
 const IMAGEFORGE_VOLUME_MOUNT_PATH: &str = "/workspace";
 const IMAGEFORGE_WORKER_PORT: u16 = 8000;
+// The create constraint is an exact-match set, not a floor, while the catalog
+// query below expresses a floor. A GPU whose catalog row does not offer this
+// exact version cannot be created at all, however available it looks.
+const REQUIRED_CUDA_VERSION: &str = "13.0";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RunPodProfileBinding {
@@ -655,11 +659,13 @@ impl RunPodTransport {
     }
 
     /// See `native_catalog_datacenters`. The query ordering is literal and
-    /// pinned by the Task 014 inventory contract.
+    /// pinned by the Task 014 inventory contract; only the CUDA floor is
+    /// interpolated, so this read and the create body's exact-match constraint
+    /// can never disagree about what the worker image needs.
     pub(crate) async fn native_catalog_gpus(&self) -> NativeResult<NativeCatalogBody> {
-        self.native_catalog_get(
-            "https://api.runpod.io/v2/catalog/gpus?include=AVAILABILITY&product=POD&count=1&cloud=SECURE&minCudaVersion=13.0",
-        )
+        self.native_catalog_get(&format!(
+            "https://api.runpod.io/v2/catalog/gpus?include=AVAILABILITY&product=POD&count=1&cloud=SECURE&minCudaVersion={REQUIRED_CUDA_VERSION}"
+        ))
         .await
     }
 
@@ -776,6 +782,12 @@ impl RunPodTransport {
         }
         let pods = parse_normal_start_list_pods(&response.body, &profile)?;
         if pods.is_empty() {
+            // Nothing is running for this profile, so an attempt that never
+            // received a Pod id cannot still be billing. Retire it here instead
+            // of leaving a marker no identity match can ever clear.
+            if let Some(attempt_id) = self.create_marker.unidentified_pending_attempt()? {
+                self.create_marker.clear(&attempt_id)?;
+            }
             Ok(())
         } else {
             Err(normal_start_error("gpu_start_existing_pod"))
@@ -1254,7 +1266,7 @@ impl RunPodTransport {
                 "IMAGEFORGE_CREATE_CONTRACT_REVISION": "1",
                 "IMAGEFORGE_CREATE_MARKER_SHA256": create_marker_sha256,
             },
-            "allowedCudaVersions": ["13.0"],
+            "allowedCudaVersions": [REQUIRED_CUDA_VERSION],
             "minRAMPerGPU": 16,
         });
         let canonical_body =
@@ -1424,7 +1436,23 @@ impl RunPodTransport {
                     "The Pod create result is unknown; reconcile the exact native create marker before trying again.",
                 )
             })?;
-        if response.status().as_u16() != 201 {
+        let create_status = response.status().as_u16();
+        if create_status != 201 {
+            let refusal_body = read_bounded_body(response, MAX_RESPONSE_BYTES)
+                .await
+                .unwrap_or_default();
+            // A refusal is definitive only when the provider said so *and* the
+            // bound profile has no Pod. Together those prove nothing was
+            // created, so the durable marker must not be left behind to block
+            // every later Start. Anything less stays create-uncertain.
+            if create_refusal_is_definitive(create_status, &refusal_body)
+                && self.native_preflight_no_managed_pod().await.is_ok()
+            {
+                if let Some(attempt_id) = self.create_marker.unidentified_pending_attempt()? {
+                    self.create_marker.clear(&attempt_id)?;
+                }
+                return Err(normal_start_error("gpu_start_no_capacity"));
+            }
             return Err(NativeError::new(
                 "gpu_start_create_uncertain",
                 "The Pod create result is unknown; reconcile the exact native create marker before trying again.",
@@ -1883,7 +1911,17 @@ impl RunPodTransport {
     /// state, is not running and cannot bill.
     fn retire_create_marker_against_list(&self, pods: &[Value]) -> NativeResult<()> {
         let marker = self.create_marker.metadata()?;
-        let (Some(attempt_id), Some(pod_id)) = (marker.attempt_id, marker.pod_id) else {
+        let Some(attempt_id) = marker.attempt_id else {
+            return Ok(());
+        };
+        let Some(pod_id) = marker.pod_id else {
+            // This attempt never received a Pod identity, so no row can be
+            // matched against it. An empty provider list for the bound profile
+            // is the proof that it created nothing, and waiting on an identity
+            // that will never exist only wedged every later Start.
+            if pods.is_empty() {
+                self.create_marker.clear(&attempt_id)?;
+            }
             return Ok(());
         };
         let recorded = pods.iter().find(|pod| {
@@ -2179,6 +2217,22 @@ impl CreateMarkerStore {
             gpu_id: marker.gpu_ids.first().cloned(),
             pod_id,
         })
+    }
+
+    /// The attempt id of a pending marker that never recorded an exact Pod,
+    /// because the create never returned a success identity. No identity-based
+    /// reconciliation can ever match such a marker, so an empty profile-scoped
+    /// Pod list is the only evidence that can retire it.
+    fn unidentified_pending_attempt(&self) -> NativeResult<Option<String>> {
+        let _guard = self.io.lock().map_err(|_| state_error())?;
+        if !self.pending_path().exists() || self.pod_id_path().exists() {
+            return Ok(None);
+        }
+        let encoded = std::fs::read(self.pending_path()).map_err(|_| create_marker_io_error())?;
+        let marker: PersistedCreateAttempt =
+            serde_json::from_slice(&encoded).map_err(|_| create_marker_invalid())?;
+        validate_persisted_create_attempt(&marker)?;
+        Ok(Some(marker.attempt_id))
     }
 
     fn clear(&self, attempt_id: &str) -> NativeResult<()> {
@@ -2778,6 +2832,15 @@ fn response_invalid() -> NativeError {
 // transport/profile failure into the small documented action registry.  The
 // generic compatibility transport keeps its existing richer internal codes;
 // only the narrow native Start path uses this mapping.
+/// A create refusal that provably allocated nothing. RunPod answers an
+/// unsatisfiable placement with 500 and this exact message, and a body it will
+/// never accept with 400/422. Every other status stays ambiguous, because the
+/// Pod may exist and guessing would risk a duplicate billed rental.
+fn create_refusal_is_definitive(status: u16, body: &str) -> bool {
+    matches!(status, 400 | 422)
+        || (status == 500 && body.contains("There are no instances currently available"))
+}
+
 fn normal_start_error(code: &'static str) -> NativeError {
     let (retryable, message) = match code {
         "gpu_start_profile_locked" => (false, "The ImageForge GPU profile changed before Start."),
@@ -2788,6 +2851,10 @@ fn normal_start_error(code: &'static str) -> NativeError {
         "gpu_start_operation_in_progress" => (
             true,
             "Another ImageForge GPU operation is already in progress.",
+        ),
+        "gpu_start_no_capacity" => (
+            true,
+            "No capacity for the selected GPU right now. Use Auto to let ImageForge choose, or pick another GPU.",
         ),
         "gpu_start_create_uncertain" => (
             false,
@@ -3100,7 +3167,7 @@ fn validate_inventory(method: &Method, url: &Url, body: Option<&Value>) -> Nativ
                 ("product", "POD"),
                 ("count", "1"),
                 ("cloud", "SECURE"),
-                ("minCudaVersion", "13.0"),
+                ("minCudaVersion", REQUIRED_CUDA_VERSION),
             ],
         ),
         _ => Err(rejected()),
@@ -3186,7 +3253,7 @@ fn validate_create_pod(method: &Method, url: &Url, body: Option<&Value>) -> Nati
     require_json_integer_range(object, "minRAMPerGPU", 16, 32)?;
     require_json_string_array(object, "ports", &["8000/http"])?;
     require_json_string_array(object, "dataCenterIds", &["EU-RO-1"])?;
-    require_json_string_array(object, "allowedCudaVersions", &["13.0"])?;
+    require_json_string_array(object, "allowedCudaVersions", &[REQUIRED_CUDA_VERSION])?;
     if let Some(env) = object.get("env") {
         let env = env.as_object().ok_or_else(rejected)?;
         const SWITCH_ENV_KEYS: &[&str] = &[
@@ -4891,5 +4958,305 @@ mod tests {
         assert!(safe_retry_after("86401").is_none());
         assert!(safe_retry_after("rp_live_reflected_secret").is_none());
         assert!(safe_retry_after("Wed, 21 Oct 2015 07:28:00 GMT").is_none());
+    }
+
+    /// The reviewed cold order. Native Auto intersects this with live inventory,
+    /// so any live proof has to intersect and order by the same list. B200 is
+    /// deliberately absent: it is excluded by policy and the create boundary
+    /// refuses it before any provider write.
+    const APPROVED_GPU_ORDER: &[&str] = &[
+        "NVIDIA GeForce RTX 4090",
+        "NVIDIA RTX PRO 4500 Blackwell",
+        "NVIDIA GeForce RTX 5090",
+        "NVIDIA RTX PRO 4000 Blackwell",
+        "NVIDIA L4",
+        "NVIDIA RTX A4500",
+        "NVIDIA RTX 4000 Ada Generation",
+        "NVIDIA A100 80GB PCIe",
+        "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+        "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+    ];
+
+    /// Live provider proof that a capacity refusal is a terminal outcome which
+    /// cannot wedge the Start path. Ignored by default: it needs a real
+    /// credential and it talks to the paid provider.
+    ///
+    ///   IMAGEFORGE_LIVE_RUNPOD_TESTS=1 RUNPOD_API_KEY=... \
+    ///     cargo test --lib -- --ignored --nocapture --test-threads=1 live_capacity_refusal
+    ///
+    /// Live proofs must run serially: they share one real account, so a
+    /// concurrently created Pod makes the refusal path look wedged.
+    #[tokio::test]
+    #[ignore = "live RunPod provider proof; requires IMAGEFORGE_LIVE_RUNPOD_TESTS=1"]
+    async fn live_capacity_refusal_is_terminal_and_never_wedges() {
+        if std::env::var("IMAGEFORGE_LIVE_RUNPOD_TESTS").ok().as_deref() != Some("1") {
+            return;
+        }
+        let Ok(key) = std::env::var("RUNPOD_API_KEY") else {
+            return;
+        };
+        use crate::native::vault::{CredentialKind, CredentialVault};
+        let temporary = tempfile::tempdir().unwrap();
+        let vault = Arc::new(MemoryVault::default());
+        vault
+            .replace(CredentialKind::RunpodApiKey, &key)
+            .expect("live credential is well formed");
+        let transport = RunPodTransport::new_for_test(vault, temporary.path().join("marker")).unwrap();
+        transport
+            .bind_profile(IMAGEFORGE_TEMPLATE_ID, IMAGEFORGE_NETWORK_VOLUME_ID)
+            .unwrap();
+
+        // The account must be clean before the refusal is staged.
+        transport
+            .native_preflight_no_managed_pod()
+            .await
+            .expect("live account has no managed Pod");
+
+        // Pick an approved GPU the catalog does not offer in EU-RO-1 at all, so
+        // the provider answers without allocating anything. Read-only probe.
+        let client = reqwest::Client::new();
+        let catalog: Value = client
+            .get("https://api.runpod.io/v2/catalog/gpus?include=AVAILABILITY&product=POD&count=1&cloud=SECURE")
+            .header(AUTHORIZATION, format!("Bearer {key}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let gpu = catalog["gpus"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| {
+                row["id"]
+                    .as_str()
+                    .is_some_and(|id| APPROVED_GPU_ORDER.contains(&id))
+            })
+            .find(|row| {
+                !row["dataCenters"]
+                    .as_array()
+                    .is_some_and(|centers| centers.iter().any(|c| c["id"] == "EU-RO-1"))
+            })
+            .and_then(|row| row["id"].as_str())
+            .expect("an approved GPU is absent from EU-RO-1, so a refusal can be staged")
+            .to_owned();
+        println!("staging refusal against: {gpu}");
+
+        let body = create_body(&[gpu.as_str()]);
+        let canonical = crate::native::gpu_inventory::jcs_value(&body).unwrap();
+        let outcome = transport.native_create_selected_pod(body, canonical).await;
+
+        // If the provider unexpectedly placed, clean up before asserting so a
+        // failing live run never leaves a billed Pod behind.
+        if let Ok(created) = &outcome {
+            let created: Value = serde_json::from_str(&created.projected_body).unwrap();
+            let pod_id = created["id"].as_str().unwrap().to_owned();
+            let deleted = client
+                .delete(format!("https://rest.runpod.io/v1/pods/{pod_id}"))
+                .header(AUTHORIZATION, format!("Bearer {key}"))
+                .send()
+                .await
+                .unwrap()
+                .status();
+            panic!("{gpu} was placeable after all (pod {pod_id}, delete {deleted}); refusal not staged");
+        }
+        let error = outcome.expect_err("an unplaceable GPU must be refused");
+        println!("refusal: code={} retryable={}", error.code, error.retryable);
+        assert_eq!(error.code, "gpu_start_no_capacity");
+        assert!(error.retryable, "a capacity refusal must be retryable");
+
+        // The wedge: the refusal must not leave a marker behind, and a later
+        // Start must still clear its own preflight.
+        assert!(
+            !transport.create_marker.metadata().unwrap().pending,
+            "a definitive refusal must clear the create marker"
+        );
+        transport
+            .native_preflight_no_managed_pod()
+            .await
+            .expect("a refusal must not wedge the next Start");
+        println!("PROVEN: refusal is terminal, marker cleared, next Start not wedged");
+    }
+
+    /// Live proof that the ordinary create path still places a Pod, and that
+    /// the Auto candidate rule only proposes GPUs the create body can actually
+    /// satisfy. The created Pod is terminated before the test returns.
+    ///
+    ///   IMAGEFORGE_LIVE_RUNPOD_TESTS=1 RUNPOD_API_KEY=... \
+    ///     cargo test --lib -- --ignored --nocapture --test-threads=1 live_auto_order_places
+    ///
+    /// Live proofs must run serially: they share one real account, so a
+    /// concurrently created Pod makes the refusal path look wedged.
+    #[tokio::test]
+    #[ignore = "live RunPod provider proof; requires IMAGEFORGE_LIVE_RUNPOD_TESTS=1"]
+    async fn live_auto_order_places_a_pod_and_is_cleaned_up() {
+        if std::env::var("IMAGEFORGE_LIVE_RUNPOD_TESTS").ok().as_deref() != Some("1") {
+            return;
+        }
+        let Ok(key) = std::env::var("RUNPOD_API_KEY") else {
+            return;
+        };
+        use crate::native::vault::{CredentialKind, CredentialVault};
+        let temporary = tempfile::tempdir().unwrap();
+        let vault = Arc::new(MemoryVault::default());
+        vault
+            .replace(CredentialKind::RunpodApiKey, &key)
+            .expect("live credential is well formed");
+        let transport = RunPodTransport::new_for_test(vault, temporary.path().join("marker")).unwrap();
+        transport
+            .bind_profile(IMAGEFORGE_TEMPLATE_ID, IMAGEFORGE_NETWORK_VOLUME_ID)
+            .unwrap();
+        transport
+            .native_preflight_no_managed_pod()
+            .await
+            .expect("live account has no managed Pod");
+        // A live create needs the same dynamic-GPU allowlist the inventory
+        // observation installs (`native_replace_dynamic_catalog` after the
+        // strict parse). Without it the create boundary refuses dynamic
+        // Blackwell ids before any provider write, which is a policy rejection
+        // rather than a capacity one.
+        let client = reqwest::Client::new();
+        let catalog: Value = client
+            .get("https://api.runpod.io/v2/catalog/gpus?include=AVAILABILITY&product=POD&count=1&cloud=SECURE")
+            .header(AUTHORIZATION, format!("Bearer {key}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        transport
+            .record_catalog_gpus(&catalog)
+            .expect("live catalog installs the dynamic allowlist");
+        // Exactly the rule the native Auto order now applies: an approved GPU
+        // that EU-RO-1 serves, with the one exact CUDA version the create body
+        // demands. Anything else would be a request the provider must refuse.
+        let mut candidates: Vec<String> = catalog["gpus"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| {
+                let in_region = row["dataCenters"]
+                    .as_array()
+                    .is_some_and(|centers| centers.iter().any(|c| c["id"] == "EU-RO-1"));
+                let has_cuda = row["cudaVersions"].as_array().is_some_and(|versions| {
+                    versions
+                        .iter()
+                        .any(|v| v["version"] == REQUIRED_CUDA_VERSION && v["available"] == true)
+                });
+                in_region
+                    && has_cuda
+                    && row["price"]["secure"].is_number()
+                    && row["maxCount"]["secure"].as_u64().is_some_and(|count| count > 0)
+            })
+            .filter_map(|row| row["id"].as_str().map(str::to_owned))
+            // Static approved ids only. The two dynamic Blackwell policies still
+            // match on their display name while RunPod now reports "RTX PRO
+            // 4500"/"RTX PRO 4000", so the strict inventory parser drops them and
+            // production never proposes them. A live proof must mirror that.
+            .filter(|id| approved_gpu_id(id))
+            .collect();
+        candidates.sort_by_key(|id| {
+            APPROVED_GPU_ORDER
+                .iter()
+                .position(|approved| approved == id)
+                .unwrap_or(usize::MAX)
+        });
+        assert!(
+            !candidates.is_empty(),
+            "the live Auto order found no GPU, which is the state the app reports instead of creating"
+        );
+        println!("live Auto candidates in policy order: {candidates:?}");
+
+        let body = create_body(&candidates.iter().map(String::as_str).collect::<Vec<_>>());
+        let canonical = crate::native::gpu_inventory::jcs_value(&body).unwrap();
+        let created = transport
+            .native_create_selected_pod(body, canonical)
+            .await
+            .expect("the live Auto order must place a Pod");
+        let projected: Value = serde_json::from_str(&created.projected_body).unwrap();
+        let pod_id = projected["id"].as_str().unwrap().to_owned();
+        println!("placed pod: {pod_id} on {}", projected["gpu"]["id"]);
+
+        // Never leave a billed Pod behind, whatever the assertions do.
+        let status = client
+            .delete(format!("https://rest.runpod.io/v1/pods/{pod_id}"))
+            .header(AUTHORIZATION, format!("Bearer {key}"))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        println!("terminated pod: {pod_id} -> {status}");
+        assert!(status.is_success(), "the created Pod must be terminated");
+        let remaining: Value = client
+            .get("https://rest.runpod.io/v1/pods")
+            .header(AUTHORIZATION, format!("Bearer {key}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(
+            remaining.as_array().is_some_and(|pods| pods.is_empty()),
+            "no Pod may be left billing"
+        );
+        println!("PROVEN: the ordinary create path places a Pod and cleans up");
+    }
+
+    #[test]
+    fn only_a_proven_no_allocation_refusal_is_definitive() {
+        assert!(create_refusal_is_definitive(400, ""));
+        assert!(create_refusal_is_definitive(422, ""));
+        assert!(create_refusal_is_definitive(
+            500,
+            "{\"error\":\"create pod: There are no instances currently available\",\"status\":500}"
+        ));
+        // A bare 5xx may have allocated the Pod before failing, so it stays
+        // ambiguous; guessing here risks a duplicate billed rental.
+        assert!(!create_refusal_is_definitive(500, "{\"error\":\"internal\"}"));
+        assert!(!create_refusal_is_definitive(
+            502,
+            "There are no instances currently available"
+        ));
+        assert!(!create_refusal_is_definitive(401, "unauthorized"));
+        assert!(!create_refusal_is_definitive(429, "rate limited"));
+    }
+
+    #[test]
+    fn create_marker_without_a_pod_identity_retires_only_against_an_empty_list() {
+        let temporary = tempfile::tempdir().unwrap();
+        let transport = RunPodTransport::new_for_test(
+            Arc::new(MemoryVault::default()),
+            temporary.path().join("marker"),
+        )
+        .unwrap();
+        transport
+            .bind_profile(IMAGEFORGE_TEMPLATE_ID, IMAGEFORGE_NETWORK_VOLUME_ID)
+            .unwrap();
+        // A refusal never returns a success identity, so `set_pod_id` is never
+        // reached and no row can ever be matched against this marker.
+        let body = create_body(&["NVIDIA GeForce RTX 4090"]);
+        transport.create_marker.begin(&body).unwrap();
+        assert_eq!(
+            transport.create_marker.unidentified_pending_attempt().unwrap(),
+            transport.create_marker.metadata().unwrap().attempt_id
+        );
+
+        // A non-empty profile list means something is running, so the marker
+        // must stay pending rather than guess that it is ours.
+        let pod: Value = serde_json::from_str(&managed_pod_json(
+            IMAGEFORGE_NETWORK_VOLUME_ID,
+            "NVIDIA GeForce RTX 4090",
+        ))
+        .unwrap();
+        transport.retire_create_marker_against_list(&[pod]).unwrap();
+        assert!(transport.create_marker.metadata().unwrap().pending);
+
+        // The provider's own empty set for the bound profile is the proof that
+        // nothing was created and nothing can be billing.
+        transport.retire_create_marker_against_list(&[]).unwrap();
+        assert!(!transport.create_marker.metadata().unwrap().pending);
     }
 }
