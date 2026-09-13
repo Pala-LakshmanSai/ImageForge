@@ -26,7 +26,7 @@ const EMERGENCY_GPU_ID: &str = "NVIDIA RTX 2000 Ada Generation";
 const IMAGEFORGE_TEMPLATE_ID: &str = "q8sfgixfy2";
 const IMAGEFORGE_NETWORK_VOLUME_ID: &str = "kdqerqkwdh";
 const IMAGEFORGE_WORKER_IMAGE: &str =
-    "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:5606ac29b07f85b831bba1e6aa359d32b99c55027679eb871f0166fa3bd3773e";
+    "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:3fe3074cc365cfe6f984907733d996e81ddda5f26240272f543071c60df2f09b";
 const IMAGEFORGE_VOLUME_MOUNT_PATH: &str = "/workspace";
 const IMAGEFORGE_WORKER_PORT: u16 = 8000;
 // The create constraint is an exact-match set, not a floor, while the catalog

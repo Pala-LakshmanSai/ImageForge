@@ -45,7 +45,7 @@ const MAX_START_JOURNAL_BYTES: u64 = 64 * 1024;
 const IMAGEFORGE_TEMPLATE_ID: &str = "q8sfgixfy2";
 const IMAGEFORGE_NETWORK_VOLUME_ID: &str = "kdqerqkwdh";
 const IMAGEFORGE_WORKER_IMAGE: &str =
-    "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:5606ac29b07f85b831bba1e6aa359d32b99c55027679eb871f0166fa3bd3773e";
+    "ghcr.io/pala-lakshmansai/imageforge-worker@sha256:3fe3074cc365cfe6f984907733d996e81ddda5f26240272f543071c60df2f09b";
 const REQUIRED_CUDA_VERSION: &str = "13.0";
 
 #[derive(Debug, Clone, Serialize)]

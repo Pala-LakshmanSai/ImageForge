@@ -27,7 +27,7 @@ export const EU_RO_ORDINARY_GPUS = [
 export const IMAGEFORGE_TEMPLATE_ID = 'q8sfgixfy2';
 export const IMAGEFORGE_NETWORK_VOLUME_ID = 'kdqerqkwdh';
 export const IMAGEFORGE_WORKER_IMAGE =
-  'ghcr.io/pala-lakshmansai/imageforge-worker@sha256:5606ac29b07f85b831bba1e6aa359d32b99c55027679eb871f0166fa3bd3773e';
+  'ghcr.io/pala-lakshmansai/imageforge-worker@sha256:3fe3074cc365cfe6f984907733d996e81ddda5f26240272f543071c60df2f09b';
 
 export const DEFAULT_STUDIO_PROFILE = [
   'profile: imageforge-studio-v1',
