@@ -217,6 +217,19 @@ describe('GpuLifecycleCoordinator', () => {
     coordinator.dispose();
   });
 
+  it('refreshes managed Pods before joining live selector inventory', async () => {
+    const port = nativePort();
+    const coordinator = new GpuLifecycleCoordinator(port);
+
+    await coordinator.prepareInventory(DEFAULT_STUDIO_PROFILE, false);
+
+    expect(port.gpuPod.observe).toHaveBeenCalledOnce();
+    expect(vi.mocked(port.gpuPod.observe).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(port.gpuInventory.beginRefresh).mock.invocationCallOrder[0],
+    );
+    coordinator.dispose();
+  });
+
   it('routes Auto Start through the typed native authority without a legacy provider grant', async () => {
     const port = nativePort();
     const coordinator = new GpuLifecycleCoordinator(

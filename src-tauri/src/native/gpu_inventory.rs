@@ -978,13 +978,13 @@ impl GpuInventoryService {
         Ok(())
     }
 
-    pub fn begin_refresh(
+    pub async fn begin_refresh(
         &self,
         app: AppHandle,
         runpod: RunPodTransport,
         include_emergency_tier: bool,
     ) -> NativeResult<NativeGpuInventorySnapshotV1> {
-        runpod.assert_catalog_credential()?;
+        runpod.assert_catalog_credential().await?;
         let (snapshot, observation_id) = self.reserve_observation(include_emergency_tier)?;
         let Some(observation_id) = observation_id else {
             return Ok(snapshot);

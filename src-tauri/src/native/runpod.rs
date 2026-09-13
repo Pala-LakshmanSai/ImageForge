@@ -687,8 +687,18 @@ impl RunPodTransport {
     /// unavailable or corrupt. Otherwise the two catalog workers would erase
     /// the credential error and incorrectly publish a provider-unavailable
     /// fallback snapshot.
-    pub(crate) fn assert_catalog_credential(&self) -> NativeResult<()> {
-        self.vault.load(CredentialKind::RunpodApiKey).map(|_| ())
+    pub(crate) async fn assert_catalog_credential(&self) -> NativeResult<()> {
+        let vault = self.vault.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            vault.load(CredentialKind::RunpodApiKey).map(|_| ())
+        })
+        .await
+        .map_err(|_| {
+            NativeError::new(
+                "native_task_failed",
+                "The RunPod credential check could not complete.",
+            )
+        })?
     }
 
     /// Fetch one pinned inventory endpoint without exposing a URL, headers,
@@ -3634,6 +3644,48 @@ fn rejected() -> NativeError {
 mod tests {
     use super::*;
     use crate::native::vault::MemoryVault;
+
+    #[derive(Default)]
+    struct ThreadRecordingVault {
+        load_thread: Mutex<Option<String>>,
+    }
+
+    impl CredentialVault for ThreadRecordingVault {
+        fn replace(
+            &self,
+            _kind: CredentialKind,
+            _value: &str,
+        ) -> NativeResult<crate::native::vault::CredentialMetadata> {
+            unreachable!("replace is not used by this regression")
+        }
+
+        fn metadata(
+            &self,
+            _kind: CredentialKind,
+        ) -> NativeResult<crate::native::vault::CredentialMetadata> {
+            unreachable!("metadata is not used by this regression")
+        }
+
+        fn load(&self, _kind: CredentialKind) -> NativeResult<String> {
+            *self.load_thread.lock().map_err(|_| state_error())? =
+                Some(format!("{:?}", std::thread::current().id()));
+            Ok("rp_live_example".to_owned())
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn catalog_credential_preflight_runs_off_async_executor_thread() {
+        let temporary = tempfile::tempdir().unwrap();
+        let vault = Arc::new(ThreadRecordingVault::default());
+        let transport =
+            RunPodTransport::new_for_test(vault.clone(), temporary.path().join("marker")).unwrap();
+        let executor_thread = format!("{:?}", std::thread::current().id());
+
+        transport.assert_catalog_credential().await.unwrap();
+
+        let load_thread = vault.load_thread.lock().unwrap().clone().unwrap();
+        assert_ne!(load_thread, executor_thread);
+    }
 
     fn request(
         operation: RunPodOperation,

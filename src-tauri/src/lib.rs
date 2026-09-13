@@ -667,7 +667,7 @@ fn gpu_selector_perf_commit(
 /// GETs are launched by the native service; the terminal projection is emitted
 /// only on the app-scoped `gpu-inventory-v1` channel.
 #[tauri::command]
-fn gpu_inventory_begin_refresh(
+async fn gpu_inventory_begin_refresh(
     app: AppHandle,
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -677,6 +677,7 @@ fn gpu_inventory_begin_refresh(
     state
         .gpu_inventory
         .begin_refresh(app, state.runpod.clone(), include_emergency_tier)
+        .await
 }
 
 /// The sole renderer-visible current-Pod read. It is profile-scoped and

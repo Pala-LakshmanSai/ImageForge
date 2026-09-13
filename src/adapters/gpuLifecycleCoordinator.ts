@@ -163,7 +163,12 @@ export class GpuLifecycleCoordinator {
     profileSource: string,
     allowSlowEmergency: boolean,
   ): Promise<NativeGpuInventorySnapshotV1> {
-    await this.#ensureController(profileSource, allowSlowEmergency);
+    const controller = await this.#ensureController(profileSource, allowSlowEmergency);
+    this.#observationAbort?.abort();
+    await controller.observePods({
+      expectedImageCount: controller.getSnapshot().expectedImageCount,
+      suppressTransientPhase: true,
+    });
     return this.#inventory.refreshForVisibleSelector(allowSlowEmergency);
   }
 
