@@ -803,6 +803,26 @@ impl GpuSwitchService {
         Ok(snapshot_from_inner(&inner))
     }
 
+    /// Rebuild this process's empty journal after the explicit local-state
+    /// archive. Caller must hold the process control gate and the unchanged
+    /// cross-process profile-control lease.
+    pub(crate) fn reset_after_local_archive(&self) -> NativeResult<()> {
+        let mut inner = self.inner.lock().map_err(|_| state_error())?;
+        self.journal.recreate_empty_layout()?;
+        inner.generation = DiskGenerationV1 {
+            schema_version: SCHEMA_VERSION,
+            store_revision: 0,
+            record: None,
+            private: PrivateGpuSwitchGenerationV1::empty(),
+        };
+        inner.issues.clear();
+        inner.unrecoverable = false;
+        inner.held_lease = None;
+        inner.grants.clear();
+        inner.quotes.clear();
+        Ok(())
+    }
+
     /// Read the local Switch journal before an ordinary Stop starts any
     /// provider/worker work. The command holds its process-local profile
     /// control gate through the whole action; worker finalization remains the
@@ -2759,6 +2779,15 @@ impl SwitchJournal {
             root,
             io: Mutex::new(()),
         })
+    }
+
+    fn recreate_empty_layout(&self) -> NativeResult<()> {
+        let _guard = self.io.lock().map_err(|_| state_error())?;
+        ensure_directory(&self.root)?;
+        ensure_directory(&self.root.join("generations"))?;
+        ensure_directory(&self.root.join("history"))?;
+        ensure_directory(&self.root.join("reservation-history"))?;
+        Ok(())
     }
 
     fn current_path(&self) -> PathBuf {
@@ -5143,6 +5172,43 @@ mod tests {
             GpuSwitchService::with_root(PROCESS.to_owned(), directory.path().join("gpu-switch"))
                 .expect("switch service");
         (directory, service)
+    }
+
+    #[test]
+    fn explicit_local_archive_rebuilds_running_empty_switch_service() {
+        let (directory, service) = service();
+        let root = directory.path().join("gpu-switch");
+        let archive = directory.path().join("archived-switch");
+        fs::create_dir_all(&archive).expect("archive root");
+        let _old_grant = begin_grant(&service);
+        {
+            let mut inner = service.inner.lock().expect("switch inner");
+            inner.issues.push(issue("gpu_switch_store_unrecoverable"));
+            inner.unrecoverable = true;
+            inner.held_lease = Some("stale-lease".to_owned());
+        }
+        for name in ["generations", "history", "reservation-history"] {
+            fs::rename(root.join(name), archive.join(name)).expect("archive journal member");
+        }
+
+        service
+            .reset_after_local_archive()
+            .expect("rebuild empty journal");
+
+        let snapshot = service.load().expect("clean snapshot");
+        assert_eq!(snapshot.store_revision, 0);
+        assert!(snapshot.record.is_none());
+        assert!(snapshot.issues.is_empty());
+        for name in ["generations", "history", "reservation-history"] {
+            assert!(root.join(name).is_dir(), "missing {name}");
+        }
+        let inner = service.inner.lock().expect("reset switch inner");
+        assert!(!inner.unrecoverable);
+        assert!(inner.held_lease.is_none());
+        assert!(inner.grants.is_empty());
+        assert!(inner.quotes.is_empty());
+        drop(inner);
+        begin_grant(&service);
     }
 
     fn evidence() -> NativeGpuSwitchSelectionEvidenceV1 {

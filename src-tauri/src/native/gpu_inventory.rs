@@ -457,6 +457,16 @@ impl NormalStartJournal {
         })
     }
 
+    fn recreate_empty_layout(&self) -> NativeResult<()> {
+        let _guard = self.io.lock().map_err(|_| start_store_unavailable())?;
+        fs::create_dir_all(&self.root).map_err(|_| start_store_unavailable())?;
+        let metadata = fs::symlink_metadata(&self.root).map_err(|_| start_store_unavailable())?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(start_store_unavailable());
+        }
+        Ok(())
+    }
+
     fn current_path(&self) -> PathBuf {
         self.root.join("CURRENT.json")
     }
@@ -661,6 +671,26 @@ impl GpuInventoryService {
         let mut inner = self.inner.lock().map_err(|_| state_error())?;
         inner.active.clear();
         inner.receipts.clear();
+        inner.current_pod = CurrentPodProjection {
+            pod: None,
+            observed_at: None,
+            stale: false,
+        };
+        inner.current =
+            loading_snapshot(&self.process_epoch_id, &Uuid::new_v4().to_string(), false);
+        Ok(())
+    }
+
+    /// Rebuild the durable ordinary-Start journal and clear all process-local
+    /// Start authority after the explicit local-state archive.
+    pub(crate) fn reset_after_local_archive(&self) -> NativeResult<()> {
+        let mut inner = self.inner.lock().map_err(|_| state_error())?;
+        self.start_journal.recreate_empty_layout()?;
+        inner.active.clear();
+        inner.receipts.clear();
+        inner.pending_manual.clear();
+        inner.latest_start = None;
+        inner.lifecycle_revision = 0;
         inner.current_pod = CurrentPodProjection {
             pod: None,
             observed_at: None,
@@ -3767,7 +3797,28 @@ mod tests {
             NormalStartPostStateV1::Settled
         ));
     }
+    #[test]
+    fn explicit_local_archive_rebuilds_running_start_journal() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("gpu-start");
+        NormalStartJournal::new(root.clone())
+            .unwrap()
+            .persist(&sent_start_record())
+            .unwrap();
+        let service = GpuInventoryService::new_for_test(root.clone()).unwrap();
+        assert!(service.start_load().unwrap().is_some());
+        fs::rename(&root, directory.path().join("archived-gpu-start")).unwrap();
 
+        service.reset_after_local_archive().unwrap();
+
+        assert!(root.is_dir());
+        assert!(service.start_load().unwrap().is_none());
+        let inner = service.inner.lock().unwrap();
+        assert_eq!(inner.lifecycle_revision, 0);
+        assert!(inner.latest_start.is_none());
+        assert!(inner.pending_manual.is_empty());
+        assert!(inner.receipts.is_empty());
+    }
 
     #[test]
     fn a_provisioning_start_does_not_permanently_block_the_next_start() {

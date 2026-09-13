@@ -600,12 +600,22 @@ async fn clear_runpod_start_authorization(state: State<'_, NativeState>) -> Nati
 }
 
 #[tauri::command]
-fn reset_local_lifecycle_state() -> Result<crate::native::local_state::LocalStateResetV1, NativeError> {
+async fn reset_local_lifecycle_state(
+    state: State<'_, NativeState>,
+) -> Result<crate::native::local_state::LocalStateResetV1, NativeError> {
+    let _control = state.control_gate.lock().await;
+    let _profile_control_lease = acquire_profile_control_lease().await?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
         .unwrap_or_default();
-    crate::native::local_state::reset_local_lifecycle_state(now)
+    let result = crate::native::local_state::reset_local_lifecycle_state(now)?;
+    state.gpu_switch.reset_after_local_archive()?;
+    state.gpu_pod.reset_for_profile_binding()?;
+    state.gpu_inventory.reset_after_local_archive()?;
+    state.gpu_start_foreground.invalidate();
+    state.runpod.clear_start_authorization()?;
+    Ok(result)
 }
 
 #[tauri::command]
