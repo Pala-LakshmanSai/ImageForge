@@ -55,6 +55,26 @@ jobs:
             throw 'the Windows TypeScript companion was not installed'
           }
 
+      # Same root cause as the TypeScript companion above. lightningcss declares
+      # eleven per-platform optional dependencies and this lockfile carries only
+      # the macOS arm64 one, so the Vite production build fails on Windows with
+      # "Cannot find module '../lightningcss.win32-x64-msvc.node'".
+      - name: Install Windows lightningcss native binary
+        shell: pwsh
+        run: |
+          $dest = 'node_modules/lightningcss-win32-x64-msvc'
+          $work = Join-Path $env:RUNNER_TEMP 'lightningcss'
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+          npm pack 'lightningcss-win32-x64-msvc@1.33.0' --pack-destination $work
+          $tgz = Get-ChildItem -Path $work -Filter '*.tgz' | Select-Object -First 1
+          if (-not $tgz) { throw 'the Windows lightningcss tarball was not produced' }
+          tar -xzf $tgz.FullName -C $work
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          Copy-Item -Recurse -Force (Join-Path $work 'package/*') $dest
+          if (-not (Test-Path (Join-Path $dest 'package.json'))) {
+            throw 'the Windows lightningcss binary was not installed'
+          }
+
       - name: Validate deterministic two-client fixture
         run: node scripts/native-two-client-smoke-server.mjs --self-test
 
