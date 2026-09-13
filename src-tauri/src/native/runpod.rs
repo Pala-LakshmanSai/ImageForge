@@ -34,6 +34,41 @@ const IMAGEFORGE_WORKER_PORT: u16 = 8000;
 // exact version cannot be created at all, however available it looks.
 const REQUIRED_CUDA_VERSION: &str = "13.0";
 
+/// How a durable create marker constrains an in-flight `create_uncertain`.
+///
+/// The Start gate used to read only `pending`. A marker that never recorded an
+/// exact Pod id has nothing to match against, so refusing the Start left the
+/// operator with no in-app way forward; that combination must be allowed to
+/// reach the profile preflight, which is the duplicate-Pod authority. A marker
+/// that did record an exact Pod still has to be reconciled first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CreateReconciliation {
+    /// No pending marker: the previous attempt is already settled.
+    Reconciled,
+    /// Pending, but no exact Pod id was ever recorded for it.
+    Unidentified,
+    /// Pending with an exact Pod id that must be matched before any Start.
+    Identified,
+}
+
+impl CreateReconciliation {
+    fn from_metadata(metadata: &RunPodCreateMarkerMetadata) -> Self {
+        if !metadata.pending {
+            Self::Reconciled
+        } else if metadata.pod_id.is_none() {
+            Self::Unidentified
+        } else {
+            Self::Identified
+        }
+    }
+
+    /// Only an identified marker has an exact Pod that has to be reconciled, so
+    /// only it keeps the strict refusal for a stored `create_uncertain`.
+    pub(crate) fn admits_uncertain_replay(self) -> bool {
+        !matches!(self, Self::Identified)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RunPodProfileBinding {
     template_id: String,
@@ -565,6 +600,13 @@ impl RunPodTransport {
 
     pub fn create_marker_metadata(&self) -> NativeResult<RunPodCreateMarkerMetadata> {
         self.create_marker.metadata()
+    }
+
+    /// Classify the durable create marker for the Start gate.
+    pub(crate) fn create_reconciliation(&self) -> NativeResult<CreateReconciliation> {
+        Ok(CreateReconciliation::from_metadata(
+            &self.create_marker.metadata()?,
+        ))
     }
 
     pub fn resolve_create_marker(

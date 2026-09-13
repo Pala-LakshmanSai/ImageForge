@@ -44,6 +44,7 @@ pub use queue_release_smoke::{
 pub use runpod::{
     RunPodCreateMarkerMetadata, RunPodHttpRequest, RunPodHttpResponse, RunPodTransport,
 };
+pub(crate) use runpod::CreateReconciliation;
 pub use session::WorkerSession;
 pub use smoke::NativeTwoClientSmokeInput;
 pub use vault::{CredentialKind, CredentialMetadata, CredentialVault, KeyringVault};

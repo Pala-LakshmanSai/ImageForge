@@ -4,7 +4,7 @@
 //! raw JSON, auth headers, catalog receipts, create markers, and Pod bodies stay
 //! in this module or `runpod.rs`.
 
-use super::{NativeError, NativeResult, RunPodTransport};
+use super::{CreateReconciliation, NativeError, NativeResult, RunPodTransport};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -1375,8 +1375,8 @@ impl GpuInventoryService {
         F: FnOnce() -> NativeResult<()>,
     {
         validate_manual_input(&input)?;
-        let create_reconciled = !runpod.create_marker_metadata()?.pending;
-        if let Some(replay) = self.replay_or_block_manual(&input, create_reconciled)? {
+        let create = runpod.create_reconciliation()?;
+        if let Some(replay) = self.replay_or_block_manual(&input, create)? {
             return Ok(replay);
         }
         let initial = self.validate_manual_selection(&input)?;
@@ -1437,8 +1437,8 @@ impl GpuInventoryService {
         F: FnOnce() -> NativeResult<()>,
     {
         validate_auto_input(&input)?;
-        let create_reconciled = !runpod.create_marker_metadata()?.pending;
-        if let Some(replay) = self.replay_or_block_auto(&input, create_reconciled)? {
+        let create = runpod.create_reconciliation()?;
+        if let Some(replay) = self.replay_or_block_auto(&input, create)? {
             return Ok(replay);
         }
         let initial = self.validate_auto_selection(&input)?;
@@ -1535,8 +1535,8 @@ impl GpuInventoryService {
         // The create marker is the durable record that a create may exist. It
         // was retired against the provider's own Pod list, so the earlier
         // uncertainty is resolved and must not keep blocking this Start.
-        let create_reconciled = !runpod.create_marker_metadata()?.pending;
-        self.persist_intent(&intent, create_reconciled)?;
+        let create = runpod.create_reconciliation()?;
+        self.persist_intent(&intent, create)?;
         // Commit `post_sent` before passing control to the transport.  If the
         // process dies at any point after this durable transition, Resume can
         // show the exact operation without issuing a second POST.
@@ -1659,7 +1659,7 @@ impl GpuInventoryService {
     fn replay_or_block_manual(
         &self,
         input: &NativeManualGpuStartV1,
-        create_reconciled: bool,
+        create: CreateReconciliation,
     ) -> NativeResult<Option<NativeManualGpuStartResultV1>> {
         self.replay_or_block(
             NormalStartAuthorityKind::NormalManualStart,
@@ -1669,14 +1669,14 @@ impl GpuInventoryService {
             input.expected_lifecycle_revision,
             Some(&input.target_gpu_id),
             Some(input.confirmed_hourly_price_micro_usd),
-            create_reconciled,
+            create,
         )
     }
 
     fn replay_or_block_auto(
         &self,
         input: &NativeAutoGpuStartV1,
-        create_reconciled: bool,
+        create: CreateReconciliation,
     ) -> NativeResult<Option<NativeManualGpuStartResultV1>> {
         self.replay_or_block(
             NormalStartAuthorityKind::NormalAutoStart,
@@ -1686,7 +1686,7 @@ impl GpuInventoryService {
             input.expected_lifecycle_revision,
             None,
             None,
-            create_reconciled,
+            create,
         )
     }
 
@@ -1699,7 +1699,7 @@ impl GpuInventoryService {
         expected_lifecycle_revision: u64,
         requested_target_gpu_id: Option<&str>,
         requested_price_micro_usd: Option<u64>,
-        create_reconciled: bool,
+        create: CreateReconciliation,
     ) -> NativeResult<Option<NativeManualGpuStartResultV1>> {
         let inner = self.inner.lock().map_err(|_| state_error())?;
         let Some(record) = inner.latest_start.as_ref() else {
@@ -1716,7 +1716,7 @@ impl GpuInventoryService {
             return Ok(Some(record.result.clone()));
         }
         if is_in_flight_start_state(&record.result.state)
-            && !(create_reconciled && record.result.state == "create_uncertain")
+            && !(create.admits_uncertain_replay() && record.result.state == "create_uncertain")
         {
             return Err(operation_in_progress());
         }
@@ -1726,7 +1726,7 @@ impl GpuInventoryService {
     fn persist_intent(
         &self,
         record: &PersistedNormalStartV1,
-        create_reconciled: bool,
+        create: CreateReconciliation,
     ) -> NativeResult<()> {
         {
             let inner = self.inner.lock().map_err(|_| state_error())?;
@@ -1735,7 +1735,8 @@ impl GpuInventoryService {
             }
             if inner.latest_start.as_ref().is_some_and(|existing| {
                 is_in_flight_start_state(&existing.result.state)
-                    && !(create_reconciled && existing.result.state == "create_uncertain")
+                    && !(create.admits_uncertain_replay()
+                        && existing.result.state == "create_uncertain")
             }) {
                 return Err(operation_in_progress());
             }
@@ -3636,7 +3637,7 @@ mod tests {
         );
 
         // A different Start attempt, so this is never the idempotent replay.
-        let attempt = |reconciled: bool| {
+        let attempt = |create: CreateReconciliation| {
             service.replay_or_block(
                 NormalStartAuthorityKind::NormalManualStart,
                 "00000000-0000-4000-8000-0000000000aa",
@@ -3645,18 +3646,24 @@ mod tests {
                 2,
                 Some("NVIDIA L4"),
                 Some(490_000),
-                reconciled,
+                create,
             )
         };
 
-        // Marker still pending: the doubt stands and the Start is refused.
+        // An identified pending marker still names an exact Pod that has to be
+        // matched first, so the Start stays refused.
         assert_eq!(
-            attempt(false).unwrap_err().code,
+            attempt(CreateReconciliation::Identified).unwrap_err().code,
             "gpu_start_operation_in_progress"
         );
 
+        // A pending marker that never recorded a Pod id has nothing to match.
+        // Refusing here is what left a wedged install needing a manual Reset, so
+        // the Start proceeds to the profile preflight that arbitrates duplicates.
+        assert!(attempt(CreateReconciliation::Unidentified).unwrap().is_none());
+
         // Marker retired against the provider list: the Start proceeds.
-        assert!(attempt(true).unwrap().is_none());
+        assert!(attempt(CreateReconciliation::Reconciled).unwrap().is_none());
     }
 
     #[test]
