@@ -725,6 +725,13 @@ impl RunPodTransport {
         let url = Url::parse(raw_url).map_err(|_| state_error())?;
         validate_common_url(&url)?;
         validate_inventory(&Method::GET, &url, None)?;
+        let operation = if url.path().ends_with("/gpus") {
+            "catalog_gpus_GET"
+        } else {
+            "catalog_datacenters_GET"
+        };
+        let started = Instant::now();
+        super::error::trace_provider_http(operation, None, 0);
         let credential = self.vault.load(CredentialKind::RunpodApiKey)?;
         let worker_credential = self.vault.load(CredentialKind::WorkerToken).ok();
         let response = self
@@ -747,6 +754,11 @@ impl RunPodTransport {
                     )
                 }
             })?;
+        super::error::trace_provider_http(
+            operation,
+            Some(response.status().as_u16()),
+            started.elapsed().as_millis(),
+        );
         match response.status().as_u16() {
             200 => {}
             401 | 403 => {
@@ -950,6 +962,8 @@ impl RunPodTransport {
             .load(CredentialKind::RunpodApiKey)
             .map_err(map_switch_provider_error)?;
         let worker_credential = self.vault.load(CredentialKind::WorkerToken).ok();
+        let started = Instant::now();
+        super::error::trace_provider_http("profile_pods_GET", None, 0);
         let response = self
             .client
             .get(url)
@@ -963,6 +977,11 @@ impl RunPodTransport {
                     "Live RunPod GPU state is temporarily unavailable. Refresh before continuing the switch.",
                 )
             })?;
+        super::error::trace_provider_http(
+            "profile_pods_GET",
+            Some(response.status().as_u16()),
+            started.elapsed().as_millis(),
+        );
         match response.status().as_u16() {
             200 => {}
             429 | 500..=599 => {
@@ -1473,6 +1492,8 @@ impl RunPodTransport {
         let credential = self.vault.load(CredentialKind::RunpodApiKey)?;
         let worker_credential = self.vault.load(CredentialKind::WorkerToken).ok();
         self.before_native_mutation(NativeRunPodMutationKind::Create)?;
+        let started = Instant::now();
+        super::error::trace_provider_http("create_pod_POST", None, 0);
         let response = self
             .client
             .post(url)
@@ -1489,10 +1510,20 @@ impl RunPodTransport {
                 )
             })?;
         let create_status = response.status().as_u16();
+        super::error::trace_provider_http(
+            "create_pod_POST",
+            Some(create_status),
+            started.elapsed().as_millis(),
+        );
         if create_status != 201 {
             let refusal_body = read_bounded_body(response, MAX_RESPONSE_BYTES)
                 .await
                 .unwrap_or_default();
+            let refusal_code = create_refusal_code(create_status, &refusal_body);
+            super::error::trace_rejected_checks(
+                "runpod_create_refusal",
+                &[refusal_code.unwrap_or("gpu_start_create_uncertain")],
+            );
             // A refusal is definitive only when the provider said so *and* the
             // bound profile has no Pod. Together those prove nothing was
             // created, so the durable marker must not be left behind to block
@@ -1503,7 +1534,9 @@ impl RunPodTransport {
                 if let Some(attempt_id) = self.create_marker.unidentified_pending_attempt()? {
                     self.create_marker.clear(&attempt_id)?;
                 }
-                return Err(normal_start_error("gpu_start_no_capacity"));
+                return Err(normal_start_error(
+                    refusal_code.expect("a definitive refusal has a classification"),
+                ));
             }
             return Err(NativeError::new(
                 "gpu_start_create_uncertain",
@@ -2889,8 +2922,19 @@ fn response_invalid() -> NativeError {
 /// never accept with 400/422. Every other status stays ambiguous, because the
 /// Pod may exist and guessing would risk a duplicate billed rental.
 fn create_refusal_is_definitive(status: u16, body: &str) -> bool {
-    matches!(status, 400 | 422)
-        || (status == 500 && body.contains("There are no instances currently available"))
+    create_refusal_code(status, body).is_some()
+}
+
+fn create_refusal_code(status: u16, body: &str) -> Option<&'static str> {
+    if matches!(status, 400 | 422 | 500)
+        && body.contains("There are no instances currently available")
+    {
+        Some("gpu_start_no_capacity")
+    } else if matches!(status, 400 | 422) {
+        Some("gpu_start_request_rejected")
+    } else {
+        None
+    }
 }
 
 fn normal_start_error(code: &'static str) -> NativeError {
@@ -2907,6 +2951,10 @@ fn normal_start_error(code: &'static str) -> NativeError {
         "gpu_start_no_capacity" => (
             true,
             "No capacity for the selected GPU right now. Use Auto to let ImageForge choose, or pick another GPU.",
+        ),
+        "gpu_start_request_rejected" => (
+            false,
+            "RunPod rejected the GPU create request. No Pod was created. Check the request configuration before trying again.",
         ),
         "gpu_start_create_uncertain" => (
             false,
@@ -5297,6 +5345,37 @@ mod tests {
             "no Pod may be left billing"
         );
         println!("PROVEN: the ordinary create path places a Pod and cleans up");
+    }
+
+    #[test]
+    fn request_rejections_are_not_reported_as_capacity_exhaustion() {
+        for status in [400, 422] {
+            assert_eq!(
+                create_refusal_code(status, r#"{"error":"Invalid template configuration"}"#),
+                Some("gpu_start_request_rejected")
+            );
+            assert_eq!(
+                create_refusal_code(status, ""),
+                Some("gpu_start_request_rejected")
+            );
+        }
+        for status in [400, 422, 500] {
+            assert_eq!(
+                create_refusal_code(
+                    status,
+                    r#"{"error":"There are no instances currently available"}"#
+                ),
+                Some("gpu_start_no_capacity")
+            );
+        }
+        assert_eq!(create_refusal_code(500, "internal error"), None);
+        assert_eq!(
+            create_refusal_code(502, "There are no instances currently available"),
+            None
+        );
+        let error = normal_start_error("gpu_start_request_rejected");
+        assert!(!error.retryable);
+        assert!(error.message.contains("rejected the GPU create request"));
     }
 
     #[test]

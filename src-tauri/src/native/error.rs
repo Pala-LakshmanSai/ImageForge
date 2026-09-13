@@ -24,6 +24,15 @@ fn diagnostics_enabled() -> bool {
     })
 }
 
+/// Fixed operation labels and HTTP metadata only; never provider bodies or URLs.
+pub fn trace_provider_http(operation: &'static str, status: Option<u16>, elapsed_ms: u128) {
+    if diagnostics_enabled() {
+        eprintln!(
+            "imageforge.http operation={operation} status={status:?} elapsed_ms={elapsed_ms}"
+        );
+    }
+}
+
 /// Record a named check that rejected a value, for the same opt-in channel.
 /// Callers pass only fixed check names, never provider values.
 pub fn trace_rejected_checks(subject: &str, failed: &[impl AsRef<str>]) {
