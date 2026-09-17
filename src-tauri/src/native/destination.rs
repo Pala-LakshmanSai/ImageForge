@@ -42,10 +42,46 @@ struct RootIdentity {
     device: u64,
     #[cfg(unix)]
     inode: u64,
+    /// The folder's own creation time in nanoseconds since the Unix epoch.
+    /// macOS hands the data volume a fresh `device` number on every boot (and
+    /// again whenever the volume is remounted), so `device` alone cannot pin a
+    /// durable record: the creation time and the inode are what survive a
+    /// restart.  It stays optional because a record written before this field
+    /// existed restores on the inode alone and is rewritten in place.
+    #[cfg(unix)]
+    #[serde(default)]
+    birthtime_nanos: Option<u64>,
     #[cfg(windows)]
     volume: Option<u32>,
     #[cfg(windows)]
     index: Option<u64>,
+}
+
+/// Compare a durable identity against the metadata of the folder that is bound
+/// right now.  Only fields that outlive a restart, a remount, or a device
+/// renumbering may decide equality; the raw device number is recorded for
+/// diagnostics but never compared on unix.
+#[cfg(unix)]
+fn identity_still_binds(recorded: &RootIdentity, live: &RootIdentity) -> bool {
+    match (recorded.birthtime_nanos, live.birthtime_nanos) {
+        (Some(recorded_birthtime), Some(live_birthtime)) => {
+            recorded.inode == live.inode && recorded_birthtime == live_birthtime
+        }
+        // A legacy record can only be matched by the inode it captured; the
+        // first successful restore rewrites it with the creation-time anchor.
+        (None, Some(_)) => recorded.inode == live.inode,
+        _ => recorded.device == live.device && recorded.inode == live.inode,
+    }
+}
+
+#[cfg(windows)]
+fn identity_still_binds(recorded: &RootIdentity, live: &RootIdentity) -> bool {
+    recorded == live
+}
+
+#[cfg(not(any(unix, windows)))]
+fn identity_still_binds(_recorded: &RootIdentity, _live: &RootIdentity) -> bool {
+    true
 }
 
 /// A queue record keeps this private binding beside the renderer-visible
@@ -182,10 +218,22 @@ impl DestinationStore {
         let canonical = validate_candidate(Path::new(&record.path))?;
         reject_reparse_or_symlink(&canonical)?;
         let identity = root_identity(&canonical)?;
-        if canonical.to_string_lossy() != record.path || identity != record.identity {
+        if canonical.to_string_lossy() != record.path
+            || !identity_still_binds(&record.identity, &identity)
+        {
             return Err(destination_root_replaced());
         }
         probe_writable(&canonical)?;
+        if record.identity != identity {
+            // Durable repair: a record that predates the creation-time anchor,
+            // or one the operating system invalidated by renumbering the
+            // volume's device, is rewritten with the identity this session can
+            // verify.  The folder itself was proven above, so the repair is
+            // bookkeeping and stays best effort: a record directory this
+            // process cannot rewrite must never cost the user the folder it
+            // just validated and bound.
+            let _ = persist_destination_record(&self.record_path, &canonical, &identity);
+        }
         self.bind_in_memory(canonical, identity).map(Some)
     }
 
@@ -223,7 +271,8 @@ impl DestinationStore {
             .path
             .canonicalize()
             .map_err(|_| destination_root_replaced())?;
-        if canonical != bound.path || root_identity(&canonical)? != bound.identity {
+        let identity = root_identity(&canonical)?;
+        if canonical != bound.path || !identity_still_binds(&bound.identity, &identity) {
             return Err(destination_root_replaced());
         }
         Ok(bound.path)
@@ -283,7 +332,9 @@ impl DestinationStore {
         binding: &QueueDestinationBinding,
     ) -> NativeResult<()> {
         let current = self.current()?;
-        if current.to_string_lossy() != binding.path || root_identity(&current)? != binding.identity
+        let identity = root_identity(&current)?;
+        if current.to_string_lossy() != binding.path
+            || !identity_still_binds(&binding.identity, &identity)
         {
             return Err(destination_root_replaced());
         }
@@ -1287,7 +1338,19 @@ fn root_identity(path: &Path) -> NativeResult<RootIdentity> {
     Ok(RootIdentity {
         device: metadata.dev(),
         inode: metadata.ino(),
+        birthtime_nanos: root_birthtime_nanos(&metadata),
     })
+}
+
+/// The folder's own creation time, as the operating system recorded it.  macOS
+/// exposes it through `Metadata::created` (st_birthtime, nanoseconds included);
+/// the other unix targets report nothing and keep the device number as their
+/// only cross-volume anchor.
+#[cfg(unix)]
+fn root_birthtime_nanos(metadata: &std::fs::Metadata) -> Option<u64> {
+    let created = metadata.created().ok()?;
+    let since_epoch = created.duration_since(std::time::UNIX_EPOCH).ok()?;
+    u64::try_from(since_epoch.as_nanos()).ok()
 }
 
 #[cfg(windows)]
@@ -1517,6 +1580,117 @@ mod tests {
         let replaced = DestinationStore::new_for_test(record);
         assert_eq!(
             replaced.restore().unwrap_err().code,
+            "destination_root_replaced"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_renumbered_volume_device_still_restores_and_repairs_the_record() {
+        // macOS hands the data volume a fresh device number on every boot (and
+        // again on every remount).  A record that captured the previous number
+        // must keep binding the same folder, and must store the identity this
+        // session can verify so the next launch is exact again.
+        let temporary = tempfile::tempdir().unwrap();
+        let destination = temporary.path().join("downloads");
+        std::fs::create_dir(&destination).unwrap();
+        let record = temporary.path().join("state").join("destination.json");
+        let store = DestinationStore::new_for_test(record.clone());
+        store.validate_and_bind(&destination).unwrap();
+        let canonical = destination.canonicalize().unwrap();
+        let live = root_identity(&canonical).unwrap();
+
+        let mut legacy = serde_json::json!({
+            "schemaVersion": 1,
+            "path": canonical.to_string_lossy(),
+            "identity": { "device": live.device + 2, "inode": live.inode },
+        });
+        std::fs::write(&record, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        let restarted = DestinationStore::new_for_test(record.clone());
+        assert_eq!(
+            restarted.restore().unwrap().unwrap().path,
+            canonical.to_string_lossy()
+        );
+        let repaired: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        assert_eq!(repaired["identity"]["device"].as_u64(), Some(live.device));
+        assert_eq!(repaired["identity"]["inode"].as_u64(), Some(live.inode));
+        assert!(repaired["identity"]["birthtimeNanos"].as_u64().is_some());
+
+        // A different directory object under the same path is still rejected.
+        legacy["identity"]["inode"] = serde_json::json!(live.inode + 1);
+        std::fs::write(&record, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let stranger = DestinationStore::new_for_test(record);
+        assert_eq!(
+            stranger.restore().unwrap_err().code,
+            "destination_root_replaced"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_record_that_cannot_be_repaired_still_binds_the_folder_it_proved() {
+        // The identity repair is bookkeeping. A state directory that refuses
+        // the rewrite must not cost the user the folder that was just
+        // validated, because that is the very wedge this repair removes.
+        use std::os::unix::fs::PermissionsExt;
+        let temporary = tempfile::tempdir().unwrap();
+        let destination = temporary.path().join("downloads");
+        std::fs::create_dir(&destination).unwrap();
+        let state = temporary.path().join("state");
+        let record = state.join("destination.json");
+        let store = DestinationStore::new_for_test(record.clone());
+        store.validate_and_bind(&destination).unwrap();
+        let canonical = destination.canonicalize().unwrap();
+        let live = root_identity(&canonical).unwrap();
+
+        // A record written before the creation-time anchor existed.
+        let legacy = serde_json::json!({
+            "schemaVersion": 1,
+            "path": canonical.to_string_lossy(),
+            "identity": { "device": live.device, "inode": live.inode },
+        });
+        std::fs::write(&record, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let mut lock = std::fs::metadata(&state).unwrap().permissions();
+        lock.set_mode(0o555);
+        std::fs::set_permissions(&state, lock).unwrap();
+
+        let restarted = DestinationStore::new_for_test(record.clone());
+        assert_eq!(
+            restarted.restore().unwrap().unwrap().path,
+            canonical.to_string_lossy()
+        );
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        assert!(stored["identity"]["birthtimeNanos"].is_null());
+
+        let mut open = std::fs::metadata(&state).unwrap().permissions();
+        open.set_mode(0o755);
+        std::fs::set_permissions(&state, open).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_creation_time_anchor_mismatch_rejects_the_restored_root() {
+        // A folder that was deleted and recreated, or swapped for a copy, keeps
+        // its path but not its creation time; the anchor has to catch it.
+        let temporary = tempfile::tempdir().unwrap();
+        let destination = temporary.path().join("downloads");
+        std::fs::create_dir(&destination).unwrap();
+        let record = temporary.path().join("state").join("destination.json");
+        let store = DestinationStore::new_for_test(record.clone());
+        store.validate_and_bind(&destination).unwrap();
+
+        let mut stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        let anchor = stored["identity"]["birthtimeNanos"].as_u64().unwrap();
+        stored["identity"]["birthtimeNanos"] = serde_json::json!(anchor + 1_000_000);
+        std::fs::write(&record, serde_json::to_vec(&stored).unwrap()).unwrap();
+
+        let restarted = DestinationStore::new_for_test(record);
+        assert_eq!(
+            restarted.restore().unwrap_err().code,
             "destination_root_replaced"
         );
     }

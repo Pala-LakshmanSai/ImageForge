@@ -22,7 +22,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { batchCounts } from '../domain/reducer';
-import { podPowerAction, type BatchPrompt, type BatchState } from '../domain/types';
+import { podPowerAction, TERMINAL_BATCH_PHASES, type BatchPrompt, type BatchState } from '../domain/types';
 import { aspectRatioOption } from '../domain/aspectRatio';
 import { ACTIVE_PROMPT_VISIBLE_ROW_LIMIT, isQueuePlaceholder } from '../domain/queue';
 import { SimulatedImage } from '../components/SimulatedImage';
@@ -336,7 +336,11 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
   const canResolveInterrupted = isInterrupted && canManage;
   const exactPodAttached = podPowerAction(state.pod) === 'stop';
   const canResumeInterrupted = canResolveInterrupted && state.pod.phase === 'ready' && exactPodAttached;
-  const settled = ['complete', 'partial_failure', 'cancelled'].includes(batch.phase);
+  // Every terminal phase is settled, including the attention state a batch
+  // lands in when its generated frames never reached this device. Without
+  // `error` here a batch that finished on the GPU but saved nothing offered
+  // neither Export CSV nor New brief, so the only way out was stopping the GPU.
+  const settled = TERMINAL_BATCH_PHASES.includes(batch.phase);
   const displayedPhase = isLocked ? (batch.remoteState ?? batch.phase) : batch.phase;
   const status = batchStatus(
     batch.phase,
@@ -434,7 +438,7 @@ export function ProgressScreen({ state, dispatch, adapter }: ScreenProps) {
       {isInterrupted ? (
         <aside className="state-banner state-banner--warning" role="status">
           <WifiOff size={21} />
-          <div><strong>Generation was interrupted safely</strong><span>Images already saved remain complete. {canResolveInterrupted ? (canResumeInterrupted ? 'Resume from the first unfinished prompt or cancel the batch.' : state.pod.phase === 'ready' ? 'The exact GPU identity is unavailable. Refresh status or cancel the batch.' : 'Restart a GPU, then resume from the first unfinished prompt—or cancel the batch now.') : `${batch.owner} must resume or cancel this batch.`}</span></div>
+          <div><strong>Generation was interrupted safely</strong><span>Images already saved remain complete. {canResolveInterrupted ? (canResumeInterrupted ? 'Resume from the first unfinished prompt or cancel the batch.' : state.pod.phase === 'ready' ? 'The exact GPU identity is unavailable. Refresh status or cancel the batch.' : 'The batch stays reserved on the shared worker until it is resumed or cancelled, and both need a running GPU. Start one to finish or release this batch.') : `${batch.owner} must resume or cancel this batch.`}</span></div>
         </aside>
       ) : null}
       {isError ? (

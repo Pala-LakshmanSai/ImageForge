@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { RunPodSnapshot } from '@imageforge/runpod-client';
 import { createInitialState } from '../domain/reducer';
+import { TERMINAL_BATCH_PHASES } from '../domain/types';
 import { parseWorkerManifest, parseWorkerStatus } from './workerContracts';
 import { projectBusyBatch, projectOwnedManifest, projectPodSnapshot } from './runtimeProjection';
 
@@ -149,7 +150,7 @@ describe('production runtime projection', () => {
     const manifest = workerManifest('ready');
     const none = projectOwnedManifest(manifest, [], {
       name: 'History Brief', destination: '/safe/folder', estimatedSecondsPerImage: 8.4, hourlyRate: 0.5,
-    }, Date.parse('2026-08-02T10:01:00.000Z'));
+    }, Date.parse('2026-08-01T10:01:00.000Z'));
     expect(none.assets).toEqual([]);
     expect(none.batch.phase).toBe('running');
     expect(none.batch.prompts[0].status).toBe('ready');
@@ -161,14 +162,14 @@ describe('production runtime projection', () => {
     } as const;
     const awaitingAcknowledgement = projectOwnedManifest(manifest, [localReceipt], {
       name: 'History Brief', destination: '/safe/folder', estimatedSecondsPerImage: 8.4, hourlyRate: 0.5,
-    }, Date.parse('2026-08-02T10:01:00.000Z'));
+    }, Date.parse('2026-08-01T10:01:00.000Z'));
     expect(awaitingAcknowledgement.assets).toHaveLength(1);
     expect(awaitingAcknowledgement.batch.phase).toBe('running');
     expect(awaitingAcknowledgement.batch.statusMessage).toBe('Saving completed images · 1 of 1 verified locally');
 
     const verified = projectOwnedManifest(workerManifest('downloaded'), [localReceipt], {
       name: 'History Brief', destination: '/safe/folder', estimatedSecondsPerImage: 8.4, hourlyRate: 0.5,
-    }, Date.parse('2026-08-02T10:01:00.000Z'));
+    }, Date.parse('2026-08-01T10:01:00.000Z'));
     expect(verified.assets).toHaveLength(1);
     expect(verified.batch.phase).toBe('complete');
     expect(verified.batch.prompts.filter((prompt) => prompt.status === 'downloaded')).toHaveLength(1);
@@ -201,6 +202,56 @@ describe('production runtime projection', () => {
     expect(stalled.batch.phase).toBe('complete');
     // The artifact is missing, not silently invented: it never becomes an asset.
     expect(stalled.assets).toEqual([]);
+  });
+
+  it('settles a finished batch whose unacknowledged frames cannot be saved to this device', () => {
+    // The live trap: every frame is generated (`ready`) and none can be saved,
+    // because the device cannot write the downloads folder. Nothing in the
+    // worker manifest will change again, so time is the only honest input —
+    // the same reasoning that bounded an acknowledged-but-missing download.
+    // While the phase held, Cancel was refused as already completed, the
+    // folder chooser stayed locked behind the active batch, and no new brief
+    // could start: the app was wedged with no way out but stopping the GPU.
+    const manifest = workerManifest('ready');
+    const context = {
+      name: 'History Brief', destination: '/safe/folder', estimatedSecondsPerImage: 8.4, hourlyRate: 0.5,
+    };
+
+    const saving = projectOwnedManifest(manifest, [], context, Date.parse('2026-08-01T10:01:30.000Z'));
+    expect(saving.batch.phase).toBe('running');
+    expect(saving.batch.statusMessage).toBe('Saving completed images · 0 of 1 verified locally');
+
+    const settled = projectOwnedManifest(manifest, [], context, Date.parse('2026-08-01T10:05:00.000Z'));
+    // Never a success phase: nothing was saved, so "All 1 images saved" would
+    // be a lie, and the attention state is the one the folder problem explains.
+    expect(settled.batch.phase).toBe('error');
+    expect(TERMINAL_BATCH_PHASES).toContain(settled.batch.phase);
+    expect(settled.batch.statusMessage).toBe('Saving stopped · 0 of 1 generated images are on this device');
+    expect(settled.assets).toEqual([]);
+    // The frames stay truthfully retryable: the worker still holds them.
+    expect(settled.batch.prompts.map((prompt) => prompt.status)).toEqual(['ready']);
+  });
+
+  it('keeps holding a finished batch while local saving is still landing', () => {
+    // A slow but working download must never be mistaken for a stalled one.
+    const manifest = workerManifest('ready');
+    const context = {
+      name: 'History Brief', destination: '/safe/folder', estimatedSecondsPerImage: 8.4, hourlyRate: 0.5,
+    };
+    const landed = projectOwnedManifest(manifest, [], context, Date.parse('2026-08-01T10:05:00.000Z'));
+    expect(landed.batch.phase).toBe('error');
+
+    const stillLanded = projectOwnedManifest(manifest, [{
+      schemaVersion: 1,
+      batchId,
+      index: 1,
+      filename: `batches/${batchId}/000001.jpg`,
+      sha256: 'a'.repeat(64),
+      sizeBytes: 2_048,
+      verifiedAtUnixMs: Date.parse('2026-08-01T10:04:30.000Z'),
+    }], context, Date.parse('2026-08-01T10:05:00.000Z'));
+    // A fresh receipt proves saving is alive, so the phase returns to saving.
+    expect(stillLanded.batch.phase).toBe('running');
   });
 
   it('delays partial failure until every successful artifact has a matching local receipt', () => {
@@ -245,7 +296,10 @@ describe('production runtime projection', () => {
       verifiedAtUnixMs: 1,
     };
 
-    const saving = projectOwnedManifest(workerManifest('ready', 'cancelled'), [], context);
+    // Time is a real input to this projection, so this states its clock: the
+    // subject here is the receipt/acknowledgement ordering, not the window.
+    const windowStart = Date.parse('2026-08-01T10:01:30.000Z');
+    const saving = projectOwnedManifest(workerManifest('ready', 'cancelled'), [], context, windowStart);
     expect(saving.batch.phase).toBe('running');
     expect(saving.batch.statusMessage).toBe('Saving completed images · 0 of 1 verified locally');
 
@@ -253,12 +307,21 @@ describe('production runtime projection', () => {
       workerManifest('ready', 'cancelled'),
       [receipt],
       context,
+      windowStart,
     );
     expect(awaitingAcknowledgement.batch.phase).toBe('running');
 
-    const settled = projectOwnedManifest(workerManifest('downloaded', 'cancelled'), [receipt], context);
+    const settled = projectOwnedManifest(workerManifest('downloaded', 'cancelled'), [receipt], context, windowStart);
     expect(settled.batch.phase).toBe('cancelled');
     expect(settled.assets).toHaveLength(1);
+
+    // A cancelled batch whose frames never arrived settles the same way, and
+    // never claims the missing frames were saved.
+    const abandoned = projectOwnedManifest(
+      workerManifest('ready', 'cancelled'), [], context, Date.parse('2026-08-01T10:05:00.000Z'),
+    );
+    expect(abandoned.batch.phase).toBe('cancelled');
+    expect(abandoned.batch.statusMessage).toBe('Cancelled · 0 completed downloads kept');
   });
 
   it('projects a foreign batch as progress-only with no prompts or destination disclosure', () => {

@@ -12,9 +12,16 @@ description: Prepare, build, package, and verify ImageForge beta releases for ma
 4. Build macOS on macOS and Windows on a Windows runner unless a documented
    cross-build is being evaluated separately.
 5. Install the artifact on a clean user profile and run the offline/fake-worker
-   smoke flow before marking it usable.
-6. Record version, commit, OS, architecture, hashes, signing/notarization state,
+   smoke flow before marking it usable. Quit the running app before replacing
+   `/Applications/ImageForge.app`: the queue runner holds a process lock, and a
+   bundle swapped under a live process keeps the old binary in memory.
+6. Expect one macOS keychain prompt after an ad-hoc reinstall ("ImageForge wants
+   to use your confidential information stored in 'imageforge.desktop'"): the
+   login keychain's approval is bound to the previous signature, so the user has
+   to answer **Always Allow** once. The prompt gates neither startup nor the
+   downloads folder, so the app is verifiable before it is answered.
+7. Record version, commit, OS, architecture, hashes, signing/notarization state,
    warnings, and exact smoke results.
-7. Never describe an unsigned build as warning-free or production-signed.
+8. Never describe an unsigned build as warning-free or production-signed.
 
 Do not upload or publish artifacts without explicit user authorization.

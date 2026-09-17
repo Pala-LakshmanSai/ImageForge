@@ -115,28 +115,43 @@ function imageStatus(image: WorkerImageRecord, local: LocalDownloadReceipt | und
   return image.status;
 }
 
-function batchPhase(state: WorkerBatchState, failed: number, savingSuccessfulArtifacts: boolean): BatchPhase {
-  if (savingSuccessfulArtifacts && ['completed', 'failed', 'cancelled'].includes(state)) return 'running';
+function batchPhase(
+  state: WorkerBatchState,
+  failed: number,
+  savingInProgress: boolean,
+  neverSavedArtifacts: number,
+): BatchPhase {
+  if (savingInProgress && ['completed', 'failed', 'cancelled'].includes(state)) return 'running';
   switch (state) {
     case 'running': return 'running';
     case 'paused': return 'paused';
     case 'cancelled': return 'cancelled';
     case 'interrupted': return 'interrupted';
     case 'failed': return failed > 0 ? 'partial_failure' : 'error';
-    case 'completed': return failed > 0 ? 'partial_failure' : 'complete';
+    // A finished batch whose generated frames never reached this device is not
+    // a success. Reporting `complete` here would render "All 24 images saved"
+    // over an empty folder, so the batch stays in the one phase that asks the
+    // user to look. A frame the worker already acknowledged is different: it
+    // was verified here once, and its missing file was removed afterwards.
+    case 'completed': return neverSavedArtifacts > 0 ? 'error' : failed > 0 ? 'partial_failure' : 'complete';
   }
 }
 
 function statusMessage(
   manifest: WorkerManifest,
   phase: BatchPhase,
-  savingSuccessfulArtifacts: boolean,
+  savingInProgress: boolean,
   locallyVerified: number,
+  neverSavedArtifacts: number,
 ): string {
   const { progress } = manifest;
-  if (savingSuccessfulArtifacts) {
+  if (savingInProgress) {
     const successful = manifest.images.filter((image) => ['ready', 'downloaded'].includes(image.status)).length;
     return `Saving completed images · ${locallyVerified} of ${successful} verified locally`;
+  }
+  if (neverSavedArtifacts > 0 && ['completed', 'failed'].includes(manifest.state)) {
+    const successful = manifest.images.filter((image) => ['ready', 'downloaded'].includes(image.status)).length;
+    return `Saving stopped · ${locallyVerified} of ${successful} generated images are on this device`;
   }
   if (phase === 'running') {
     const current = progress.currentIndex ?? Math.min(progress.processed + 1, progress.total);
@@ -182,25 +197,37 @@ export function projectOwnedManifest(
     Date.parse(manifest.updatedAt),
   );
   const savingStalled = nowUnixMs - lastLocalProgressAt > SAVING_STALL_MS;
-  const savingSuccessfulArtifacts = ['completed', 'failed', 'cancelled'].includes(manifest.state) && manifest.images.some((image) => {
-    if (!['ready', 'downloaded'].includes(image.status)) return false;
-    // The native receipt is durable before its worker acknowledgement. Keep a
-    // terminal worker manifest in the truthful saving phase until both halves
-    // of that handshake are visible: the verified local file and the worker's
-    // authoritative `downloaded` state.
-    //
-    // An image the worker still reports as `ready` has not been acknowledged,
-    // so its remote copy is still guaranteed and the download can still
-    // complete. Once acknowledged, the worker may delete its copy, so a local
-    // file that never arrives can only be waited on for so long: past the
-    // stall window there is nothing left to wait for, and holding the batch
-    // running would block Cancel, Stop, and every future batch.
-    if (image.status !== 'downloaded') return true;
+  const successfulArtifacts = manifest.images.filter((image) => ['ready', 'downloaded'].includes(image.status));
+  const locallySaved = (image: WorkerManifest['images'][number]): boolean => {
     const local = receiptByIndex.get(image.index);
-    const unsaved = local?.sha256 !== image.sha256 || local?.sizeBytes !== image.sizeBytes;
-    return unsaved && !savingStalled;
-  });
-  const phase = batchPhase(manifest.state, manifest.progress.failed, savingSuccessfulArtifacts);
+    return local?.sha256 === image.sha256 && local.sizeBytes === image.sizeBytes;
+  };
+  // What still needs work: an unacknowledged frame (the receipt is durable
+  // before the worker acknowledgement, so a verified local file is not proof
+  // on its own) or an acknowledged frame whose bytes never arrived here.
+  const outstandingArtifacts = successfulArtifacts.filter((image) => image.status === 'ready' || !locallySaved(image));
+  // What this device genuinely never saved: the worker still holds the frame,
+  // and no verified local file exists. Those are the frames a finished batch
+  // must not report as a success.
+  const neverSavedArtifacts = successfulArtifacts.filter((image) => image.status === 'ready' && !locallySaved(image));
+  // A batch may only claim to be saving while saving can still make progress.
+  // Once the worker's manifest is terminal no new frame will ever be produced,
+  // so the only thing left to wait for is the local write — and a device-local
+  // failure (an unwritable or stale downloads folder, a full disk) never lands
+  // a receipt. Waiting forever on it is what trapped a finished batch as
+  // permanently running: Cancel was refused by the worker as already
+  // completed, the folder chooser stayed locked behind the active batch, and
+  // no new brief could start until the GPU was stopped by hand.
+  //
+  // "Not written yet" and "cannot be written" look identical in one manifest
+  // snapshot, so the difference is time, measured from the newest local
+  // receipt (falling back to the worker's last manifest update). Receipts keep
+  // landing while saving is alive, whether the frame is still awaiting worker
+  // acknowledgement or the worker already confirmed the download.
+  const savingInProgress = ['completed', 'failed', 'cancelled'].includes(manifest.state)
+    && outstandingArtifacts.length > 0
+    && !savingStalled;
+  const phase = batchPhase(manifest.state, manifest.progress.failed, savingInProgress, neverSavedArtifacts.length);
   const started = Date.parse(manifest.createdAt);
   const terminalAt = ['complete', 'partial_failure', 'cancelled', 'interrupted', 'error'].includes(phase)
     ? Date.parse(manifest.completedAt ?? manifest.updatedAt)
@@ -229,7 +256,7 @@ export function projectOwnedManifest(
     estimatedSecondsPerImage,
     estimatedCost,
     lockMessage: null,
-    statusMessage: statusMessage(manifest, phase, savingSuccessfulArtifacts, locallyVerified),
+    statusMessage: statusMessage(manifest, phase, savingInProgress, locallyVerified, neverSavedArtifacts.length),
     aspectRatio: aspectRatioFromDimensions(manifest.settings.width, manifest.settings.height),
   };
   const assets = prompts.flatMap((prompt): LibraryAsset[] => {

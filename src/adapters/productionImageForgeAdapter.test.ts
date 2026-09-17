@@ -1370,6 +1370,89 @@ describe('production ImageForge adapter', () => {
     expect(events.some((event) => event.type === 'error')).toBe(false);
   });
 
+  it('settles a finished batch whose frames cannot be saved instead of holding a fake running state', async () => {
+    // The live wedge, end to end. Every frame is generated, none can be
+    // written to this device (the downloads-folder binding went stale when
+    // macOS renumbered the volume), and the worker has already finished. While
+    // the projection held `running` forever, the card froze at "Saving image 1
+    // of 24", Cancel came back as "Cannot cancel a batch in the completed
+    // state", the folder chooser stayed locked behind the active batch, and no
+    // new brief could start — the only way out was stopping the GPU by hand.
+    const unsaved = {
+      ...manifest(),
+      images: [{
+        ...manifest().images[0],
+        status: 'ready' as const,
+        receipt: null,
+      }],
+      progress: { total: 1, completed: 1, downloaded: 0, failed: 0, cancelled: 0, processed: 1, current_index: null },
+    };
+    const downloadArtifact = vi.fn(async () => {
+      throw {
+        code: 'destination_root_replaced',
+        message: 'The selected downloads folder changed and must be chosen again.',
+        retryable: false,
+      };
+    });
+    const native = port({
+      status: vi.fn(async () => ({
+        status: 200,
+        body: {
+          schema_version: 1,
+          ready: true,
+          active_batch: {
+            batch_id: batchId,
+            owner: { user_id: 'lakshman', display_name: 'Lakshman' },
+            state: 'running',
+            progress: unsaved.progress,
+            pause_requested: false,
+            cancel_requested: false,
+          },
+          permissions: { can_create: false, can_manage_active: true, is_owner: true, create_block_reason: null },
+        },
+      })),
+      getBatch: vi.fn(async () => ({ status: 200, body: unsaved })),
+      // No local file ever landed: this device cannot write the folder.
+      readReceipts: vi.fn(async () => []),
+      downloadArtifact,
+    });
+    const adapter = createProductionImageForgeAdapter(native, batchId, 'Atlas of Quiet Work');
+    const events: ProductionRuntimeEvent[] = [];
+    adapter.runtime!.subscribe((event) => events.push(event));
+
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-08-01T10:01:30.000Z'));
+      await adapter.runtime!.pollBatch(createConfiguredInitialState());
+
+      expect(events.filter((event) => event.type === 'batch').at(-1)).toMatchObject({
+        type: 'batch',
+        batch: { phase: 'running', statusMessage: 'Saving completed images · 0 of 1 verified locally' },
+      });
+      expect(events.some((event) => event.type === 'local-error')).toBe(true);
+
+      // Past the stall window the batch must stop pretending: nothing will ever
+      // land, and the phase has to hand the user an action back.
+      vi.setSystemTime(new Date('2026-08-01T10:05:00.000Z'));
+      await adapter.runtime!.pollBatch(createConfiguredInitialState());
+
+      const settled = events.filter((event) => event.type === 'batch').at(-1);
+      expect(settled).toMatchObject({
+        type: 'batch',
+        batch: {
+          phase: 'error',
+          statusMessage: 'Saving stopped · 0 of 1 generated images are on this device',
+        },
+      });
+      // The frames stay honestly retryable — the worker still holds them — and
+      // nothing was invented as a saved asset.
+      expect(settled).toMatchObject({ assets: [] });
+      expect(settled?.type === 'batch' && settled.batch.prompts[0].status).toBe('ready');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('projects owned worker truth before a pending local recovery operation settles', async () => {
     const recovery = deferred<{ schemaVersion: 1; batchId: string; receipts: [] }>();
     const reconcileReceipts = vi.fn(() => recovery.promise);
