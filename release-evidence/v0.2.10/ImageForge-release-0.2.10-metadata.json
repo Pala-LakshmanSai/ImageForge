@@ -1,0 +1,60 @@
+{
+  "product": "ImageForge",
+  "version": "0.2.10",
+  "commit": "a2750e4e35b28d7114dd6e210e8bab70bc801ad2",
+  "tag": "v0.2.10",
+  "release": "https://github.com/Pala-LakshmanSai/ImageForge/releases/tag/v0.2.10",
+  "ci_run": "https://github.com/Pala-LakshmanSai/ImageForge/actions/runs/35195820562",
+  "ci_conclusion": "success (both jobs green, including both Task 014 selector performance gates)",
+  "os": "macOS (CI) and Windows x64 (CI)",
+  "artifacts": [
+    {
+      "name": "ImageForge_0.2.10_aarch64.dmg",
+      "bytes": 8486295,
+      "sha256": "fd2694d06068372381f714996d677ec2a209efd8aeac9d3a4a0274aaba68415c",
+      "core_binary_sha256": "2aa5a512472cbe2633f59b0a42319964dae062c732d700471b1f4abd81fbf0b8",
+      "signing": "ad-hoc signed beta",
+      "notarization": "not notarized"
+    },
+    {
+      "name": "ImageForge_0.2.10_x64-setup.exe",
+      "bytes": 5464398,
+      "sha256": "ed6678366f4ae67103d06dfa42d2de39067dd99bfb0a59de0eed4eb9b1a742af",
+      "signing": "unsigned NSIS installer"
+    }
+  ],
+  "change": "A batch whose frames were generated but could not be saved to this device no longer holds the app in a fake running state. The downloads-folder identity is anchored on the folder's inode and creation time (which survive the device renumbering macOS performs on every boot) and a stale record is repaired in place; the saving stall window now covers every outstanding frame, so a finished batch settles into an attention state instead of freezing at \"Saving image 1 of 24\".",
+  "local_verification": {
+    "frontend_tests": "428 passed (35 files)",
+    "typecheck": "tsc -b clean",
+    "frontend_build": "vite production build clean",
+    "rust_tests": "cargo test --release on the release commit: 278 passed, 0 failed, 2 ignored",
+    "new_tests": [
+      "native::destination::tests::a_renumbered_volume_device_still_restores_and_repairs_the_record",
+      "native::destination::tests::a_creation_time_anchor_mismatch_rejects_the_restored_root",
+      "native::destination::tests::a_record_that_cannot_be_repaired_still_binds_the_folder_it_proved",
+      "runtimeProjection: settles a finished batch whose unacknowledged frames cannot be saved to this device",
+      "runtimeProjection: keeps holding a finished batch while local saving is still landing",
+      "production runtime: settles a finished batch whose frames cannot be saved instead of holding a fake running state"
+    ]
+  },
+  "published_artifact_install": {
+    "host": "macOS 26.3 (25D125), Apple M4",
+    "path": "/Applications/ImageForge.app",
+    "source": "the published DMG mounted, signature-verified, copied with ditto",
+    "version": "0.2.10",
+    "core_binary_sha256": "2aa5a512472cbe2633f59b0a42319964dae062c732d700471b1f4abd81fbf0b8",
+    "codesign": "codesign --verify --deep --strict passed",
+    "launch": "launched and running with no native error, panic, or worker_timeout lines in the unified log",
+    "destination_repair": {
+      "before": "{\"schemaVersion\":1,\"path\":\"/Users/lakshmansai/Downloads\",\"identity\":{\"device\":16777233,\"inode\":281359}}",
+      "after": "{\"schemaVersion\":1,\"path\":\"/Users/lakshmansai/Downloads\",\"identity\":{\"device\":16777229,\"inode\":281359,\"birthtimeNanos\":1752903365972410354}}",
+      "note": "The folder is live at device=16777229 inode=281359; older builds rejected it as replaced and refused every save."
+    }
+  },
+  "warnings": [
+    "macOS artifacts are ad-hoc signed and not notarized; the Windows installer is unsigned.",
+    "One macOS keychain prompt follows an ad-hoc install: the login keychain approval is bound to the previous signature, so the user answers Always Allow once.",
+    "A live paid GPU batch was not run for this release; both fixes are covered by the tests above and the destination repair is verified against the real folder."
+  ]
+}
