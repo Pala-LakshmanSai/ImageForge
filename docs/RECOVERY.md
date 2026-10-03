@@ -3,30 +3,89 @@
 The source of truth is the private GitHub repository:
 `https://github.com/Pala-LakshmanSai/ImageForge`
 
+## Restore after USB cleanup
+
+The repository contains the editable React/TypeScript desktop UI, Tauri/Rust
+host, Python worker, API contracts, tests, documentation, dependency lockfiles,
+and build workflows. Clone `main` to continue development. For everyday use,
+install the macOS or Windows asset from the latest
+[GitHub Release](https://github.com/Pala-LakshmanSai/ImageForge/releases/latest).
+
+The 2026-10-03 USB cleanup also preserves historical local source branches in
+the `ImageForge-source-history-2026-10-03.tar.gz` asset on release `v0.2.10`.
+That archive contains self-contained Git bundles for ImageForge and the local
+worker publisher checkouts, plus a source revision manifest and restore guide.
+It is an additional source-history archive; normal development uses `main`.
+
+```sh
+gh release download v0.2.10 --repo Pala-LakshmanSai/ImageForge \
+  --pattern 'ImageForge-source-history-2026-10-03.tar.gz'
+tar -xzf ImageForge-source-history-2026-10-03.tar.gz
+git clone ImageForge-source-history-2026-10-03/ImageForge.bundle ImageForge-history
+```
+
+Build outputs, `node_modules`, virtual environments, Rust toolchains/targets,
+package caches, downloaded model weights, generated images, device manifests,
+and credentials are not needed to clone or edit the source and are not uploaded
+to GitHub. Reinstall dependencies from the checked-in lockfiles. Credentials
+remain in the operating-system vault and must be supplied again on a replacement
+computer. Choose an existing or new downloads folder when reconnecting the app;
+the deleted USB destination is no longer available.
+
+Use Node.js 22 and npm for the frontend. Native development also needs Rust and
+the platform build tools: Xcode command-line tools on macOS, or Visual Studio
+C++ Build Tools and WebView2 on Windows. Python 3.11 is needed only when working
+on the Python worker; running the installed desktop app does not need Python.
+Keep fresh source/build caches on your chosen development disk. Do not depend
+on the removed USB caches or download GPU model weights to the Mac.
+
 ## macOS
 
 ```sh
 git clone https://github.com/Pala-LakshmanSai/ImageForge.git
 cd ImageForge
+npm ci --prefix packages/runpod-client
 npm ci
-python3.11 -m venv worker/.venv
-worker/.venv/bin/pip install -e 'worker[test]'
 npm run typecheck
 npm test -- --run --pool=forks --maxWorkers=1
+npm run build
+# Preview the frontend, or run the native app with Rust/platform tools installed:
+npm run dev
+# npm run tauri:dev
 ```
 
 Build caches can live on an external disk by sourcing
-`scripts/use-usb-toolchain.sh`; the app itself does not depend on that disk.
+`scripts/use-usb-toolchain.sh` at its documented `/Volumes/ESD-USB/ImageForge`
+location. For a different development disk, set `RUSTUP_HOME`, `CARGO_HOME`,
+`CARGO_TARGET_DIR`, `npm_config_cache`, and `PIP_CACHE_DIR` to that disk instead;
+the app itself does not depend on the development disk.
+
+Optional worker development, without GPU dependencies or model downloads:
+
+```sh
+python3.11 -m venv worker/.venv
+worker/.venv/bin/python -m pip install -e 'worker[test]'
+worker/.venv/bin/python -m pytest worker/tests -m 'not real_gpu'
+```
 
 ## Windows
 
 ```powershell
 git clone https://github.com/Pala-LakshmanSai/ImageForge.git
 cd ImageForge
+npm ci --prefix packages/runpod-client
 npm ci
 npm run typecheck
 npm test -- --run --pool=forks --maxWorkers=1
+npm run build
+npm run tauri:dev
 ```
+
+Before Windows typecheck/build, perform the two native companion installation
+steps named **Install Windows TypeScript compiler companion** and **Install
+Windows lightningcss native binary** in `.github/workflows/build-desktop.yml`.
+The macOS-authored lockfile omits those Windows packages; the workflow records
+the exact versions and PowerShell commands used for the published installer.
 
 Use the latest GitHub Release installer for a normal user install. The native
 app stores RunPod credentials in the operating-system vault; credentials are
