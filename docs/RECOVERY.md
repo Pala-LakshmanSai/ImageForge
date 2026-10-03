@@ -81,11 +81,11 @@ npm run build
 npm run tauri:dev
 ```
 
-Before Windows typecheck/build, perform the two native companion installation
-steps named **Install Windows TypeScript compiler companion** and **Install
-Windows lightningcss native binary** in `.github/workflows/build-desktop.yml`.
-The macOS-authored lockfile omits those Windows packages; the workflow records
-the exact versions and PowerShell commands used for the published installer.
+The lockfile includes TypeScript and lightningcss native packages for each
+supported platform. `npm ci` installs the matching platform packages without
+changing dependency versions. The two native companion installation steps in
+`.github/workflows/build-desktop.yml` remain available for older revisions whose
+macOS-authored lockfiles omitted the Windows packages.
 
 Use the latest GitHub Release installer for a normal user install. The native
 app stores RunPod credentials in the operating-system vault; credentials are
